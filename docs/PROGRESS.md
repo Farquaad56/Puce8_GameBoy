@@ -1,6 +1,6 @@
 # PROGRESS.md
 
-Current sub-task: E00.02
+Current sub-task: E00.03
 
 | Etape | Titre | Sous-taches | Statut |
 |---|---|---|---|
