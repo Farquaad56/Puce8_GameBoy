@@ -1,0 +1,4 @@
+[package]
+name = "puce8gb-core"
+version.workspace = true
+edition.workspace = true
