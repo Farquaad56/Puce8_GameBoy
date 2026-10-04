@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="fr" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Puce8 GameBoy - Tableau de bord</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  @keyframes pulse-ring { 0%,100% { box-shadow: 0 0 0 0 rgba(56,189,248,.5);} 50% { box-shadow: 0 0 0 6px rgba(56,189,248,0);} }
+  .ring-pulse { animation: pulse-ring 1.8s infinite; }
+</style>
+</head>
+<body class="bg-slate-950 text-slate-200 min-h-screen antialiased">
+<div class="max-w-7xl mx-auto px-4 py-6 space-y-6">
+
+  <header class="flex flex-wrap items-center justify-between gap-3">
+    <div>
+      <h1 class="text-2xl font-bold tracking-tight text-white">Puce8 GameBoy <span class="text-slate-500 font-normal">/ suivi du projet</span></h1>
+      <p class="text-sm text-slate-400">Emulateur DMG (SM83) cycle accurate - Rust, eframe/egui</p>
+    </div>
+    <div class="flex items-center gap-3">
+      <span id="conn" class="inline-flex items-center gap-2 text-xs text-slate-400"><span id="conn-dot" class="h-2 w-2 rounded-full bg-slate-600"></span><span id="conn-txt">connexion...</span></span>
+      <span id="state-badge" class="px-3 py-1 rounded-full text-sm font-semibold bg-slate-800 text-slate-300">-</span>
+    </div>
+  </header>
+
+  <section class="grid gap-4 lg:grid-cols-3">
+    <div class="lg:col-span-2 rounded-2xl bg-slate-900 border border-slate-800 p-5">
+      <div class="flex items-end justify-between mb-3">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400">Avancement global</h2>
+        <div class="text-right"><span id="pct" class="text-4xl font-bold text-white">0%</span><span id="count" class="ml-2 text-slate-400 text-sm"></span></div>
+      </div>
+      <div class="h-4 rounded-full bg-slate-800 overflow-hidden"><div id="bar" class="h-full rounded-full bg-gradient-to-r from-emerald-500 to-sky-400 transition-all duration-700" style="width:0%"></div></div>
+      <div class="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
+        <div class="rounded-xl bg-slate-800/60 p-3"><div id="k-eta" class="text-lg font-semibold text-white">-</div><div class="text-xs text-slate-400">temps restant estime</div></div>
+        <div class="rounded-xl bg-slate-800/60 p-3"><div id="k-pace" class="text-lg font-semibold text-white">-</div><div class="text-xs text-slate-400">duree mediane / tache</div></div>
+        <div class="rounded-xl bg-slate-800/60 p-3"><div id="k-notes" class="text-lg font-semibold text-white">-</div><div class="text-xs text-slate-400">notes (UNKNOWN)</div></div>
+        <div class="rounded-xl bg-slate-800/60 p-3"><div id="k-base" class="text-lg font-semibold text-white">-</div><div class="text-xs text-slate-400">baseline test ROMs</div></div>
+      </div>
+    </div>
+
+    <div id="current-card" class="rounded-2xl bg-slate-900 border border-slate-800 p-5">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400 mb-3">Tache courante</h2>
+      <div id="cur-id" class="text-3xl font-bold text-sky-300">-</div>
+      <div id="cur-title" class="mt-1 text-slate-200">-</div>
+      <div class="mt-3 flex flex-wrap gap-2 text-xs" id="cur-tags"></div>
+      <div class="mt-4 space-y-3">
+        <div><div class="flex justify-between text-xs text-slate-400 mb-1"><span>checks rates</span><span id="fail-txt">0/5</span></div><div class="h-2 rounded-full bg-slate-800 overflow-hidden"><div id="fail-bar" class="h-full bg-rose-500 transition-all" style="width:0%"></div></div></div>
+        <div><div class="flex justify-between text-xs text-slate-400 mb-1"><span>sessions</span><span id="sess-txt">0/4</span></div><div class="h-2 rounded-full bg-slate-800 overflow-hidden"><div id="sess-bar" class="h-full bg-amber-400 transition-all" style="width:0%"></div></div></div>
+      </div>
+      <div id="gate-box" class="hidden mt-4 rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">
+        <div class="font-semibold">GATE en attente : <span id="gate-id"></span></div>
+        <div class="mt-1 text-amber-200/80">Le pipeline est a l'arret. Dans un terminal :</div>
+        <code class="mt-2 block rounded bg-slate-950 px-2 py-1 text-xs text-amber-100">python3 docs/tools/task.py approve</code>
+        <code class="mt-1 block rounded bg-slate-950 px-2 py-1 text-xs text-amber-100">python3 docs/tools/task.py reopen</code>
+      </div>
+      <div id="block-box" class="hidden mt-4 rounded-xl border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-200">
+        <div class="font-semibold">Tache bloquee</div>
+        <div class="mt-1 text-rose-200/80">Voir les questions ouvertes, puis :</div>
+        <code class="mt-2 block rounded bg-slate-950 px-2 py-1 text-xs text-rose-100">python3 docs/tools/task.py unblock</code>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400 mb-3">Phases</h2>
+    <div id="phases" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"></div>
+  </section>
+
+  <section class="grid gap-4 lg:grid-cols-3">
+    <div class="lg:col-span-2 rounded-2xl bg-slate-900 border border-slate-800 p-5">
+      <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400">Sous-taches</h2>
+        <div id="filters" class="flex gap-1 text-xs"></div>
+      </div>
+      <div class="overflow-x-auto max-h-[28rem] overflow-y-auto rounded-lg">
+        <table class="w-full text-sm">
+          <thead class="sticky top-0 bg-slate-900 text-left text-xs uppercase text-slate-500"><tr><th class="py-2 pr-3">Id</th><th class="pr-3">Role</th><th class="pr-3">Titre</th><th>Statut</th></tr></thead>
+          <tbody id="rows" class="divide-y divide-slate-800"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="space-y-4">
+      <div class="rounded-2xl bg-slate-900 border border-slate-800 p-5">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400 mb-3">Decisions d'architecture</h2>
+        <div id="decisions" class="flex flex-wrap gap-2"></div>
+      </div>
+      <div class="rounded-2xl bg-slate-900 border border-slate-800 p-5">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400 mb-3">Derniers commits</h2>
+        <ul id="commits" class="space-y-2 text-sm"></ul>
+      </div>
+      <div class="rounded-2xl bg-slate-900 border border-slate-800 p-5">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400 mb-3">Questions ouvertes <span id="oq-count" class="ml-1 text-slate-500 normal-case"></span></h2>
+        <ul id="oq" class="space-y-2 text-sm text-slate-300 max-h-64 overflow-y-auto"></ul>
+      </div>
+    </div>
+  </section>
+
+  <footer class="text-center text-xs text-slate-600 pb-4">Actualisation toutes les 2 s - derniere mise a jour du pipeline : <span id="updated">-</span></footer>
+</div>
+
+<script>
+const PHASE_NAMES = {E00:"Workspace", D:"Documentation", A:"Architecture", E01:"Core & bus", E02:"CPU SM83", E03:"Video (PPU)", E04:"Audio (APU)", E05:"Entrees & mappers", E06:"Suite de tests", E07:"Frontend", E08:"Debug", E09:"Save states", FIX:"Corrections"};
+const STATUS_CLS = {DONE:"bg-emerald-500/15 text-emerald-300", TODO:"bg-slate-800 text-slate-400", BLOCKED:"bg-rose-500/20 text-rose-300"};
+const ROLE_CLS = {DOC:"text-violet-300", ARCH:"text-amber-300", CODE:"text-sky-300", TEST:"text-emerald-300"};
+const STATE_CLS = {RUN:"bg-sky-500/20 text-sky-300", GATE:"bg-amber-500/20 text-amber-300", BLOCKED:"bg-rose-500/20 text-rose-300", FINISHED:"bg-emerald-500/20 text-emerald-300"};
+const STATE_TXT = {RUN:"En cours", GATE:"GATE : validation requise", BLOCKED:"Bloque", FINISHED:"Termine"};
+let filter = "ALL", last = null;
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function dur(s) { if (s == null) return "-"; s = Math.round(s); const h = Math.floor(s/3600), m = Math.floor(s%3600/60); return h ? h+" h "+String(m).padStart(2,"0") : (m ? m+" min" : s+" s"); }
+function ago(ts) { const s = Math.max(0, Date.now()/1000 - ts); return s < 60 ? "a l'instant" : s < 3600 ? Math.floor(s/60)+" min" : s < 86400 ? Math.floor(s/3600)+" h" : Math.floor(s/86400)+" j"; }
+
+function render(d) {
+  last = d;
+  const total = d.tasks.length, done = d.tasks.filter(t => t.status === "DONE").length;
+  const pct = total ? Math.round(done*100/total) : 0;
+  $("pct").textContent = pct + "%"; $("count").textContent = done + " / " + total + " taches";
+  $("bar").style.width = pct + "%";
+  const b = $("state-badge"); b.textContent = STATE_TXT[d.state] || d.state; b.className = "px-3 py-1 rounded-full text-sm font-semibold " + (STATE_CLS[d.state] || "");
+  $("k-eta").textContent = d.eta_per_task ? "~ " + dur(d.eta_per_task * (total - done)) : "-";
+  $("k-pace").textContent = dur(d.eta_per_task);
+  $("k-notes").textContent = d.notes.count + " (" + d.notes.unknown + ")";
+  $("k-base").textContent = d.baseline == null ? "-" : d.baseline;
+  $("updated").textContent = d.updated || "-";
+
+  const cur = d.tasks.find(t => t.id === d.current);
+  $("cur-id").textContent = cur ? cur.id : (d.state === "FINISHED" ? "Fini" : "-");
+  $("cur-title").textContent = cur ? cur.title : "";
+  $("cur-tags").innerHTML = cur ? '<span class="px-2 py-0.5 rounded bg-slate-800 '+(ROLE_CLS[cur.role]||"")+'">'+esc(cur.role)+'</span>' + (cur.gate ? '<span class="px-2 py-0.5 rounded bg-amber-500/15 text-amber-300">GATE</span>' : "") : "";
+  $("fail-txt").textContent = d.failures + "/5"; $("fail-bar").style.width = Math.min(100, d.failures*20) + "%";
+  $("sess-txt").textContent = d.sessions + "/4"; $("sess-bar").style.width = Math.min(100, d.sessions*25) + "%";
+  $("gate-box").classList.toggle("hidden", d.state !== "GATE"); $("gate-id").textContent = d.gate_task || "";
+  $("block-box").classList.toggle("hidden", d.state !== "BLOCKED");
+  $("current-card").classList.toggle("ring-pulse", d.state === "RUN");
+
+  const phases = [];
+  d.tasks.forEach(t => { let p = phases.find(x => x.id === t.phase); if (!p) phases.push(p = {id:t.phase, n:0, done:0, cur:false}); p.n++; if (t.status === "DONE") p.done++; if (t.id === d.current) p.cur = true; });
+  $("phases").innerHTML = phases.map(p => {
+    const pc = Math.round(p.done*100/p.n), full = p.done === p.n;
+    return '<div class="rounded-xl bg-slate-900 border '+(p.cur ? "border-sky-500/60" : "border-slate-800")+' p-4">'
+      + '<div class="flex justify-between items-baseline"><span class="font-semibold text-white">'+esc(p.id)+'</span><span class="text-xs '+(full?"text-emerald-300":"text-slate-400")+'">'+p.done+'/'+p.n+'</span></div>'
+      + '<div class="text-xs text-slate-400 mb-2">'+esc(PHASE_NAMES[p.id]||"")+'</div>'
+      + '<div class="h-1.5 rounded-full bg-slate-800 overflow-hidden"><div class="h-full '+(full?"bg-emerald-400":"bg-sky-400")+' transition-all duration-700" style="width:'+pc+'%"></div></div></div>';
+  }).join("");
+
+  const fs = ["ALL","TODO","DONE","BLOCKED"];
+  $("filters").innerHTML = fs.map(f => '<button data-f="'+f+'" class="px-2 py-1 rounded '+(f===filter?"bg-sky-500/20 text-sky-300":"bg-slate-800 text-slate-400 hover:text-slate-200")+'">'+f+'</button>').join("");
+  $("filters").querySelectorAll("button").forEach(btn => btn.onclick = () => { filter = btn.dataset.f; render(last); });
+  $("rows").innerHTML = d.tasks.filter(t => filter === "ALL" || t.status === filter).map(t => {
+    const isCur = t.id === d.current;
+    return '<tr class="'+(isCur?"bg-sky-500/10":"")+'"><td class="py-1.5 pr-3 font-mono text-xs '+(isCur?"text-sky-300":"text-slate-300")+'">'+esc(t.id)+'</td>'
+      + '<td class="pr-3 text-xs '+(ROLE_CLS[t.role]||"")+'">'+esc(t.role)+'</td>'
+      + '<td class="pr-3 text-slate-300">'+esc(t.title)+(t.gate?' <span class="ml-1 text-amber-400 text-xs">GATE</span>':"")+'</td>'
+      + '<td><span class="px-2 py-0.5 rounded text-xs '+(STATUS_CLS[t.status]||STATUS_CLS.TODO)+'">'+esc(t.status)+'</span></td></tr>';
+  }).join("");
+
+  const ids = Object.keys(d.decisions);
+  $("decisions").innerHTML = ids.length ? ids.map(k => '<span class="px-2 py-1 rounded text-xs font-mono '+(d.decisions[k]==="APPROUVE"?"bg-emerald-500/15 text-emerald-300":"bg-amber-500/15 text-amber-300")+'" title="'+esc(d.decisions[k])+'">'+esc(k)+" "+(d.decisions[k]==="APPROUVE"?"ok":"?")+'</span>').join("") : '<span class="text-sm text-slate-500">aucune decision proposee</span>';
+  $("commits").innerHTML = d.commits.length ? d.commits.map(c => '<li class="flex gap-2"><span class="font-mono text-xs text-slate-500">'+esc(c.hash)+'</span><span class="flex-1 text-slate-300 truncate" title="'+esc(c.msg)+'">'+esc(c.msg)+'</span><span class="text-xs text-slate-500 whitespace-nowrap">'+ago(c.ts)+'</span></li>').join("") : '<li class="text-slate-500">aucun commit</li>';
+  $("oq-count").textContent = "(" + d.open_total + ")";
+  $("oq").innerHTML = d.open_questions.length ? d.open_questions.slice().reverse().map(q => '<li class="rounded-lg bg-slate-800/60 px-3 py-2">'+esc(q)+'</li>').join("") : '<li class="text-slate-500">aucune</li>';
+}
+
+async function tick() {
+  try {
+    const r = await fetch("/api/state", {cache:"no-store"});
+    if (!r.ok) throw new Error(r.status);
+    render(await r.json());
+    $("conn-dot").className = "h-2 w-2 rounded-full bg-emerald-400"; $("conn-txt").textContent = "en direct";
+  } catch (e) {
+    $("conn-dot").className = "h-2 w-2 rounded-full bg-rose-500"; $("conn-txt").textContent = "serveur injoignable";
+  }
+}
+tick(); setInterval(tick, 2000);
+</script>
+</body>
+</html>

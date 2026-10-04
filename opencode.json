@@ -1,0 +1,43 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://localhost:11434/v1"
+      },
+      "models": {
+        "gemma4:latest": {}
+      }
+    },
+    "lmstudio": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://localhost:1234/v1"
+      },
+      "models": {
+        "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp-nvfp4": {},
+        "kat-coder-v2.5-dev-35b-a3b-mtp-abliterated": {}
+      }
+    }
+  },
+  "model": "lmstudio/qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp-nvfp4",
+  "plugin": [
+    "C:/Users/legar/.config/opencode/ponytail/.opencode/plugins/ponytail.mjs"
+  ],
+  "permission": {
+    "edit": "allow",
+    "bash": {
+      "*": "allow",
+      "git push --force*": "deny",
+      "git push -f*": "deny",
+      "git reset --hard*": "deny",
+      "git clean*": "deny",
+      "rm -rf*": "deny",
+      "python3 docs/tools/task.py approve*": "deny",
+      "python3 docs/tools/task.py reopen*": "deny",
+      "python3 docs/tools/task.py unblock*": "deny",
+      "python3 docs/tools/task.py addfix*": "deny"
+    }
+  }
+}

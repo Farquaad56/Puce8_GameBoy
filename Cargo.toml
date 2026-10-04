@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/puce8gb-core",
+    "crates/puce8gb-cli",
+    "crates/puce8gb-desktop",
+]
