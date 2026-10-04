@@ -9,6 +9,7 @@ Driver command : begin | role
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -155,11 +156,31 @@ def scope_violations(text):
     return bad
 
 
+def find_bash():
+    """Prefer Git Bash on Windows: the WSL launcher bash.exe on PATH has no cargo."""
+    if os.name != "nt":
+        return "bash"
+    cands = [os.environ.get("GIT_BASH")]
+    git = shutil.which("git")
+    if git:
+        # ...\Git\cmd\git.exe or ...\Git\bin\git.exe -> ...\Git\bin\bash.exe
+        cands.append(os.path.join(os.path.dirname(os.path.dirname(git)), "bin", "bash.exe"))
+    for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)")):
+        if base:
+            cands.append(os.path.join(base, "Git", "bin", "bash.exe"))
+    for p in cands:
+        if p and os.path.exists(p):
+            return p
+    return "bash"
+
+
 def run_script(i):
     script = os.path.join(CHECKS, i + ".sh")
     if not os.path.exists(script):
         return 0, 1, "[FAIL] missing check script " + script
-    r = subprocess.run(["bash", script], cwd=ROOT, capture_output=True, text=True)
+    # Pass a POSIX-style relative path: Windows backslashes get stripped by bash.
+    rel_script = "docs/checks/" + i + ".sh"
+    r = subprocess.run([find_bash(), rel_script], cwd=ROOT, capture_output=True, text=True)
     out = r.stdout + r.stderr
     m = re.findall(r"SCORE: (\d+)/(\d+)", out)
     if not m:
