@@ -61,16 +61,27 @@ score
 
 
 def human_only(what):
-    """Human commands need a keyboard confirmation read from the controlling terminal."""
-    try:
-        tty = open("/dev/tty", "r+")
-    except OSError:
-        print("Refused: '%s' must be run by the user in a real terminal (no /dev/tty)." % what)
-        return False
-    tty.write("[human check] %s - type YES to confirm: " % what)
-    tty.flush()
-    ans = tty.readline().strip()
-    tty.close()
+    """Human commands need a keyboard confirmation typed in a real interactive terminal."""
+    if os.name == "nt":
+        # No /dev/tty on native Windows. An agent subprocess has captured (non-tty) stdio,
+        # so requiring a real console on both stdin and stdout keeps the agent out.
+        if not (sys.stdin and sys.stdin.isatty() and sys.stdout and sys.stdout.isatty()):
+            print("Refused: '%s' must be run by the user in a real terminal (no console)." % what)
+            return False
+        try:
+            ans = input("[human check] %s - type YES to confirm: " % what).strip()
+        except EOFError:
+            ans = ""
+    else:
+        try:
+            tty = open("/dev/tty", "r+")
+        except OSError:
+            print("Refused: '%s' must be run by the user in a real terminal (no /dev/tty)." % what)
+            return False
+        tty.write("[human check] %s - type YES to confirm: " % what)
+        tty.flush()
+        ans = tty.readline().strip()
+        tty.close()
     if ans != "YES":
         print("Not confirmed.")
     return ans == "YES"
