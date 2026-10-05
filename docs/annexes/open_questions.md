@@ -54,3 +54,8 @@ Voir docs/annexes/notes/04a_video_regs.md.
 Voir docs/annexes/notes/04b_video_render.md.
 
 - D_10 Premiere ligne apres LCD on : refs/pandocs ne precise pas a quelle position de frame le PPU repart quand LCDC.7 repasse a 1 (LY reinitialisee a 0 ou continuation de la frame en cours), ni ce qui s'affiche exactement sur cette premiere ligne ; seuls sont etablis que le PPU repart immediatement et que l'ecran reste blanc pendant toute la premiere frame (LCDC.md#LCDC.7). A trancher par une test ROM qui re-activate LCDC.7 mid-frame and observe the first rendered line. Statut : UNKNOWN - to confirm.
+
+## D_13 - Joypad et port serie : points a confirmer (2026-10-05)
+Voir docs/annexes/notes/06_input_serial.md.
+
+- Lecture des bits 7-6 du registre SC ($FF02) sur DMG : refs/pandocs ne documente que bit7 et bit0 ; la regle generale "unused bits read high" (IR.md L41) suggere $FE mais n'est pas etablie explicitement pour ce registre. A trancher par roms/test-roms/gambatte/serial/start_wait_read_sc_*.gbc (lisent SC apres un transfert). Statut : UNKNOWN - to confirm.
