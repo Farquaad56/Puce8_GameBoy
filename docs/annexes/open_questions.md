@@ -28,3 +28,10 @@ Voir docs/annexes/notes/02b_cpu_interrupts.md.
 - Cout exact en cycles avant que STOP n'entree en veille (table 2001 marque "?") ; refs/pandocs ne donne aucun chiffre, le diagramme Halphon reste une image. Pas de ROM test locale dediee trouvee sous roms/test-roms/. Statut : UNKNOWN - to confirm.
 - Comportement DMG des opcodes $93 et $FF (variantes halt-like non documentees) ; la liste des opcodes invalides qui verrouillent le CPU (CPU_Instruction_Set.md L173) ne les inclut pas. Pas de ROM test locale dediee trouvee sous roms/test-roms/ (blargg/cpu_instrs peut couvrir une partie). Statut : UNKNOWN - to confirm.
 - Point exact ou IME=0 devient visible par rapport a l'instruction suivant un di ; refs/pandocs ne precise que qu'aucun interrupt n'est pris entre un ei et un di consecutifs. Statut : UNKNOWN - to confirm.
+
+## D_07 - Memory map : points a confirmer (2026-10-05)
+Voir docs/annexes/notes/03a_memory_map.md.
+
+- Le fetch de l'opcode suivant chevauche-t-il le dernier M-cycle de l'instruction precedente ? refs/pandocs ne dit rien ; seule indication indirecte dans OAM_DMA_Transfer.md#best-practices (le DMA "starts right after instruction" et la variante ret z evite une lecture du stack sur le dernier M-cycle du DMA). Pas de ROM test locale dediee trouvee sous roms/test-roms/ (blargg/mem_timing ou mooneye-test-suite peuvent couvrir l'interleaving CPU/bus). Statut : UNKNOWN - to confirm.
+- CONFLIT plage de source du OAM DMA ($FF46) : pandocs donne XX = $00 a $DF (source 0x0000-0xDFFF) tandis que les specs officielles donnent "$0000-$F19F" avec pas de 0x100. A trancher par roms/test-roms/gbmicrotest/dma_0x9000.gb et dma_0xE000.gb. Statut : CONFLIT - to confirm by running these ROMs.
+- CONFLIT duree du OAM DMA : pandocs dit 160 M-cycles (= 640 dots a vitesse normale), les specs officielles disent "takes 160 nano-seconds" (1995) / "microseconds" (1998). A trancher par roms/test-roms/mooneye-test-suite/acceptance/oam_dma_timing.gb (+ gbmicrotest/dma_timing_a.gb). Statut : CONFLIT - to confirm by running this ROM.
