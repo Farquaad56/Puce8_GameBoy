@@ -78,3 +78,10 @@ Voir docs/annexes/notes/08_boot_reset.md.
 
 - Duree exacte de la boot ROM DMG en cycles ou frames : refs/pandocs ne donne aucun chiffre pour le modele DMG (seule la duree des boot ROM SGB est decrite comme dependante du header). A trancher par une test ROM qui mesure le temps entre power-up et PC=$0100, ou par la disassembly de la boot ROM DMG (ISSOtm/gb-bootroms, non clonee). Statut : UNKNOWN - to confirm.
 - CONFLIT valeurs de reset F/TAC/OBP0/OBP1 entre les specs 2001 (AF=$01B0 fixes, TAC=$00, OBP0=OBP1=$FF) et Power_Up_Sequence.md (H/C dependants du checksum $014D, TAC=$F8, OBP0/OBP1 non initialises). A trancher par roms/test-roms/mooneye-test-suite/acceptance/boot_regs-dmgABC.gb et boot_hwio-dmgABCmgb.gb. Statut : CONFLIT - to confirm by running these ROMs.
+
+## D_17 - Test ROM catalog : points a confirmer (2026-10-05)
+Voir docs/annexes/notes/09_test_roms.md.
+
+- Signal pass/echec des 11 cpu_instrs individual ROMs separement (seule la capture de l'ensemble blargg/cpu_instrs/cpu_instrs-dmg-cgb.png est fournie ; le howto ne decrit pas un signal par ROM individuelle). A trancher en executant les ROMs. Statut : UNKNOWN - to confirm.
+- Duree d'execution de dmg-acid2 (ni README, ni howto, ni refs/pandocs ne donne de chiffre). A trancher en mesurant la duree jusqu'a l'opcode 0x40 (LD B,B) sur un emulator. Statut : UNKNOWN - to confirm.
+- Durees d'execution des suites cgb-acid2 / cgb-acid-hell (aucune .gb locale dans v7.0 ; howto sans chiffre). Statut : UNKNOWN - to confirm.
