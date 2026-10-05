@@ -115,4 +115,41 @@ Consequence :
 - Unmapped / unusable reads : par defaut, une lecture d'une adresse non mappes renvoie 0xFF (open bus). Cas speciaux : la plage FEA0-FEFF renvoie 0x00 hors OAM block mais 0xFF pendant un OAM block (avec l'effet de corruption OAM) ; les registres I/O DMG entierement non attribues ($FF03, $FF08-$FF0E, etc.) et les registres CGB-only en mode non-CGB lisent $FF par defaut - la valeur exacte des adresses non attribuees est UNKNOWN - to confirm (note 03b_io_registers.md).
 - peek() : une methode pure peek(addr) renvoie le contenu brut de la memoire a l'adresse, en contournant tout gate (mode PPU, DMA active) et sans aucun effet de bord ni avancement d'horloge ; elle lit directement les tableaux possedes par le Bus. C'est ce que le code debogueur / viewer utilise pour lire la memoire sans effets de bord (AGENTS.md).
 
+Statut : APPROUVE
+
+## A_03
+
+Decision: CPU micro-op model - representation of instructions as micro-ops with one bus access each.
+Questions a trancher : (1) Representation sans allocation des micro-ops (tableau fixe ou machine a etats). (2) Decodage au moment du fetch. (3) Le fetch de l'opcode suivant chevauche-t-il le dernier M-cycle de l'instruction precedente, et quel effet sur la temporisation EI/interrupts. (4) Dispatch des interrupts, HALT et STOP comme sequences speciales. (5) Utilisation de la table d'opcodes generees.
+
+Options :
+
+Option A - Tableau fixe de micro-ops emis au decodage ("instruction precompilee").
+Au fetch, le CPU lit l'octet opcode, cherche OpInfo dans OPCODES[]/CB_OPCODES[], puis emet un tableau de taille fixe (ex. [MicroOp; 8]) couvrant les phases d'operands + execution ; chaque M-cycle execute une entree avec exactement un acces bus.
+Pros : "one micro-op = one bus access" (AGENTS.md) verifiable trivialement ; tests unitaires par instruction directs (comparer la sequence emise a la table - note 02c) ; boucle chaude simple et deterministe.
+Cons : la taille du tableau doit couvrir l'instruction normale la plus longue (CALL a16 = 6 M-cycles, spot-checks note 02c) alors que la plupart n'en utilisent 1 a 3 ; les instructions de duree variable (HALT attente N*4, STOP, entree d'interrupt 5 M-cycles - notes 02a/02b) ne tiennent pas dans le tableau et doivent etre special-casees quand meme ; une instruction de branchement change PC en milieu de tableau, il faut donc arreter l'execution a ce point.
+
+Option B - Machine a etats : "instruction en cours" = OpInfo + octets d'operands [u8;2] + compteur de M-cycles restants, avancee d'une phase par M-cycle.
+Decodage au moment du fetch (le premier M-cycle lit l'octet opcode -> OpInfo depuis la table) ; les M-cycles suivants lisent les operands selon OpInfo.bytes ; les phases d'execution suivent le cout de la table (m_taken/m_not_taken pour les branches conditionnelles - note 02c). Sans chevauchement par defaut : l'opcode suivant est lu au premier M-cycle de l'instruction suivante.
+Pros : etat minimal sans allocation, colle exactement a A_01/A_02 (un acces bus par M-cycle, a un dot fixe) ; les instructions de duree variable sont naturelles (HALT/STOP = etats qui n'avancent pas PC jusqu'au reveil - note 02b) ; la table pilote toute la temporisation, aucun cout d'instruction en dur dans le code ; l'entree d'interrupt est une sequence d'etats de 5 M-cycles inseree a la frontiere d'instruction (note 02b).
+Cons : l'executeur doit garantir exactement un acces bus pour chaque transition d'etat - revue soigneuse + tests requis ; plus de branches dans la boucle chaude que l'iteration d'un tableau.
+
+Option C - Pipeline de fetch chevauche : precharger toujours l'opcode suivant pendant le dernier M-cycle de l'instruction en cours, pour que les instructions se suivent sans M-cycle vide.
+Pros : correspond a l'indice indirect selon lequel le DMA "starts right after instruction" (refs/pandocs/src/OAM_DMA_Transfer.md#best-practices) si le chevauchement est reel ; moins de M-cycles vides entre instructions.
+Cons : refs/pandocs ne dit rien du chevauchement du fetch (open_questions D_07, Statut : UNKNOWN - to confirm) ; la frontiere exacte du delai ei est egalement inconnue (D_06) - un pipeline change le point ou IME=1 devient visible et risque de fausser la temporisation des interrupts avant que les ROM tests ne tranchent ; etat plus complexe (fetch en vol + execution en vol), plus difficile de garder "one micro-op = one bus access" exact.
+
+Recommandation :
+Option B - machine a etats avec decodage au moment du fetch, sans chevauchement par defaut. La table generees pilote toute la temporisation (question 5) ; le dispatch des interrupts, HALT et STOP sont des etats/sequences speciales ; la question du chevauchement est differee jusqu'a ce que D_07 soit tranchee par les ROM tests (blargg mem_timing / mooneye-test-suite), sans changer la forme publique de ce modele.
+
+Consequence :
+- Etat CPU (tout en taille fixe, aucune allocation dans tick()) : registres AF BC DE HL SP PC (note 02a) ; flag IME (note 02b) ; "instruction en cours" = OpInfo (struct Copy issue de la table) + octets d'operands [u8;2] + compteur de M-cycles restants + phase.
+- Chaque M-cycle (tous les 4 dots, decision A_01) : exactement un bus.read ou bus.write via &mut Bus (decision A_02), a un dot fixe du M-cycle que les taches CPU suivantes fixeront.
+- Decodage : OPCODES[byte] / CB_OPCODES[byte] depuis opcodes.rs genere (note 02c) - aucune logique de decodage au runtime, aucune allocation ; au fetch de 0xCB, bascule vers la table CB pour l'octet suivant ; les cycles CB incluent deja le fetch du prefixe, aucun M-cycle additionnel n'est ajoute (note 02c).
+- Branches conditionnelles : m_taken vs m_not_taken choisi a l'execution selon la condition evaluee (ordre [taken, not-taken] - note 02c) ; une valeur unique est dupliquee dans les deux champs.
+- Dispatch des interrupts : a la frontiere d'instruction, avant de demarrer l'instruction suivante, si IME=1 et [IE]&[IF]!=0 (priorite bit 0 d'abord - note 02b), le CPU execute la sequence d'entree fixe de 5 M-cycles (attente 2M + push PC 2M + chargement de l'adresse vecteur 1M) et efface le bit IF correspondant ainsi que IME avant d'appeler le handler ; RETI = ret + IME=1 sur 4 M-cycles.
+- EI/DI : le set/clear de ime prend effet a partir de l'instruction suivante ("retarde d'une instruction" - note 02b) ; ei pose un flag pending, et ime devient 1 au demarrage de l'instruction qui suit (un halt immediatement apres ei s'execute donc avec IME encore a 0). La frontiere exacte en cycles est UNKNOWN (open_questions D_06), a confirmer par same-suite ei_delay_halt.gb.
+- HALT ($76) : etat d'attente de N M-cycles tant que [IE]&[IF]==0 ; reveil des qu'une demande apparait, quel que soit IME ; si IME=1 le handler est servi avant l'instruction suivant le halt (note 02b). Variante bug : IME=0 + demande pendante au debut du halt -> pc non incremente, l'octet suivant est re-lu (spec officielle 2008 - note 02b).
+- STOP ($FB) : consomme son second octet ; le cout d'entree en veille est UNKNOWN - to confirm (open_questions D_06) ; modele comme etat qui attend que P10-P13 passent bas.
+- Opcodes illegaux (les 11, aucune variante CB - notes 02a/02c) : etat verrouille jusqu'au power-off ; le cout JSON est ignore.
+
 Statut : PROPOSE
