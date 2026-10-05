@@ -152,4 +152,37 @@ Consequence :
 - STOP ($FB) : consomme son second octet ; le cout d'entree en veille est UNKNOWN - to confirm (open_questions D_06) ; modele comme etat qui attend que P10-P13 passent bas.
 - Opcodes illegaux (les 11, aucune variante CB - notes 02a/02c) : etat verrouille jusqu'au power-off ; le cout JSON est ignore.
 
+Statut : APPROUVE
+
+## A_04
+
+Decision: buffers, cadence, core/frontend boundary - framebuffer format and size, audio sample production (integer cycle count between output samples and resulting rate), pacing (audio-driven vs accumulator, one frame = N cycles), and the thread model of the desktop app.
+Questions a trancher : (1) Framebuffer format and size. (2) Audio: integer cycle count between output samples and the resulting rate; who resamples. (3) Pacing: audio-driven vs accumulator; one frame = N cycles. (4) Thread model of the desktop app and how input/state cross it without a Mutex in the audio callback.
+
+Options :
+
+Option A - Core pur, cadence par accumulateur d'entier dans le frontend ; la callback audio ne fait que lire un anneau de samples.
+Le noyau reste une fonction pure des ticks (Machine::tick() = 1 dot, decision A_01) sans horloge murale ni I/O (AGENTS.md). Le thread principal du frontend porte un accumulateur de dots entier (nanosecondes * 4194304 / 1e9) et appelle Machine::tick() autant de fois ; une frame = exactement 70224 ticks (note 01_timing.md, section "Cycles par frame"). Le PPU ecrirait un index de pixel 2 bits dans un tableau fixe [u8; 23040] (160 x 144 pixels affiches - note 01_timing.md), sans allocation dans tick(). L'APU produit une paire stereo toutes les 128 dots = exactement 32768 Hz (ratio entier de l'horloge maitre, note 05b_audio_mixing.md "echantillonnage natif") et la depose dans un anneau fixe [i16; 2 x 4096] ; le frontend resample 32768 Hz -> taux du device (cpal). La callback audio ne lit que l'anneau, jamais l'etat du noyau.
+Pros : determinisme total - le noyau ne voit ni horloge murale ni taux de device, donc deux runs identiques sont bit-identiques ; tous les ratios restent entiers en dots (4194304/128 = 32768 exactement) ; pas de Mutex autour du Machine (un seul thread le touche - AGENTS.md "no Rc<RefCell>/Arc<Mutex> for the bus") et la callback audio ne peut ni bloquer ni deadllock ; pause, save-state, rewind sont triviaux car la machine n'est que des donnees ; le frontend choisit librement le taux du device.
+Cons : le thread principal doit suivre le temps reel (70224 ticks/frame a 59,73 Hz - note 01_timing.md) ; s'il derape, il faut limiter les batches de rattrapage et laisser tomber des samples audio plutot que ralentir la machine ; deux horloges a reconcilier (l'accumulateur entier borne le drift par arrondi).
+
+Option B - Cadence audio-driven : la callback cpal avance elle-meme le noyau.
+La stream callback calcule les dots ecoules depuis l'appel precedent et appelle Machine::tick() directement, produisant les samples a la demande ; la video est un sous-produit de l'horloge audio.
+Pros : synchronisation A/V parfaite par construction (pas d'accumulateur ni de drift) ; le code de temporisation du frontend est minimal.
+Cons : le noyau s'execute sur le thread audio, donc tout etat partage avec le thread UI (input, pause, save-state) exige un Mutex autour du Machine - en contradiction avec "no Rc<RefCell>/Arc<Mutex> for the bus" et "no threads in core" (AGENTS.md) ; la callback a une deadline stricte, il faut plafonner les ticks par appel ou risquer des glitches audio ; le timing devient dependant du driver (periode de callback variable), ce qui casse la reproductibilite du rythme d'execution.
+
+Option C - Cadence frame-locked : un batch fixe par frame, audio decouple et lisse.
+Le thread principal avance exactement une frame par vsync ou par intervalle fixe (~16,74 ms) ; le noyau produit 23040 pixels + les samples de la frame, et un resampler independant du frontend lisse vers le taux du device.
+Pros : boucle la plus simple (un batch par frame), affichage "frame N" trivial, batches deterministes.
+Cons : 70224/128 = 548,625 - les samples par frame ne sont pas entiers, donc un "N samples per frame" fixe casse le ratio exact de 32768 Hz ; la cadence quantisee a ~16,7 ms donne un jitter visible sur des ecrans non-60 Hz et un drift A/V que seul le resampler masque ; le taux vsync n'etant pas 59,73 Hz (note 01_timing.md), il faut quand meme un accumulateur continu pour rester fidele.
+
+Recommandation :
+Option A - noyau pur + accumulateur de dots entier dans le thread principal + anneau fixe de samples stereo a 32768 Hz consomme par la callback audio, resampling fait cote frontend. C'est la seule option qui garde les quatre contraintes ensemble : cycle accuracy (tick = dot, decision A_01), ratios entiers (4194304/128 = 32768 exactement), determinisme (le noyau ne voit ni horloge murale ni taux de device) et pas de Mutex dans la callback audio (le Machine est possede par un seul thread, la callback ne lit que l'anneau).
+
+Consequence :
+- Framebuffer : puce8gb-core porte [u8; 23040] d'indices de pixels 2 bits (160 x 144 - note 01_timing.md) ; le PPU ecrit un index par dot en mode 3 (note 01_timing.md, durees des modes). Le frontend convertit l'index en couleur via BGP/OBP0/OBP1 (refs/pandocs/src/Palettes.md#FF47-BGP) et echelle pour l'affichage ; le noyau ne stocke jamais de RGB.
+- Audio : l'APU produit une paire stereo toutes les 128 dots = exactement 32768 Hz (ratio entier de l'horloge maitre - note 05b_audio_mixing.md, section "Echantillonnage natif") ; le mixage suit NR50/NR51 + filtre passe-haut par sortie (note 05b_audio_mixing.md) avec un facteur de charge a 32768 Hz = 0.999958^128 ~ 0.9946 (formule 0.999958^(4194304/rate), note 05b_audio_mixing.md) implemente en point fixe entier dans le noyau ; l'arrondi exact reste a confirmer par un test ROM audio plus tard. Les samples vont dans un anneau fixe [i16; 2 x 4096] (~0,125 s de latence) avec head/tail atomiques - aucune allocation dans tick(). Le frontend (cpal) resample 32768 Hz -> taux du device ; le noyau ne connait ni cpal ni le taux du device.
+- Pacing : le thread principal porte un accumulateur de dots entier derive d'une horloge monotone et appelle Machine::tick() autant de fois que de dots ecoules ; une frame = exactement 70224 ticks (note 01_timing.md). En cas de retard, il plafonne la taille du batch de rattrapage et laisse tomber des samples audio dans l'anneau plutot que de ralentir la machine.
+- Thread model : le thread principal possede le Machine en exclusif (&mut, aucun Mutex) ; les evenements d'input (clavier/gilrs) traversent vers lui via une file bornee videe aux frontieres de frame ; la callback audio ne lit que l'anneau de samples et ne touche jamais l'etat du noyau - donc pas de lock dans la callback, pas de Rc<RefCell>/Arc<Mutex> (AGENTS.md), et le noyau reste sans thread ni I/O.
+
 Statut : PROPOSE
