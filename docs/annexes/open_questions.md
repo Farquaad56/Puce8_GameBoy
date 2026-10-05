@@ -44,3 +44,8 @@ Voir docs/annexes/notes/03b_io_registers.md.
 - Valeur power-up de la Wave pattern RAM FF30-$FF3F sur DMG : aucune entree dans le tableau Power_Up_Sequence.md#Hardware-registers (ni enonce pandocs trouve par grep) ; aleatoire comme WRAM/HRAM, pattern fixe, ou ecrasee par la boot ROM ? Statut : UNKNOWN - to confirm.
 - Valeur lue sur DMG des adresses I/O entierement non attribuees ($FF03, $FF08-$FF0E, $FF15, $FF27-$FF2F, $FF4E, $FF57-$FF67, $FF6D-$FF6F, $FF71, $FF78-$FFFE) et des registres CGB-only non marques [^cgb_only] dans le tableau ($FF4C KEY0/SYS, $FF68-$FF69, $FF6A-$FF6B, $FF6C OPRI) : pas d'enonce pandocs ; la regle "unused bits read high" (IR.md L41) suggere $FF mais n'est pas etablie explicitement pour ces adresses. Statut : UNKNOWN - to confirm.
 - Comportement de lecture des registres write-only ($FF13 NR13, $FF18 NR23, $FF1B NR31, $FF1D NR33 sur DMG ; HDMA1-4 en CGB) : rendent-ils la derniere valeur ecrite ou $FF ? Le tableau power-up donne $FF pour FF13/FF18/FF1D mais n'explique pas le mecanisme. Statut : UNKNOWN - to confirm.
+
+## D_09 - video registers : points a confirmer (2026-10-05)
+Voir docs/annexes/notes/04a_video_regs.md.
+
+- D_09 Regle d'increment de FF44 (LY) : refs/pandocs ne documente pas l'instant precis du frame ou LY passe a la valeur de la ligne suivante ; seuls sont etablis la portee 0-153 avec VBlank = 144-153 (STAT.md#FF44), la stabilite par ligne (CGB_Registers.md "Bit 7 = 1 — HBlank DMA", LY=0-143) et le test WY == LY en debut de scanline (Window.md#Window rendering criteria). A trancher par roms/test-roms/mooneye-test-suite/acceptance/ppu/stat_lyc_onoff.gb (+ vblank_stat_intr-GS.gb). Statut : UNKNOWN - to confirm.
