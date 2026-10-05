@@ -49,3 +49,8 @@ Voir docs/annexes/notes/03b_io_registers.md.
 Voir docs/annexes/notes/04a_video_regs.md.
 
 - D_09 Regle d'increment de FF44 (LY) : refs/pandocs ne documente pas l'instant precis du frame ou LY passe a la valeur de la ligne suivante ; seuls sont etablis la portee 0-153 avec VBlank = 144-153 (STAT.md#FF44), la stabilite par ligne (CGB_Registers.md "Bit 7 = 1 — HBlank DMA", LY=0-143) et le test WY == LY en debut de scanline (Window.md#Window rendering criteria). A trancher par roms/test-roms/mooneye-test-suite/acceptance/ppu/stat_lyc_onoff.gb (+ vblank_stat_intr-GS.gb). Statut : UNKNOWN - to confirm.
+
+## D_10 - video rendering : points a confirmer (2026-10-05)
+Voir docs/annexes/notes/04b_video_render.md.
+
+- D_10 Premiere ligne apres LCD on : refs/pandocs ne precise pas a quelle position de frame le PPU repart quand LCDC.7 repasse a 1 (LY reinitialisee a 0 ou continuation de la frame en cours), ni ce qui s'affiche exactement sur cette premiere ligne ; seuls sont etablis que le PPU repart immediatement et que l'ecran reste blanc pendant toute la premiere frame (LCDC.md#LCDC.7). A trancher par une test ROM qui re-activate LCDC.7 mid-frame and observe the first rendered line. Statut : UNKNOWN - to confirm.
