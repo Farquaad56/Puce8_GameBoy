@@ -30,6 +30,12 @@ Silence is not approval. Only the user's explicit ok/go/validate lets the pipeli
 - The same command failing twice without any change in between: STOP repeating it. Change approach or call:
   python3 docs/tools/task.py blocked "<reason>"
 - Never retry a failing check more than 3 times with the same idea.
+- Never write a number from memory, not even in your reasoning. First run grep -rn -i "<exact string>" refs/pandocs | head -20,
+  then write only what the output shows. If 3 different greps find nothing: Statut UNKNOWN - to confirm, move on.
+- If you notice you are repeating a sentence, hesitating ("hmm", "actually I recall", "let me stop guessing"), or writing the same
+  idea twice: STOP at once and call python3 docs/tools/task.py blocked "<what you could not find>". Do not continue the answer.
+- Hint sheets: docs/annexes/seed/*.md contain values to CHECK, not facts. A value from a seed sheet is written as CONFIRME only
+  with a refs/pandocs source line found by grep; otherwise UNKNOWN - to confirm.
 - If something is missing from the sources: do not guess. Write "Statut : UNKNOWN - to confirm" and add a line to
   docs/annexes/open_questions.md, then continue with what does not depend on it.
 
