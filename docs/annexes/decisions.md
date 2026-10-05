@@ -217,4 +217,35 @@ Consequence :
 - RAM batterie : le noyau porte un tableau [u8] dimensionne par la cartouche (type 0147 + taille 0149 - notes 07a/07b), lu/ecrit via le Bus ; le frontend la persiste dans son propre fichier par cartouche, charge avant le boot et ecris a l'extinction / fermeture ; sans fichier existant, la SRAM demarre a $00 (substitut deterministe du bruit - note 08). Les save states ne la contiennent jamais.
 - Code : puce8gb-core expose save/load comme fonctions pures sur un tampon fourni par l'appelant (pas de std::fs, pas d'I/O - AGENTS.md) ; les crates cli/desktop gerent chemins et noms de fichiers ; aucune dependance nouvelle dans le noyau.
 
+Statut : APPROUVE
+
+## A_06
+
+Decision: supported variants and first target - portee du hardware emule (DMG seul), ordre des mappers implementes, politique de boot ROM, et premieres cibles ROM pour E02.
+Questions a trancher : (1) DMG d'origine seulement (pas CGB, pas SGB) ? (2) Ordre des mappers (ROM only en premier) ? (3) Politique boot ROM : demarrer dans l'etat post-boot documente, boot ROM optionnelle plus tard ? (4) Premieres cibles ROM pour E02 ?
+
+Options :
+
+Option A - DMG seul ; mapper ROM only ($00) en premier ; reset direct a l'etat post-boot documente sans faire tourner la boot ROM ; premieres cibles = mooneye acceptance + blargg cpu_instrs.
+Portee : Game Boy d'origine (DMG) uniquement. Le drapeau CGB 0143 et le drapeau SGB 0146 sont lus mais ignores (note 07a, sections "Titre / fabricant / drapeau CGB" et "Drapeau SGB") ; pas de mode couleur, pas de palettes ni paquets de commande Super Game Boy. Ordre des mappers : ROM only ($00) en premier - toutes les cibles test d'E02/E03 (blargg cpu_instrs, mooneye-test-suite, same-suite) sont de petites cartouches qui tournent dessus ; puis MBC1/MBC2 (+RAM/batterie), puis MBC3 avec RTC, puis les codes restants 0147 au besoin (note 07a, section "Type de cartouche"). Politique boot : Machine::reset() place directement l'etat post-boot documente du DMG a PC=$0100 sans faire tourner la boot ROM (note 08, section "Ce qu'il faut emuler sans boot ROM") : A=$01 F=Z=1 N=0 H/C selon le checksum d'en-tete $014D, B=$00 C=$13 DE=$00D8 HL=$014D SP=$FFFE + valeurs I/O (note 08) ; WRAM/HRAM/SRAM a $00 pour la determinisme (decision A_05). L'emulation de la boot ROM (animation du logo, verrouillage sur logo ou checksum invalide) est differee en fonction optionnelle.
+Pros : portee minimale conforme a AGENTS.md ("Hardware: original Game Boy (DMG)") ; le travail CPU d'E02 n'est pas bloque par des mappers ni par du code boot ; l'etat post-boot est documente et testable avec les ROMs acceptance mooneye (boot_regs-dmgABC, boot_hwio-dmgABCmgb - note 08) ; reset deterministe sans dump de boot ROM.
+Cons : pas d'animation du logo ni de verrouillage sur cartouche invalide (note 08, section "Comportement de la boot ROM") ; les jeux qui s'appuient sur des valeurs exactes au power-up ne sont couverts qu'a l'etat documente pres ; MBC3 RTC et mappers suivants arrivent apres E02/E03.
+
+Option B - DMG + CGB compatible : emuler les deux variantes avec mode couleur, tous les mappers d'un coup, boot ROM complete emulee des le debut.
+Pros : couvre plus de cartouches commerciales (drapeau CGB $80/$C0 - note 07a) ; une seule base de code pour les deux consoles ; la plus fidele au hardware reel si la boot ROM de 256 octets est faite tourner (note 08, section "Boot ROM : existence et taille").
+Cons : contredit AGENTS.md qui fixe la cible a la DMG d'origine ; double la portee : registres palettes CGB, KEY0/OPBI, tuiles 4 bpp, boot ROM differente de 256+1792 octets (note 08, section "Laisse de cote") ; retarde le travail CPU d'E02 ; la duree de la boot ROM est UNKNOWN - to confirm (note 08), donc une emulation cycle-accurate ne peut pas s'appuyer sur les sources.
+
+Option C - DMG seul mais boot ROM complete emulee des le debut : faire tourner une reimplementation de la boot ROM de 256 octets puis hand-off a la cartouche a $0100 ; tous les mappers d'un coup.
+Pros : la plus fidele au hardware reel : animation du logo, son a deux notes, verrouillage sur logo ou checksum d'en-tete invalide (note 08, sections "Comportement de la boot ROM" et "Hand-off vers la ROM de cartouche") ; l'etat post-boot emerge de la simulation plutot que d'etre code en dur.
+Cons : la duree de la boot ROM est UNKNOWN - to confirm (note 08), donc le timing cycle-accurate ne peut pas s'appuyer sur les sources ; il faut un dump ou une reimplementation du code de la boot ROM, absent de refs/pandocs ; retarde le travail CPU d'E02 ; l'etat de hand-off (PC=$0100, A=$01 - note 08) est deja atteignable directement au reset avec moins de risque.
+
+Recommandation :
+Option A - DMG seul, mapper ROM only ($00) en premier, reset direct a l'etat post-boot documente sans faire tourner la boot ROM, premieres cibles = mooneye acceptance + blargg cpu_instrs. C'est la seule option qui garde la portee conforme a AGENTS.md (DMG d'origine), ne bloque pas le travail CPU d'E02 sur du hardware non emule, et ancre chaque valeur dans les notes (etat post-boot CONFIRME - note 08 ; codes mappers - note 07a).
+
+Consequence :
+- Portee : puce8gb-core n'emule que la DMG d'origine. Le drapeau CGB 0143, le drapeau SGB 0146 et les codes licensee sont lus mais ignores (note 07a) ; pas de mode couleur ; OBP0/OBP1 gardent leurs valeurs de reset documentees (note 08).
+- Ordre des mappers : ROM only ($00) en premier - les cibles test d'E02 tournent dessus ; puis MBC1/MBC2 (+RAM/batterie), puis MBC3 avec RTC, puis les codes restants 0147 au besoin (note 07a) ; un code inconnu ou non supporte renvoie LoadError (AGENTS.md : bad ROM => Result).
+- Politique boot : Machine::reset() place directement l'etat post-boot documente du DMG a PC=$0100 sans faire tourner la boot ROM (note 08, section "Ce qu'il faut emuler sans boot ROM") : A=$01 F=Z=1 N=0 H/C selon le checksum d'en-tete $014D (CONFLIT specs vs pandocs - a trancher par mooneye boot_regs-dmgABC), B=$00 C=$13 D=$00 E=$D8 H=$01 L=$4D SP=$FFFE, valeurs I/O selon note 08 ; WRAM/HRAM/SRAM a $00 (deterministe - decision A_05). L'emulation de la boot ROM (animation du logo + verrouillage) est differee en fonction optionnelle apres E02/E03 ; sa duree etant UNKNOWN - to confirm (note 08), elle ne peut pas etre cycle-accurate sans source.
+- Premieres cibles ROM pour E02 : mooneye-test-suite acceptance boot_regs-dmgABC.gb et boot_hwio-dmgABCmgb.gb (tranchent le CONFLIT F/TAC/OBP0/OBP1 de note 08) puis blargg cpu_instrs (E02_13 a E02_15), toutes des cartouches ROM only.
+
 Statut : PROPOSE
