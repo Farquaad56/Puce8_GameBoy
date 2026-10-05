@@ -185,4 +185,36 @@ Consequence :
 - Pacing : le thread principal porte un accumulateur de dots entier derive d'une horloge monotone et appelle Machine::tick() autant de fois que de dots ecoules ; une frame = exactement 70224 ticks (note 01_timing.md). En cas de retard, il plafonne la taille du batch de rattrapage et laisse tomber des samples audio dans l'anneau plutot que de ralentir la machine.
 - Thread model : le thread principal possede le Machine en exclusif (&mut, aucun Mutex) ; les evenements d'input (clavier/gilrs) traversent vers lui via une file bornee videe aux frontieres de frame ; la callback audio ne lit que l'anneau de samples et ne touche jamais l'etat du noyau - donc pas de lock dans la callback, pas de Rc<RefCell>/Arc<Mutex> (AGENTS.md), et le noyau reste sans thread ni I/O.
 
+Statut : APPROUVE
+
+## A_05
+
+Decision: save states and determinism - serialization format and rules for deterministic execution.
+Questions a trancher : (1) Format binaire versionne ecrit a la main, sans dependance. (2) Ce qui fait partie de l'etat. (3) Regles de determinisme (RTC compte en cycles emules, pas d'horloge systeme, pas d'iteration sur hash). (4) Fichiers RAM batterie separes des save states.
+
+Options :
+
+Option A - Format binaire versionne ecrit a la main, sans dependance ; SRAM batterie stockee dans un fichier propre.
+Le noyau expose Machine::save(&self, &mut [u8]) -> Result<(), SaveError> et Machine::load(...) : ordre de champs fixe documente en commentaires, entiers little-endian, en-tete = magic 4 octets + version u32 + type cartouche 0147 (note 07a), puis les sections d'etat dans un ordre fixe. Aucune crate externe, aucun I/O dans le noyau (AGENTS.md) - l'ecriture des fichiers est faite par le frontend (cli/desktop). La SRAM batterie (MBC1/2/3/5, note 07b) vit dans son propre fichier par cartouche, charge avant le boot et jamais embarquee dans les save states.
+Pros : zero dependance externe (contrainte AGENTS.md du noyau) ; layout de bytes deterministe, unit-testable ; taille petite, adaptee aux saves frequents / rewind (decision A_04) ; le champ version permet de rejeter un format inconnu avec LoadError au lieu d'un panic (AGENTS.md "bad ROM => Result") ; la separation de la RAM batterie colle au hardware - le bit battery du 0147 n'indique que la presence d'une pile (note 07b), et la SRAM persiste a travers les cycles d'alimentation alors qu'un save state est un instantane.
+Cons : format ecrit a la main, il faut de la discipline sur l'ordre des champs et le versioning ; non lisible par un humain ; tout changement d'etat machine doit etre passe en revue pour le format.
+
+Option B - Fichier unique auto-suffisant : SRAM batterie embarquee dans chaque save state.
+Pros : un seul fichier par slot de sauvegarde, UI plus simple (pas de fichiers batterie orphelins).
+Cons : couple la duree de vie de la SRAM a un instantane donne : charger n'importe quel save ecrase le contenu "reel" de la pile ; les jeux qui lisent la SRAM au boot avant tout chargement de save ont besoin d'une source separee quand meme ; contredit le modele hardware ou la pile persiste independamment des instantanes (note 07b) ; fichiers plus gros.
+
+Option C - Format texte/JSON, ou crate externe de serialisation.
+Pros : lisible et debogable par un humain ; une crate gererait le versioning a notre place.
+Cons : viole "zero external dependencies" du noyau si on utilise une crate ; un JSON ecrit a la main ajoute allocation + parsing sur le chemin de save (lent, source d'erreurs) ; mal adapte aux saves frequents / rewind au rythme audio de 32768 Hz (decision A_04).
+
+Recommandation :
+Option A - format binaire versionne ecrit a la main sans dependance, SRAM batterie dans des fichiers separes. C'est la seule option qui garde les quatre contraintes ensemble : zero dependance + aucun I/O dans le noyau (AGENTS.md), layout de bytes deterministe pour des saves bit-a-bit identiques, taille petite pour le rewind, et separation hardware-fidele entre RAM batterie persistante et instantanes.
+
+Consequence :
+- Format : en-tete = magic 4 octets + version u32 (debut a 1) + type cartouche 0147 (note 07a) ; puis sections dans un ordre fixe, entiers little-endian, sans compression ; toute entree inconnue ou tronquee renvoie LoadError, jamais de panic (AGENTS.md).
+- Ce qui fait partie de l'etat : registres CPU AF BC DE HL SP PC + flag IME + instruction en cours (OpInfo + octets d'operands [u8;2] + compteur M-cycles + phase) + verrou d'opcode illegal (decision A_03) ; toute la memoire du Bus - ROM banks, VRAM 8000-9FFF, WRAM C000-DFFF, OAM FE00-FE9F, HRAM FF80-FFFE, fichier I/O FF00-FFFF y compris IF/IE et Wave RAM FF30-FF3F (decision A_02) ; mode PPU + position dot ; timer DIV/TIMA/TMA + retard d'overflow de 1 M-cycle + tick sur falling edge en attente (note 01b) ; DMA flag active + cycles restants (note 03a) ; etat des canaux APU y compris LFSR CH4, tous les timers length/envelope/sweep et la phase d'echantillonnage du rythme de 128 dots (notes 05a/05b, decision A_04) ; serial SC/SB + compteur de bits du transfert + file d'octets (note 06) ; registres du mapper selon le type (banque ROM/RAM, bit mode, enable RAM - note 07b) et registres RTC MBC3 $08-$0C y compris flag halt et carry des jours (note 07b). Le contenu de la SRAM batterie ne fait pas partie de l'etat.
+- Regles de determinisme : le noyau ne lit jamais d'horloge systeme (AGENTS.md) ; le RTC MBC3 n'avance qu'en dots emules - une seconde par 4194304 ticks, arrete par le flag halt (note 07b) - donc deux runs avec la meme sequence d'inputs sont bit-a-bit identiques ; tous les compteurs et ratios restent entiers (decision A_01) ; aucune iteration HashMap/HashSet dans tick() ni save/load (pas de hash iteration), tout l'etat serialise est des tableaux a ordre fixe ; la RAM au power-up est remplie deterministiquement ($00 pour WRAM/HRAM/SRAM, note 08) au lieu du bruit aleatoire.
+- RAM batterie : le noyau porte un tableau [u8] dimensionne par la cartouche (type 0147 + taille 0149 - notes 07a/07b), lu/ecrit via le Bus ; le frontend la persiste dans son propre fichier par cartouche, charge avant le boot et ecris a l'extinction / fermeture ; sans fichier existant, la SRAM demarre a $00 (substitut deterministe du bruit - note 08). Les save states ne la contiennent jamais.
+- Code : puce8gb-core expose save/load comme fonctions pures sur un tampon fourni par l'appelant (pas de std::fs, pas d'I/O - AGENTS.md) ; les crates cli/desktop gerent chemins et noms de fichiers ; aucune dependance nouvelle dans le noyau.
+
 Statut : PROPOSE
