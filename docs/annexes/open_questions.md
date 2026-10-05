@@ -20,3 +20,11 @@ Voir docs/annexes/notes/01b_timer.md.
 
 ## D_05 - CPU core : placement des bits du registre F a confirmer sur le materiel (2026-10-05)
 Voir docs/annexes/notes/02a_cpu_core.md. Les deux sources pandocs concordent entre elles (src/CPU_Registers_and_Flags.md#The-Flags-Register L17-L24 et historical/2001-Oct-pandocs.txt L2087-L2093) : z=bit 7, n=bit 6, h=bit 5, c=bit 4 du registre F, bits 3-0 "not used (always zero)". Ce placement contredit l'enonce du task D_05 ("low nibble of F") ; aucune source du corpus ne confirme les positions de bits sur le materiel. Statut : CONFIRME au niveau des sources - to confirm on hardware via blargg cpu_instrs flag tests (roms/test-roms/blargg/cpu_instrs).
+
+## D_06 - Interrupts CPU / HALT bug / STOP : points a confirmer (2026-10-05)
+Voir docs/annexes/notes/02b_cpu_interrupts.md.
+
+- Frontiere exacte en cycles du delai de ei ("retarde d'une instruction" ; un halt suivant immediatement un ei voit encore IME=0) : pendant ou apres l'execution de l'instruction suivante ? ROM decisive locale : roms/test-roms/same-suite/interrupt/ei_delay_halt.gb. Statut : UNKNOWN - to confirm.
+- Cout exact en cycles avant que STOP n'entree en veille (table 2001 marque "?") ; refs/pandocs ne donne aucun chiffre, le diagramme Halphon reste une image. Pas de ROM test locale dediee trouvee sous roms/test-roms/. Statut : UNKNOWN - to confirm.
+- Comportement DMG des opcodes $93 et $FF (variantes halt-like non documentees) ; la liste des opcodes invalides qui verrouillent le CPU (CPU_Instruction_Set.md L173) ne les inclut pas. Pas de ROM test locale dediee trouvee sous roms/test-roms/ (blargg/cpu_instrs peut couvrir une partie). Statut : UNKNOWN - to confirm.
+- Point exact ou IME=0 devient visible par rapport a l'instruction suivant un di ; refs/pandocs ne precise que qu'aucun interrupt n'est pris entre un ei et un di consecutifs. Statut : UNKNOWN - to confirm.
