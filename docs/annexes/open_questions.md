@@ -72,3 +72,9 @@ Voir docs/annexes/notes/07b_mappers.md.
 
 - CONFLIT delai entre acces aux registres RTC du MBC3 : historical/2001-Oct-pandocs.txt L2618-L2620 recommande "4ms (4 Cycles in Normal Speed Mode)" tandis que refs/pandocs/src/MBC3.md#Delays dit "4 us (4 M-cycles in Normal Speed Mode)". A trancher par roms/test-roms/rtc3test (RTC MBC3). Statut : CONFLIT - to confirm by running this ROM.
 - Comportement precis de l'acces a une banque RAM non mappee (wrap-around) sur chaque puce MBC : formule generale donnee dans refs/pandocs/src/MBCs.md#MBC-Unmapped-RAM-Bank-Access mais non detaillee par puce ; sans effet majeur sur le DMG. Statut : UNKNOWN - to confirm.
+
+## D_16 - Boot and reset : points a confirmer (2026-10-05)
+Voir docs/annexes/notes/08_boot_reset.md.
+
+- Duree exacte de la boot ROM DMG en cycles ou frames : refs/pandocs ne donne aucun chiffre pour le modele DMG (seule la duree des boot ROM SGB est decrite comme dependante du header). A trancher par une test ROM qui mesure le temps entre power-up et PC=$0100, ou par la disassembly de la boot ROM DMG (ISSOtm/gb-bootroms, non clonee). Statut : UNKNOWN - to confirm.
+- CONFLIT valeurs de reset F/TAC/OBP0/OBP1 entre les specs 2001 (AF=$01B0 fixes, TAC=$00, OBP0=OBP1=$FF) et Power_Up_Sequence.md (H/C dependants du checksum $014D, TAC=$F8, OBP0/OBP1 non initialises). A trancher par roms/test-roms/mooneye-test-suite/acceptance/boot_regs-dmgABC.gb et boot_hwio-dmgABCmgb.gb. Statut : CONFLIT - to confirm by running these ROMs.
