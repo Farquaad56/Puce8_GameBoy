@@ -10,6 +10,12 @@ pub enum CartridgeLoadError {
     TooShort,
     /// The ROM size code at $0148 is not a documented value (note 07a "Taille ROM").
     UnknownRomSize,
+    /// The RAM size code at $0149 is not a documented value for this mapper
+    /// (note 07a "Taille RAM"; $01 is CONFLIT between sources).
+    UnknownRamSize(u8),
+    /// The cartridge type at $0147 names a mapper that is not supported yet
+    /// (decision A_06: unknown or unsupported codes return LoadError).
+    UnsupportedCartridgeType(u8),
 }
 
 /// Title region start in bank 0 ($0134, note 07a).

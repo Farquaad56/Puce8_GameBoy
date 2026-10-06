@@ -65,6 +65,7 @@ Voir docs/annexes/notes/07a_cart_header.md.
 
 - CONFLIT codes MBC4 (0147 = $15/$16/$17) : historical/2001-Oct-pandocs.txt L2367-L2369 liste MBC4 / MBC4+RAM / MBC4+RAM+BATTERY, mais The_Cartridge_Header.md#0147 ne liste aucun code MBC4 (saut de $13 a $19). Aucune ROM test locale sous roms/test-roms/ ne trancher. Statut : CONFLIT - to confirm by a test ROM that reads 0147 on an MBC4 cartridge.
 - CONFLIT valeur RAM size 0149 = $01 : historical/2001-Oct-pandocs.txt L2399 donne "2 KBytes", mais The_Cartridge_Header.md#0149 dit "unused" (aucune puce de 2K n'a jamais ete utilisee). Aucune ROM test locale ne trancher. Statut : CONFLIT - to confirm by a test ROM that reads 0149 on a cartridge with $01.
+- E01_04 : le code RAM size 0149 = $01 est rejete par RomOnly::new (CartridgeLoadError::UnknownRamSize) car CONFLIT entre sources ; la valeur reelle (2 KiB ou absent) reste a trancher. Statut : UNKNOWN - to confirm.
 - Comportement exact des valeurs 0147 = $08/$09 (ROM+RAM / ROM+RAM+BATTERY, jamais utilisees) : inconnu dans les sources. Statut : UNKNOWN - to confirm.
 
 ## D_15 - Mappers (MBC) : conflits et manquants (2026-10-05)
