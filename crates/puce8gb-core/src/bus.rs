@@ -1,26 +1,22 @@
 //! Bus: owns every addressable memory region (decision A_02).
-//! read/write dispatch and side-effect-free peek() arrive with later tasks.
+//! read/write dispatch and side-effect-free peek() per decision A_02; PPU-mode blocking
+//! and OAM DMA gating arrive with E03.
 
-/// IO register file FF00-FFFF, including IF ($FF0F) and IE ($FFFF) (decision A_02).
+/// IO register file FF00-FFFF size, including IF ($FF0F) and IE ($FFFF) (decision A_02).
 pub const IO_SIZE: usize = 0x100;
-
-/// Echo RAM E000-FDFF size (decision A_02).
-pub const ECHO_RAM_SIZE: usize = 0x800;
 
 /// Header checksum address in bank 0 (note 07a).
 pub const ROM_HEADER_CHECKSUM: usize = 0x14D;
 
-/// Every memory region of the DMG bus (decision A_02).
+/// Every memory region of the DMG bus (decision A_02, note 03a "Adresse bus").
 #[derive(Debug)]
 pub struct Bus {
     /// Cartridge ROM image, bank 0 first (decisions A_02/A_06).
     pub rom: Vec<u8>,
     /// VRAM 8000-9FFF.
     pub vram: [u8; 0x2000],
-    /// WRAM C000-DFFF.
+    /// WRAM C000-DFFF; the echo RAM E000-FDFF mirrors it by routing (note 03a "Echo RAM").
     pub wram: [u8; 0x2000],
-    /// Echo RAM E000-FDFF, mirror of the current WRAM bank (decision A_02).
-    pub echo_ram: [u8; ECHO_RAM_SIZE],
     /// OAM FE00-FE9F.
     pub oam: [u8; 0x100],
     /// HRAM FF80-FFFE.
@@ -36,7 +32,6 @@ impl Bus {
             rom,
             vram: [0x00; 0x2000],
             wram: [0x00; 0x2000],
-            echo_ram: [0x00; ECHO_RAM_SIZE],
             oam: [0x00; 0x100],
             hram: [0x00; 0x7F],
             io: [0xFF; IO_SIZE],
@@ -46,10 +41,10 @@ impl Bus {
     /// Post-boot state of the memory owned by the Bus (note 08, decision A_06).
     pub fn reset(&mut self) {
         // WRAM/HRAM filled deterministically with $00 at power-up (note 08 "RAM after
-        // power-up", decision A_05); echo RAM mirrors the current WRAM bank.
+        // power-up", decision A_05); echo RAM mirrors the current WRAM bank by routing,
+        // so it carries no separate state.
         self.wram.fill(0x00);
         self.hram.fill(0x00);
-        self.echo_ram.copy_from_slice(&self.wram[..ECHO_RAM_SIZE]);
 
         // Unassigned IO reads $FF by default (decision A_02), then the documented
         // post-boot values from note 08 "Registres I/O apres boot".
@@ -101,5 +96,265 @@ impl Bus {
         io[0x4A] = 0x00; // WY
         io[0x4B] = 0x00; // WX
         io[0xFF] = 0x00; // IE
+    }
+
+    /// Read a byte from the bus (decision A_02). PPU-mode blocking and OAM DMA gating
+    /// arrive with E03.
+    pub fn read(&self, addr: u16) -> u8 {
+        match addr {
+            0x0000..=0x7FFF => self.rom.get(addr as usize).copied().unwrap_or(0xFF), // ROM-only cart (decision A_06): past the image is open bus
+            0x8000..=0x9FFF => self.vram[(addr - 0x8000) as usize],
+            0xA000..=0xBFFF => 0xFF, // cartridge SRAM: unmapped on a ROM-only cart (decision A_06)
+            0xC000..=0xDFFF => {
+                // WRAM: lower 14 bits of the address index into the 8 KiB array.
+                self.wram[((addr - 0xC000) as usize) & 0x3FFF]
+            }
+            0xE000..=0xFDFF => {
+                // Echo RAM: only the lower 13 bits of the address are connected, so it wraps onto
+                // the current WRAM bank (C000-C7FF on DMG) exactly like a read (note 03a "Echo RAM").
+                self.wram[(addr as usize) & 0x1FFF]
+            }
+            0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize],
+            0xFEA0..=0xFEFF => 0x00, // unusable range: $00 on DMG outside OAM block (note 03a)
+            0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize],
+            0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
+            0xFFFF => self.io[IO_SIZE - 1], // IE (decision A_02)
+        }
+    }
+
+    /// Write a byte to the bus (decision A_02). ROM and unmapped/unusable ranges are
+    /// ignored; PPU-mode blocking and OAM DMA gating arrive with E03.
+    pub fn write(&mut self, addr: u16, val: u8) {
+        match addr {
+            0x0000..=0x7FFF => {} // ROM is read-only (note 03a "Adresse bus")
+            0x8000..=0x9FFF => self.vram[(addr - 0x8000) as usize] = val,
+            0xA000..=0xBFFF => {} // cartridge SRAM: unmapped on a ROM-only cart (decision A_06)
+            0xC000..=0xDFFF => self.wram[(addr - 0xC000) as usize] = val,
+            0xE000..=0xFDFF => {
+                // Echo RAM: only the lower 13 bits of the address are connected, so it wraps onto
+                // the current WRAM bank (C000-C7FF on DMG) exactly like a read (note 03a "Echo RAM").
+                self.wram[(addr as usize) & 0x1FFF] = val;
+            }
+            0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize] = val,
+            0xFEA0..=0xFEFF => {} // unusable range: writes are ignored (note 03a)
+            0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize] = val,
+            0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize] = val,
+            0xFFFF => self.io[IO_SIZE - 1] = val, // IE (decision A_02)
+        }
+    }
+
+    /// Read the raw memory at `addr` with no side effect and no gate (decision A_02):
+    /// for debuggers and viewers. PPU-mode blocking and OAM DMA gating arrive with E03.
+    pub fn peek(&self, addr: u16) -> u8 {
+        match addr {
+            0x0000..=0x7FFF => self.rom.get(addr as usize).copied().unwrap_or(0xFF), // ROM-only cart (decision A_06): past the image is open bus
+            0x8000..=0x9FFF => self.vram[(addr - 0x8000) as usize],
+            0xA000..=0xBFFF => 0xFF, // cartridge SRAM: unmapped on a ROM-only cart (decision A_06)
+            0xC000..=0xDFFF => self.wram[(addr - 0xC000) as usize],
+            0xE000..=0xFDFF => {
+                // Echo RAM: only the lower 13 bits of the address are connected, so it wraps onto
+                // the current WRAM bank (C000-C7FF on DMG) exactly like a read/write (note 03a "Echo RAM").
+                self.wram[(addr as usize) & 0x1FFF]
+            }
+            0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize],
+            0xFEA0..=0xFEFF => 0x00, // unusable range: $00 on DMG outside OAM block (note 03a)
+            0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize],
+            0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
+            0xFFFF => self.io[IO_SIZE - 1], // IE (decision A_02)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ROM image of `len` bytes filled with $A5 (distinct from the open-bus $FF), header
+    /// checksum byte $014D set to $5A.
+    fn test_rom(len: usize) -> Vec<u8> {
+        let mut r = vec![0xA5u8; len];
+        if len > ROM_HEADER_CHECKSUM {
+            r[ROM_HEADER_CHECKSUM] = 0x5A;
+        }
+        r
+    }
+
+    #[test]
+    fn e01_03_rom_reads_via_cartridge() {
+        let bus = Bus::new(test_rom(32 * 1024));
+        assert_eq!(bus.read(0x0000), 0xA5); // bank 0 first byte
+        assert_eq!(bus.read(0x014D), 0x5A); // header checksum byte (note 07a)
+        assert_eq!(bus.read(0x3FFF), 0xA5); // last byte of bank 0
+        assert_eq!(bus.read(0x4000), 0xA5); // ROM-only cart: the image continues in bank 1
+        assert_eq!(bus.read(0x7FFF), 0xA5); // end of the ROM area (note 03a)
+    }
+
+    #[test]
+    fn e01_03_rom_read_past_image_is_open_bus() {
+        let bus = Bus::new(test_rom(16 * 1024));
+        assert_eq!(bus.read(0x3FFF), 0xA5); // last byte of the image
+        assert_eq!(bus.read(0x4000), 0xFF); // past the end: open bus (decision A_02)
+    }
+
+    #[test]
+    fn e01_03_rom_writes_are_ignored() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0x0100, 0x5A);
+        assert_eq!(bus.read(0x0100), 0xA5); // ROM is read-only (note 03a "Adresse bus")
+    }
+
+    #[test]
+    fn e01_03_vram_read_write() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0x8000, 0xA5);
+        assert_eq!(bus.read(0x8000), 0xA5);
+        bus.write(0x9FFF, 0x3C);
+        assert_eq!(bus.read(0x9FFF), 0x3C);
+    }
+
+    #[test]
+    fn e01_03_wram_read_write() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xC000, 0xA5);
+        assert_eq!(bus.read(0xC000), 0xA5);
+        bus.write(0xDFFF, 0x3C);
+        assert_eq!(bus.read(0xDFFF), 0x3C);
+    }
+
+    #[test]
+    fn e01_03_echo_mirrors_wram_both_ways() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        // WRAM -> echo: a value (not $00/$FF) written to WRAM is mirrored in the echo RAM
+        // and absent from cartridge SRAM (note 03a "Echo RAM").
+        bus.write(0xC050, 0xA5);
+        assert_eq!(bus.read(0xE050), 0xA5);
+        assert_eq!(bus.read(0xA050), 0xFF);
+        // echo -> WRAM: writing the echo RAM changes the WRAM bank.
+        bus.write(0xE051, 0x3C);
+        assert_eq!(bus.read(0xC051), 0x3C);
+        // The mirror wraps on the lower 13 bits over the full echo range E000-FDFF (note 03a "Echo RAM").
+        bus.write(0xFDFF, 0xA5);
+        assert_eq!(bus.read(0xDDFF), 0xA5); // FDFF mirrors DDFF: only the lower 13 bits are connected
+    }
+
+    #[test]
+    fn e01_03_oam_read_write() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFE00, 0x90); // OAM y coordinate (note 03a)
+        assert_eq!(bus.read(0xFE00), 0x90);
+        bus.write(0xFE9F, 0x88);
+        assert_eq!(bus.read(0xFE9F), 0x88);
+    }
+
+    #[test]
+    fn e01_03_unusable_range_reads_zero_and_writes_ignored() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        assert_eq!(bus.read(0xFEA0), 0x00); // DMG outside OAM block (note 03a)
+        assert_eq!(bus.read(0xFEFF), 0x00);
+        bus.write(0xFEB0, 0xA5);
+        assert_eq!(bus.read(0xFEB0), 0x00); // writes to the unusable range are ignored
+    }
+
+    #[test]
+    fn e01_03_io_read_write() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFF00, 0xC5); // P1
+        assert_eq!(bus.read(0xFF00), 0xC5);
+        bus.write(0xFF7F, 0x3C);
+        assert_eq!(bus.read(0xFF7F), 0x3C);
+    }
+
+    #[test]
+    fn e01_03_ie_is_last_byte_of_io_file() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFFFF, 0x81); // IE (decision A_02)
+        assert_eq!(bus.read(0xFFFF), 0x81);
+        assert_eq!(bus.io[IO_SIZE - 1], 0x81);
+    }
+
+    #[test]
+    fn e01_03_hram_read_write() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFF80, 0xA5);
+        assert_eq!(bus.read(0xFF80), 0xA5);
+        bus.write(0xFFFE, 0x3C);
+        assert_eq!(bus.read(0xFFFE), 0x3C);
+    }
+
+    #[test]
+    fn e01_03_unmapped_cartridge_sram_reads_open_bus() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        assert_eq!(bus.read(0xA000), 0xFF); // unmapped on a ROM-only cart (decision A_06)
+        assert_eq!(bus.read(0xBFFF), 0xFF);
+        bus.write(0xA000, 0x3C);
+        assert_eq!(bus.read(0xA000), 0xFF); // writes are ignored
+    }
+
+    #[test]
+    fn e01_03_region_boundaries_do_not_overlap() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        // VRAM last byte does not leak into the unmapped SRAM after it.
+        bus.write(0x9FFF, 0x3C);
+        assert_eq!(bus.read(0xA000), 0xFF);
+        // WRAM first byte does not leak into the unmapped SRAM before it.
+        bus.write(0xC000, 0xA5);
+        assert_eq!(bus.read(0xBFFF), 0xFF);
+        // Echo RAM mirrors by offset: its last byte is C7FF, not DFFF.
+        bus.write(0xDFFF, 0x3C);
+        assert_eq!(bus.read(0xFDFF), 0x00);
+        assert_eq!(bus.read(0xC7FF), 0x00);
+        // OAM first byte does not leak into the unusable range before it.
+        bus.write(0xFE00, 0x90);
+        assert_eq!(bus.read(0xFEA0), 0x00);
+        // IO first byte does not leak into the unusable range before it.
+        bus.write(0xFF00, 0xC5);
+        assert_eq!(bus.read(0xFEFF), 0x00);
+        // HRAM is separate from the IO file: writing FF7F leaves FF80 untouched.
+        bus.write(0xFF7F, 0x3C);
+        assert_eq!(bus.read(0xFF80), 0x00);
+        // IE (FFFF) is separate from HRAM: writing FFFE leaves FFFF at its open-bus value.
+        bus.write(0xFFFE, 0xA5);
+        assert_eq!(bus.read(0xFFFF), 0xFF);
+    }
+
+    #[test]
+    fn e01_03_peek_reads_raw_memory_across_regions() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        assert_eq!(bus.peek(0x0000), 0xA5); // ROM via cartridge
+        bus.write(0x8000, 0x3C);
+        assert_eq!(bus.peek(0x8000), 0x3C); // VRAM
+        bus.write(0xC000, 0x90);
+        assert_eq!(bus.peek(0xE000), 0x90); // echo mirrors WRAM
+        bus.write(0xFE00, 0x81);
+        assert_eq!(bus.peek(0xFE00), 0x81); // OAM
+        assert_eq!(bus.peek(0xFEA0), 0x00); // unusable range reads $00 on DMG
+        bus.write(0xFF00, 0xC5);
+        assert_eq!(bus.peek(0xFF00), 0xC5); // IO
+        bus.write(0xFF80, 0xA1);
+        assert_eq!(bus.peek(0xFF80), 0xA1); // HRAM
+        assert_eq!(bus.peek(0xFFFF), 0xFF); // IE at its open-bus value
+        assert_eq!(bus.peek(0xA000), 0xFF); // unmapped: open bus
+    }
+
+    #[test]
+    fn e01_03_peek_equals_read_for_plain_memory() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        for addr in [0x8000u16, 0xC000, 0xE000, 0xFE00, 0xFF00, 0xFF80, 0xFFFF] {
+            bus.write(addr, 0xA5);
+        }
+        // No gates yet (E03): peek equals read across the whole map.
+        for addr in 0x0000u16..=0xFFFF {
+            assert_eq!(bus.peek(addr), bus.read(addr));
+        }
+    }
+
+    #[test]
+    fn e01_03_peek_does_not_change_state() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFF00, 0xC5);
+        for _ in 0..8 {
+            assert_eq!(bus.peek(0xFF00), 0xC5); // peek has no side effect (decision A_02)
+        }
+        assert_eq!(bus.read(0xFF00), 0xC5);
     }
 }
