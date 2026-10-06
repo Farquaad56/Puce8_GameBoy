@@ -1,6 +1,9 @@
 //! SM83 CPU (decision A_03): registers and post-boot state for now; instruction execution,
 //! interrupts and HALT/STOP arrive with later tasks.
 
+pub mod registers;
+
+use self::registers::Registers;
 use crate::bus::Bus;
 
 /// Micro-op execution state (decision A_03).
@@ -40,7 +43,10 @@ impl Default for OpInfo {
 
 /// Minimal inline opcode table for E02_01 (full generated table arrives with E02_02).
 /// All entries default to NOP-like timing; only index 0x00 (the NOP opcode) is correct.
-const OP_NOP: OpInfo = OpInfo { bytes: 1, m_taken: 1 };
+const OP_NOP: OpInfo = OpInfo {
+    bytes: 1,
+    m_taken: 1,
+};
 pub const OPCODES: [OpInfo; 256] = [OP_NOP; 256];
 
 /// Post-boot CPU register state at PC=$0100 on DMG (note 08 "Registres CPU apres boot").
@@ -65,27 +71,40 @@ pub struct Cpu {
 }
 
 impl Cpu {
-    /// Post-boot values (note 08). Z set and N clear; H and C are both set iff the header
-    /// checksum byte $014D is not $00 (Power_Up_Sequence.md#CPU-registers L237).
-    /// CONFLIT: specs 2001 give fixed H=1 C=1; to be settled by mooneye boot_regs-dmgABC
-    /// (note 08).
+    /// Post-boot values (note 02a "Valeurs de reset DMG des registres CPU"). Delegates to
+    /// the register file so the reset values live in one place. Z set and N clear; H and C
+    /// are both set iff the header checksum byte $014D is not $00 (Power_Up_Sequence.md#CPU-registers).
+    /// CONFLIT: specs 2001 give fixed H=1 C=1; to be settled by mooneye boot_regs-dmgABC.
     pub fn reset(checksum: u8) -> Self {
-        let mut f = 0x80; // Z set, N clear
-        if checksum != 0x00 {
-            f |= 0x30; // H and C both set
-        }
+        let regs = Registers::reset(checksum);
         Cpu {
-            a: 0x01,
-            f,
-            b: 0x00,
-            c: 0x13,
-            d: 0x00,
-            e: 0xD8,
-            h: 0x01,
-            l: 0x4D,
-            sp: 0xFFFE,
-            pc: 0x0100,
+            a: regs.a,
+            f: regs.f,
+            b: regs.b,
+            c: regs.c,
+            d: regs.d,
+            e: regs.e,
+            h: regs.h,
+            l: regs.l,
+            sp: regs.sp,
+            pc: regs.pc,
             instr_state: InstrState::Idle,
+        }
+    }
+
+    /// View the register file (A F B C D E H L SP PC) with pair and flag accessors.
+    pub fn regs(&self) -> Registers {
+        Registers {
+            a: self.a,
+            f: self.f,
+            b: self.b,
+            c: self.c,
+            d: self.d,
+            e: self.e,
+            h: self.h,
+            l: self.l,
+            sp: self.sp,
+            pc: self.pc,
         }
     }
 
@@ -113,13 +132,16 @@ impl Cpu {
             *remaining += 1;
 
             // For multi-byte instructions, read the next operand byte from PC.
-            if *op_periph_read < (info.bytes - 1).max(0) && *remaining <= info.m_taken {
+            if *op_periph_read < info.bytes.saturating_sub(1) && *remaining <= info.m_taken {
                 let _byte = bus.read(self.pc);
                 self.pc = self.pc.wrapping_add(1);
                 *op_periph_read += 1;
             }
 
             if *remaining >= info.m_taken {
+                // Instruction boundary (note 02a): bits 3-0 of F are "not used (always zero)",
+                // so the low nibble is re-masked whenever an instruction completes.
+                self.f &= registers::F_USED_BITS;
                 self.instr_state = InstrState::Idle;
             }
         }
@@ -171,8 +193,10 @@ mod tests {
             bus.write(start_addr.wrapping_add(i as u16), b);
         }
 
-        let mut cpu = Cpu::default();
-        cpu.pc = start_addr;
+        let mut cpu = Cpu {
+            pc: start_addr,
+            ..Cpu::default()
+        };
 
         let cycles = exec(&mut cpu, &mut bus, &[0x00]);
         assert_eq!(cycles, 1, "NOP should take 1 M-cycle per table");
@@ -188,8 +212,10 @@ mod tests {
             bus.write(start_addr.wrapping_add(i as u16), b);
         }
 
-        let mut cpu = Cpu::default();
-        cpu.pc = start_addr;
+        let mut cpu = Cpu {
+            pc: start_addr,
+            ..Cpu::default()
+        };
 
         exec(&mut cpu, &mut bus, &[0x00]);
 
@@ -206,17 +232,16 @@ mod tests {
             bus.write(start_addr.wrapping_add(i as u16), b);
         }
 
-        let mut cpu = Cpu::default();
-        cpu.pc = start_addr;
         // Set all flag bits (including low nibble) to 1.
-        cpu.f = 0x0F;
+        let mut cpu = Cpu {
+            pc: start_addr,
+            f: 0x0F,
+            ..Cpu::default()
+        };
 
         exec(&mut cpu, &mut bus, &[0x00]);
 
-        assert_eq!(
-            cpu.f & 0x0F, 0,
-            "low nibble of F must stay 0 after NOP"
-        );
+        assert_eq!(cpu.f & 0x0F, 0, "low nibble of F must stay 0 after NOP");
     }
 
     #[test]
@@ -227,8 +252,10 @@ mod tests {
             bus.write(0xC000 + i as u16, b);
         }
 
-        let mut cpu = Cpu::default();
-        cpu.pc = 0xC000;
+        let mut cpu = Cpu {
+            pc: 0xC000,
+            ..Cpu::default()
+        };
 
         // Should not panic - all instructions behave as NOP for E02_01.
         for _ in 0..3 {
@@ -236,7 +263,10 @@ mod tests {
         }
 
         // PC should advance past the instruction bytes (stub behavior).
-        assert_eq!(cpu.pc, 0xC003, "PC should advance past stubbed multi-byte opcode");
+        assert_eq!(
+            cpu.pc, 0xC003,
+            "PC should advance past stubbed multi-byte opcode"
+        );
     }
 
     #[test]
