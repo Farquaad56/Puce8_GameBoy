@@ -1,8 +1,11 @@
 //! SM83 CPU (decision A_03): registers and post-boot state for now; instruction execution,
 //! interrupts and HALT/STOP arrive with later tasks.
 
+pub mod opcode_table;
 pub mod registers;
 
+use self::opcode_table::CB_OPCODES;
+use self::opcode_table::OPCODES as _OPCODE_TABLE;
 use self::registers::Registers;
 use crate::bus::Bus;
 
@@ -119,7 +122,9 @@ impl Cpu {
     /// Execute one M-cycle (decision A_03): exactly one bus access per call.
     pub fn tick(&mut self, bus: &mut Bus) {
         // Fetch new opcode if no instruction in flight (decision A_03).
-        if matches!(self.instr_state, InstrState::Idle) {
+        let idling = matches!(self.instr_state, InstrState::Idle);
+
+        if idling {
             let opcode = bus.read(self.pc);
             self.pc = self.pc.wrapping_add(1);
 
@@ -139,8 +144,8 @@ impl Cpu {
         {
             *remaining += 1;
 
-            // For multi-byte instructions, read the next operand byte from PC.
-            if *op_periph_read < info.bytes.saturating_sub(1) && *remaining <= info.m_taken {
+            // Read next operand byte if needed (not for single-byte ops) AND still within budget.
+            if *op_periph_read < info.bytes.saturating_sub(1) && (*remaining as i32 - 1).abs() < info.m_taken as i32 {
                 let _byte = bus.read(self.pc);
                 self.pc = self.pc.wrapping_add(1);
                 *op_periph_read += 1;
@@ -149,6 +154,28 @@ impl Cpu {
             if *remaining >= info.m_taken {
                 // Instruction boundary (note 02a): bits 3-0 of F are "not used (always zero)",
                 // so the low nibble is re-masked whenever an instruction completes.
+                self.f &= registers::F_USED_BITS;
+                self.instr_state = InstrState::Idle;
+            }
+        }
+    }
+
+    /// Execute one cycle without reading additional opcodes - just for timing.
+    pub fn cycle(&mut self, bus: &mut Bus) {
+        if let InstrState::Active {
+            ref mut info,
+            ref mut remaining,
+            ..
+        }
+        | InstrState::Active {
+            info: _,
+            remaining,
+            op_periph_read: _,
+        } = self.instr_state
+        {
+            *remaining += 1;
+
+            if *remaining >= info.m_taken {
                 self.f &= registers::F_USED_BITS;
                 self.instr_state = InstrState::Idle;
             }

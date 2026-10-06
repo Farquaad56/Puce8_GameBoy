@@ -66,7 +66,7 @@ Statut : CONFIRME | CONFLIT | UNKNOWN - to confirm
 - Hardware arithmetic: wrapping_add / wrapping_sub / overflowing_* explicitly.
 - No panic on external input (bad ROM => Result<_, LoadError>). No Rc<RefCell>/Arc<Mutex> for the bus.
 - No allocation inside tick() (no Vec::push, String, Box in the hot path).
-- Cycle accurate: one micro-op = exactly one bus access. Integer clock ratios only (no f32/f64). Chip order inside
+- Cycle accurate: one tick = one M-cycle = AT MOST one bus access (decision C_00; internal M-cycles have none). Integer clock ratios only (no f32/f64). Chip order inside
   a tick is defined in docs/annexes/decisions.md and never changed silently.
 - Debug/viewer code reads memory with peek() (no side effects).
 - Frontend crates (cli, desktop) may use deps; the core must never know egui, cpal, gilrs or the file system.

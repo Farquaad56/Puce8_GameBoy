@@ -32,51 +32,47 @@ E01_02	CODE	0	docs/tasks/E01/E01_02.md	Cartridge header parsing
 E01_03	CODE	0	docs/tasks/E01/E01_03.md	Bus: regions, echo, peek
 E01_04	CODE	1	docs/tasks/E01/E01_04.md	ROM-only mapper and CLI info
 E02_01	CODE	0	docs/tasks/E02/E02_01.md	Registers and flag helpers
-E02_02	CODE	0	docs/tasks/E02/E02_02.md	Micro-op engine and NOP
-E02_03	CODE	0	docs/tasks/E02/E02_03.md	Generated opcode table installed
-E02_04	CODE	0	docs/tasks/E02/E02_04.md	LD r,r and LD r,n
-E02_05	CODE	0	docs/tasks/E02/E02_05.md	LD through (HL), (BC), (DE)
-E02_06	CODE	0	docs/tasks/E02/E02_06.md	LD absolute, high memory, HL+/HL-
-E02_07	CODE	0	docs/tasks/E02/E02_07.md	16-bit immediate loads
-E02_08	CODE	0	docs/tasks/E02/E02_08.md	PUSH and POP
-E02_09	CODE	0	docs/tasks/E02/E02_09.md	ADD ADC SUB SBC
-E02_10	CODE	0	docs/tasks/E02/E02_10.md	AND XOR OR CP
-E02_11	CODE	0	docs/tasks/E02/E02_11.md	INC and DEC 8-bit
-E02_12	CODE	0	docs/tasks/E02/E02_12.md	ADD HL,rr and INC/DEC rr
-E02_13	CODE	0	docs/tasks/E02/E02_13.md	ADD SP,e and LD HL,SP+e
-E02_14	CODE	0	docs/tasks/E02/E02_14.md	Accumulator rotates, CPL, SCF, CCF
-E02_15	CODE	0	docs/tasks/E02/E02_15.md	DAA
-E02_16	CODE	0	docs/tasks/E02/E02_16.md	CB rotates and shifts on registers
-E02_17	CODE	0	docs/tasks/E02/E02_17.md	CB BIT RES SET on registers
-E02_18	CODE	0	docs/tasks/E02/E02_18.md	CB (HL) forms and full CB table
-E02_19	CODE	0	docs/tasks/E02/E02_19.md	JP and JR
-E02_20	CODE	0	docs/tasks/E02/E02_20.md	CALL, RET, RST
-E02_21	CODE	0	docs/tasks/E02/E02_21.md	IF, IE, IME, EI and DI
-E02_22	CODE	0	docs/tasks/E02/E02_22.md	Interrupt dispatch and RETI
-E02_23	CODE	0	docs/tasks/E02/E02_23.md	HALT, HALT bug and wake-up
-E02_24	CODE	0	docs/tasks/E02/E02_24.md	STOP and illegal opcodes
-E02_25	CODE	0	docs/tasks/E02/E02_25.md	Timer internal counter and DIV
-E02_26	CODE	0	docs/tasks/E02/E02_26.md	TIMA increments and TAC
-E02_27	CODE	0	docs/tasks/E02/E02_27.md	TIMA overflow and timer interrupt
-E02_28	CODE	0	docs/tasks/E02/E02_28.md	Serial registers and output buffer
-E02_29	CODE	0	docs/tasks/E02/E02_29.md	Minimal PPU stub for LY and VBlank
-E02_30	CODE	0	docs/tasks/E02/E02_30.md	CLI run command
-E02_31	CODE	0	docs/tasks/E02/E02_31.md	CLI instruction trace
-E02_32	TEST	0	docs/tasks/E02/E02_32.md	blargg cpu_instrs 01 special
-E02_33	TEST	0	docs/tasks/E02/E02_33.md	blargg cpu_instrs 03 op sp,hl
-E02_34	TEST	0	docs/tasks/E02/E02_34.md	blargg cpu_instrs 04 op r,imm
-E02_35	TEST	0	docs/tasks/E02/E02_35.md	blargg cpu_instrs 05 op rp
-E02_36	TEST	0	docs/tasks/E02/E02_36.md	blargg cpu_instrs 06 ld r,r
-E02_37	TEST	0	docs/tasks/E02/E02_37.md	blargg cpu_instrs 07 jr,jp,call,ret,rst
-E02_38	TEST	0	docs/tasks/E02/E02_38.md	blargg cpu_instrs 08 misc instrs
-E02_39	TEST	0	docs/tasks/E02/E02_39.md	blargg cpu_instrs 09 op r,r
-E02_40	TEST	0	docs/tasks/E02/E02_40.md	blargg cpu_instrs 02 interrupts
-E02_41	TEST	0	docs/tasks/E02/E02_41.md	blargg cpu_instrs 10 bit ops
-E02_42	TEST	0	docs/tasks/E02/E02_42.md	blargg cpu_instrs 11 op a,(hl)
-E02_43	TEST	0	docs/tasks/E02/E02_43.md	blargg instr_timing
-E02_44	TEST	0	docs/tasks/E02/E02_44.md	blargg mem_timing 01 read
-E02_45	TEST	0	docs/tasks/E02/E02_45.md	blargg mem_timing 02 write
-E02_46	TEST	1	docs/tasks/E02/E02_46.md	blargg mem_timing 03 modify
+C01_01	CODE	0	docs/tasks/C01/C01_01.md	CPU clean slate: skeleton, engine contract, test helper
+C01_02	CODE	0	docs/tasks/C01/C01_02.md	Dmg drives the CPU: one M-cycle every 4 dots
+C01_03	CODE	0	docs/tasks/C01/C01_03.md	Serial capture (SB/SC) in the bus
+C01_04	CODE	1	docs/tasks/C01/C01_04.md	CLI run command with exit codes and trace
+C01_05	CODE	0	docs/tasks/C01/C01_05.md	NOP, LD r,r and LD r,n (register forms)
+C01_06	CODE	0	docs/tasks/C01/C01_06.md	LD through (HL), (BC), (DE), HL+/HL-
+C01_07	CODE	0	docs/tasks/C01/C01_07.md	LD absolute, LDH and LD (C)
+C01_08	CODE	0	docs/tasks/C01/C01_08.md	LD rr,nn, LD SP,HL, LD (nn),SP
+C01_09	CODE	0	docs/tasks/C01/C01_09.md	PUSH and POP
+C01_10	CODE	0	docs/tasks/C01/C01_10.md	JP and JR
+C01_11	CODE	0	docs/tasks/C01/C01_11.md	CALL, RET, RST
+C01_12	CODE	0	docs/tasks/C01/C01_12.md	INC and DEC 8-bit
+C01_13	CODE	0	docs/tasks/C01/C01_13.md	ADD, ADC, SUB, SBC
+C01_14	CODE	0	docs/tasks/C01/C01_14.md	AND, XOR, OR, CP
+C01_15	CODE	0	docs/tasks/C01/C01_15.md	Minimal LY / VBlank stub
+C01_16	TEST	1	docs/tasks/C01/C01_16.md	blargg cpu_instrs 06 ld r,r
+C01_17	CODE	0	docs/tasks/C01/C01_17.md	INC/DEC rr and ADD HL,rr
+C01_18	CODE	0	docs/tasks/C01/C01_18.md	ADD SP,e8 and LD HL,SP+e8
+C01_19	TEST	1	docs/tasks/C01/C01_19.md	blargg cpu_instrs 03 op sp,hl
+C01_20	TEST	1	docs/tasks/C01/C01_20.md	blargg cpu_instrs 04 op r,imm
+C01_21	TEST	1	docs/tasks/C01/C01_21.md	blargg cpu_instrs 05 op rp
+C01_22	CODE	0	docs/tasks/C01/C01_22.md	Accumulator rotates, CPL, SCF, CCF
+C01_23	CODE	0	docs/tasks/C01/C01_23.md	DAA
+C01_24	TEST	1	docs/tasks/C01/C01_24.md	blargg cpu_instrs 01 special
+C01_25	CODE	0	docs/tasks/C01/C01_25.md	CB rotates, shifts and SWAP
+C01_26	CODE	0	docs/tasks/C01/C01_26.md	CB BIT, RES, SET
+C01_27	TEST	1	docs/tasks/C01/C01_27.md	blargg cpu_instrs 09 op r,r
+C01_28	TEST	1	docs/tasks/C01/C01_28.md	blargg cpu_instrs 10 bit ops
+C01_29	TEST	1	docs/tasks/C01/C01_29.md	blargg cpu_instrs 11 op a,(hl)
+C01_30	TEST	1	docs/tasks/C01/C01_30.md	blargg cpu_instrs 07 jr,jp,call,ret,rst
+C01_31	TEST	1	docs/tasks/C01/C01_31.md	blargg cpu_instrs 08 misc instrs
+C01_32	CODE	0	docs/tasks/C01/C01_32.md	EI, DI, IME and interrupt dispatch, RETI
+C01_33	CODE	0	docs/tasks/C01/C01_33.md	HALT, HALT bug, STOP, illegal opcodes
+C01_34	CODE	0	docs/tasks/C01/C01_34.md	Timer: DIV, TIMA, TMA, TAC counting
+C01_35	CODE	0	docs/tasks/C01/C01_35.md	Timer: overflow, reload and interrupt
+C01_36	TEST	1	docs/tasks/C01/C01_36.md	blargg cpu_instrs 02 interrupts
+C01_37	TEST	1	docs/tasks/C01/C01_37.md	blargg instr_timing
+C01_38	TEST	1	docs/tasks/C01/C01_38.md	blargg mem_timing 01 read_timing
+C01_39	TEST	1	docs/tasks/C01/C01_39.md	blargg mem_timing 02 write_timing
+C01_40	TEST	1	docs/tasks/C01/C01_40.md	blargg mem_timing 03 modify_timing
+C01_41	TEST	1	docs/tasks/C01/C01_41.md	blargg halt_bug
 E03_01	CODE	0	docs/tasks/E03/E03_01.md	PPU timing, modes, STAT, LCDC
 E03_02	CODE	0	docs/tasks/E03/E03_02.md	OAM scan and VRAM/OAM access blocking
 E03_03	CODE	0	docs/tasks/E03/E03_03.md	Background and window pixel pipeline
