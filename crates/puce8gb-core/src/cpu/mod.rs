@@ -8,7 +8,7 @@ use crate::bus::Bus;
 
 /// Micro-op execution state (decision A_03).
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum InstrState {
+pub enum InstrState {
     /// No instruction in flight; next tick() fetches opcode from PC.
     #[default]
     Idle,
@@ -47,7 +47,15 @@ const OP_NOP: OpInfo = OpInfo {
     bytes: 1,
     m_taken: 1,
 };
-pub const OPCODES: [OpInfo; 256] = [OP_NOP; 256];
+const OP_CB: OpInfo = OpInfo {
+    bytes: 2,
+    m_taken: 2,
+};
+pub const OPCODES: [OpInfo; 256] = {
+    let mut ops = [OP_NOP; 256];
+    ops[0xCB_usize] = OP_CB;
+    ops
+};
 
 /// Post-boot CPU register state at PC=$0100 on DMG (note 08 "Registres CPU apres boot").
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -65,9 +73,9 @@ pub struct Cpu {
     pub sp: u16,
     pub pc: u16,
 
-    /// Micro-op engine state (decision A_03).
+    /// Micro-op engine state (decision A_03). Exposed for integration test access.
     #[cfg_attr(test, allow(dead_code))]
-    instr_state: InstrState,
+    pub instr_state: InstrState,
 }
 
 impl Cpu {
