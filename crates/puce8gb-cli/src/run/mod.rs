@@ -69,16 +69,22 @@ pub fn trace_line(
 }
 
 /// Run a ROM image for at most `args.max_cycles` T-cycles (task C01_44). No file access:
-/// the caller reads the bytes. Serial bytes are echoed on stdout and the run stops early
-/// when the expected text or the failure marker appears (C01_45), or when the CPU records
-/// an unimplemented opcode (C01_46); the serial scan keeps priority over both. With
-/// `--trace N`, one line per instruction goes to stderr at the start of each M-cycle,
-/// only on an instruction boundary (task C01_47).
+/// the caller reads the bytes. Builds the machine and delegates to `run_machine`.
 pub fn run_rom(rom: &[u8], args: &RunArgs) -> Outcome {
     let mut dmg = match Dmg::new(rom) {
         Ok(dmg) => dmg,
         Err(_) => return Outcome::LoadError,
     };
+    run_machine(&mut dmg, args)
+}
+
+/// Run an already-built machine for at most `args.max_cycles` T-cycles (task C01_48): the
+/// M-cycle loop of `run_rom`, split out so tests can pre-seed CPU state. Serial bytes are
+/// echoed on stdout and the run stops early when the expected text or the failure marker
+/// appears (C01_45), or when the CPU records an unimplemented opcode (C01_46); the serial
+/// scan keeps priority over both. With `--trace N`, one line per instruction goes to stderr
+/// at the start of each M-cycle, only on an instruction boundary (task C01_47).
+pub fn run_machine(dmg: &mut Dmg, args: &RunArgs) -> Outcome {
     let mut collected = String::new();
     let mut buf = [0u8; 64];
     // Remaining traced instructions (task C01_47); 0 disables tracing.

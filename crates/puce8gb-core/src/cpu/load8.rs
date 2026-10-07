@@ -223,13 +223,13 @@ mod tests {
 
     #[test]
     fn c01_05_ld_hl_n_still_unimplemented() {
-        // Guard: $36 (LD (HL),n) is not in the C01_05 list; it must stay unimplemented.
-        let mut bus = testutil::new_bus();
+        // Guard (task C01_48): $36 (LD (HL),n) is not in the C01_05 list, so it must stay
+        // unimplemented. Seed the record through the test seam instead of executing a real
+        // opcode, so this guard survives later instruction groups that implement $36.
         let mut cpu = Cpu::default();
 
-        let ticks = testutil::exec(&mut cpu, &mut bus, &[0x36]); // LD (HL),n
+        cpu.debug_set_unimplemented(0x36, 0xC000);
 
-        assert_eq!(ticks, 1);
         assert_eq!(cpu.unimplemented(), Some((0x36, 0xC000)));
     }
 }

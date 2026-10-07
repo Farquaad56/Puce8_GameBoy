@@ -90,6 +90,13 @@ impl Cpu {
         self.unimplemented
     }
 
+    /// Test seam for other crates (task C01_48): store an unimplemented-opcode record
+    /// without executing anything. Not used by the engine itself.
+    #[doc(hidden)]
+    pub fn debug_set_unimplemented(&mut self, opcode: u8, pc: u16) {
+        self.unimplemented = Some((opcode, pc));
+    }
+
     /// Execute one M-cycle (decision C_00): at most one bus access.
     pub fn tick(&mut self, bus: &mut Bus) {
         if self.step == 0 {
@@ -209,6 +216,18 @@ mod tests {
         cpu.pc = 0xC002; // as if a second byte was just fetched from $C001
         cpu.record_unimplemented(0xA5);
         assert_eq!(cpu.unimplemented(), Some((0xA5, 0xC001)));
+    }
+
+    #[test]
+    fn c01_48_debug_set_unimplemented_stores_record() {
+        // Test seam (task C01_48): store a record without executing anything, so other
+        // crates can test the unimplemented-opcode path with real opcodes.
+        let mut cpu = Cpu::default();
+        assert_eq!(cpu.unimplemented(), None);
+
+        cpu.debug_set_unimplemented(0x99, 0x0100);
+
+        assert_eq!(cpu.unimplemented(), Some((0x99, 0x0100)));
     }
 
     #[test]

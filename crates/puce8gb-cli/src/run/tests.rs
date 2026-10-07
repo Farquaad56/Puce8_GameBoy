@@ -5,13 +5,18 @@ use puce8gb_core::media::header::Header;
 use super::*;
 
 /// Synthetic ROM image of at least `MIN_ROM_LEN` bytes with `code` placed at the
-/// entry point $0100 and a valid stored header checksum (note 07a).
+/// entry point $0100 and a valid stored header checksum (note 07a). An empty `code`
+/// yields an all-zero ROM: every byte is NOP, so it runs as a pure NOP stream (task C01_48);
+/// its stored checksum stays zero rather than being recomputed. The base size is large
+/// enough that a pure-NOP run of the test's max_cycles never reaches open bus past the image.
 fn test_rom(code: &[u8]) -> Vec<u8> {
-    let mut r = vec![0x00u8; 0x150.max(0x100 + code.len())];
+    let mut r = vec![0x00u8; 0x200.max(0x100 + code.len())];
     for (i, b) in code.iter().enumerate() {
         r[0x100 + i] = *b;
     }
-    r[0x14D] = Header::header_checksum(&r);
+    if !code.is_empty() {
+        r[0x14D] = Header::header_checksum(&r);
+    }
     r
 }
 
@@ -32,12 +37,16 @@ fn c01_44_rom_too_short_is_load_error() {
 
 #[test]
 fn c01_44_valid_rom_stops_on_unimplemented_opcode() {
-    // No instruction group is implemented yet (decision C_00): an all-zero ROM fetches
-    // opcode 0x00 at $0100, records it as unimplemented and the run stops there.
+    // NOP is implemented (C01_05), so an all-zero ROM no longer stops on its own. Seed the
+    // unimplemented record through the test seam instead of executing a real opcode, so
+    // this test survives later instruction groups (task C01_48).
+    let mut dmg = Dmg::new(&test_rom(&[])).expect("valid ROM");
+    dmg.cpu.debug_set_unimplemented(0x99, 0x0100);
+
     assert_eq!(
-        run_rom(&test_rom(&[]), &args(400, None)),
+        run_machine(&mut dmg, &args(400, None)),
         Outcome::Unimplemented {
-            opcode: 0x00,
+            opcode: 0x99,
             pc: 0x0100
         }
     );
@@ -114,14 +123,29 @@ fn c01_46_exit_code_is_four() {
 
 #[test]
 fn c01_46_run_stops_on_unimplemented_opcode() {
-    // No instruction group is implemented yet (decision C_00): the first fetch at $0100
-    // records opcode 0x99, so the run stops with it. Pure state check: no real opcode
-    // is executed through the CPU, so this test survives later implementations.
-    let mut dmg = Dmg::new(&test_rom(&[0x99])).expect("valid ROM");
-    for _ in 0..4 {
-        dmg.tick();
-    }
-    assert_eq!(dmg.cpu.unimplemented(), Some((0x99, 0x0100)));
+    // The record is seeded through the test seam (task C01_48): no real opcode is
+    // executed through the CPU, so this test survives later implementations. The run
+    // stops on it at the first M-cycle check.
+    let mut dmg = Dmg::new(&test_rom(&[])).expect("valid ROM");
+    dmg.cpu.debug_set_unimplemented(0x99, 0x0100);
+
+    assert_eq!(
+        run_machine(&mut dmg, &args(400, None)),
+        Outcome::Unimplemented {
+            opcode: 0x99,
+            pc: 0x0100
+        }
+    );
+}
+
+#[test]
+fn c01_48_all_nop_rom_reaches_max_cycles() {
+    // An all-zero ROM is a stream of NOPs; NOP stays implemented forever (task C01_48),
+    // so the run reaches max_cycles without stopping.
+    assert_eq!(
+        run_rom(&test_rom(&[]), &args(400, None)),
+        Outcome::MaxCycles
+    );
 }
 
 #[test]
