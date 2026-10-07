@@ -1,6 +1,7 @@
 //! SM83 CPU engine (decision C_00): hand-written M-cycle state machine. One tick is one
 //! M-cycle with at most one bus access; opcodes are decoded by bit-field groups, no table.
 
+pub mod load8;
 pub mod registers;
 
 #[cfg(test)]
@@ -101,8 +102,9 @@ impl Cpu {
             self.step += 1;
         }
 
-        // Group dispatch chain (decision C_00): empty for now, first groups arrive in C01_05.
-        let claimed = false;
+        // Group dispatch chain (decision C_00): each group returns true when it claims the
+        // current opcode; the first claim wins and stops the chain.
+        let claimed = self.exec_load8_reg(bus);
         if !claimed {
             // No group claims this opcode: record it and cost its fetch M-cycle only.
             self.record_unimplemented(self.opcode);

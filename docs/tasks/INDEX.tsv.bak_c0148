@@ -42,7 +42,6 @@ C01_45	CODE	0	docs/tasks/C01/C01_45.md	CLI run: serial output and --expect-seria
 C01_46	CODE	0	docs/tasks/C01/C01_46.md	CLI run: report an unimplemented opcode (exit 4)
 C01_47	CODE	0	docs/tasks/C01/C01_47.md	CLI run: --trace
 C01_04	CODE	1	docs/tasks/C01/C01_04.md	CLI run: verification and GATE
-C01_48	CODE	0	docs/tasks/C01/C01_48.md	Fix CLI tests that depend on an unimplemented opcode
 C01_05	CODE	0	docs/tasks/C01/C01_05.md	NOP, LD r,r and LD r,n (register forms)
 C01_06	CODE	0	docs/tasks/C01/C01_06.md	LD through (HL), (BC), (DE), HL+/HL-
 C01_07	CODE	0	docs/tasks/C01/C01_07.md	LD absolute, LDH and LD (C)
