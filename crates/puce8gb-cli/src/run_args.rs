@@ -12,7 +12,8 @@ pub struct RunArgs {
     pub max_cycles: u64,
     /// Expected serial output, if any (`--expect-serial TEXT`).
     pub expect_serial: Option<String>,
-    /// Trace window size in cycles; 0 disables tracing (default 0).
+    /// Trace window size in cycles; 0 disables tracing (default 0). Read by a later task.
+    #[allow(dead_code)]
     pub trace: u64,
 }
 
