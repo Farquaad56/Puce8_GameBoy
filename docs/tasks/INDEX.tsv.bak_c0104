@@ -35,13 +35,7 @@ E02_01	CODE	0	docs/tasks/E02/E02_01.md	Registers and flag helpers
 C01_01	CODE	0	docs/tasks/C01/C01_01.md	CPU clean slate: skeleton, engine contract, test helper
 C01_02	CODE	0	docs/tasks/C01/C01_02.md	Dmg drives the CPU: one M-cycle every 4 dots
 C01_03	CODE	0	docs/tasks/C01/C01_03.md	Serial capture (SB/SC) in the bus
-C01_42	CODE	0	docs/tasks/C01/C01_42.md	Harden C01_01 tests (no dependency on an unimplemented opcode)
-C01_43	CODE	0	docs/tasks/C01/C01_43.md	CLI run: argument parsing
-C01_44	CODE	0	docs/tasks/C01/C01_44.md	CLI run: load the ROM and run the machine loop
-C01_45	CODE	0	docs/tasks/C01/C01_45.md	CLI run: serial output and --expect-serial
-C01_46	CODE	0	docs/tasks/C01/C01_46.md	CLI run: report an unimplemented opcode (exit 4)
-C01_47	CODE	0	docs/tasks/C01/C01_47.md	CLI run: --trace
-C01_04	CODE	1	docs/tasks/C01/C01_04.md	CLI run: verification and GATE
+C01_04	CODE	1	docs/tasks/C01/C01_04.md	CLI run command with exit codes and trace
 C01_05	CODE	0	docs/tasks/C01/C01_05.md	NOP, LD r,r and LD r,n (register forms)
 C01_06	CODE	0	docs/tasks/C01/C01_06.md	LD through (HL), (BC), (DE), HL+/HL-
 C01_07	CODE	0	docs/tasks/C01/C01_07.md	LD absolute, LDH and LD (C)
