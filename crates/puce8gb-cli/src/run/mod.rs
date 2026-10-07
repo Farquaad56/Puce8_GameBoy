@@ -1,7 +1,8 @@
 //! Executor for the `run` command (task C01_44): load the ROM bytes and run the
 //! machine for at most `max_cycles` T-cycles. Serial bytes are echoed on stdout and the
 //! run stops early on the expected text or the failure marker (C01_45), or when the CPU
-//! records an unimplemented opcode (C01_46).
+//! records an unimplemented opcode (C01_46). With `--trace N`, one line per instruction
+//! is printed on stderr (task C01_47).
 
 use std::fs;
 use std::io::Write;
@@ -43,10 +44,36 @@ pub fn check_unimplemented(rec: Option<(u8, u16)>) -> Option<Outcome> {
     rec.map(|(opcode, pc)| Outcome::Unimplemented { opcode, pc })
 }
 
+/// One instruction trace line in Gameboy-Doctor style (task C01_47): uppercase hex, two
+/// digits for the registers and four for SP/PC, then the four bytes at PC. The flat
+/// register list is fixed by the task signature.
+#[allow(clippy::too_many_arguments)]
+pub fn trace_line(
+    a: u8,
+    f: u8,
+    b: u8,
+    c: u8,
+    d: u8,
+    e: u8,
+    h: u8,
+    l: u8,
+    sp: u16,
+    pc: u16,
+    mem: [u8; 4],
+) -> String {
+    let [m0, m1, m2, m3] = mem;
+    format!(
+        "A:{a:02X} F:{f:02X} B:{b:02X} C:{c:02X} D:{d:02X} E:{e:02X} H:{h:02X} L:{l:02X} \
+         SP:{sp:04X} PC:{pc:04X} PCMEM:{m0:02X},{m1:02X},{m2:02X},{m3:02X}"
+    )
+}
+
 /// Run a ROM image for at most `args.max_cycles` T-cycles (task C01_44). No file access:
 /// the caller reads the bytes. Serial bytes are echoed on stdout and the run stops early
 /// when the expected text or the failure marker appears (C01_45), or when the CPU records
-/// an unimplemented opcode (C01_46); the serial scan keeps priority over both.
+/// an unimplemented opcode (C01_46); the serial scan keeps priority over both. With
+/// `--trace N`, one line per instruction goes to stderr at the start of each M-cycle,
+/// only on an instruction boundary (task C01_47).
 pub fn run_rom(rom: &[u8], args: &RunArgs) -> Outcome {
     let mut dmg = match Dmg::new(rom) {
         Ok(dmg) => dmg,
@@ -54,8 +81,29 @@ pub fn run_rom(rom: &[u8], args: &RunArgs) -> Outcome {
     };
     let mut collected = String::new();
     let mut buf = [0u8; 64];
+    // Remaining traced instructions (task C01_47); 0 disables tracing.
+    let mut trace_left = args.trace;
     // One M-cycle is 4 dots; the CPU runs every 4th dot (task C01_02).
     for _ in 0..(args.max_cycles / 4) {
+        // Trace at the start of the M-cycle, before its ticks: one line per instruction,
+        // never during its extra M-cycles (task C01_47).
+        if trace_left > 0 && dmg.cpu.at_boundary() {
+            let pc = dmg.cpu.pc;
+            let mem = [
+                dmg.bus.peek(pc),
+                dmg.bus.peek(pc.wrapping_add(1)),
+                dmg.bus.peek(pc.wrapping_add(2)),
+                dmg.bus.peek(pc.wrapping_add(3)),
+            ];
+            eprintln!(
+                "{}",
+                trace_line(
+                    dmg.cpu.a, dmg.cpu.f, dmg.cpu.b, dmg.cpu.c, dmg.cpu.d, dmg.cpu.e, dmg.cpu.h,
+                    dmg.cpu.l, dmg.cpu.sp, pc, mem
+                )
+            );
+            trace_left -= 1;
+        }
         for _ in 0..4 {
             dmg.tick();
         }

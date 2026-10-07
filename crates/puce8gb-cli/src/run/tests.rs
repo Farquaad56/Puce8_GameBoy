@@ -123,3 +123,46 @@ fn c01_46_run_stops_on_unimplemented_opcode() {
     }
     assert_eq!(dmg.cpu.unimplemented(), Some((0x99, 0x0100)));
 }
+
+#[test]
+fn c01_47_trace_line_example() {
+    // Exact Gameboy-Doctor style line (task C01_47): uppercase hex, two digits for the
+    // registers, four for SP and PC, then the four bytes at PC.
+    assert_eq!(
+        trace_line(
+            0x01,
+            0xB0,
+            0x00,
+            0x13,
+            0x00,
+            0xD8,
+            0x01,
+            0x4D,
+            0xFFFE,
+            0x0100,
+            [0x00, 0xC3, 0x50, 0x01],
+        ),
+        "A:01 F:B0 B:00 C:13 D:00 E:D8 H:01 L:4D SP:FFFE PC:0100 PCMEM:00,C3,50,01"
+    );
+}
+
+#[test]
+fn c01_47_trace_line_sp_pc_max() {
+    // SP and PC at the wrapping edge $FFFF keep exactly four hex digits (task C01_47).
+    assert_eq!(
+        trace_line(
+            0xFF,
+            0x80,
+            0xFE,
+            0xFD,
+            0xFC,
+            0xFB,
+            0xFA,
+            0xF9,
+            0xFFFF,
+            0xFFFF,
+            [0xEF, 0xEE, 0xED, 0xEC],
+        ),
+        "A:FF F:80 B:FE C:FD D:FC E:FB H:FA L:F9 SP:FFFF PC:FFFF PCMEM:EF,EE,ED,EC"
+    );
+}
