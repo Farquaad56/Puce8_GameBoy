@@ -5,6 +5,7 @@
 mod info;
 mod run;
 mod run_args;
+mod serial_scan;
 
 use std::process::ExitCode;
 
