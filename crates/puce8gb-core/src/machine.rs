@@ -71,6 +71,8 @@ pub struct Dmg {
     pub media: Media,
     /// Current button state (decision A_04).
     pub input: Input,
+    /// Dot phase within the current M-cycle; 0..3, wraps to 0 every 4 dots (decision A_01).
+    dot_phase: u8,
 }
 
 impl Dmg {
@@ -89,6 +91,7 @@ impl Dmg {
             audio: Audio::default(),
             media: Media,
             input: Input::default(),
+            dot_phase: 0,
         };
         dmg.reset();
         Ok(dmg)
@@ -104,11 +107,17 @@ impl Machine for Dmg {
         self.video.frame.fill(0x00);
         self.audio.head = 0;
         self.audio.tail = 0;
+        self.dot_phase = 0;
     }
 
     fn tick(&mut self) {
         // Chip order CPU -> Timer -> DMA -> PPU -> APU -> Serial (decision A_01).
-        // Components are filled in by later tasks.
+        // The CPU advances one M-cycle every 4 dots (note 01_timing.md); the other chips
+        // are filled in by later tasks.
+        self.dot_phase = (self.dot_phase + 1) % 4;
+        if self.dot_phase == 0 {
+            self.cpu.tick(&mut self.bus);
+        }
     }
 
     fn framebuffer(&self) -> &[u8; FRAMEBUFFER_SIZE] {
@@ -286,5 +295,42 @@ mod tests {
         };
         dmg.set_input(input);
         assert!(dmg.input.a);
+    }
+
+    #[test]
+    fn c01_02_four_n_ticks_fetch_n_bytes() {
+        // A ROM of all-zero bytes is full of unknown opcodes: each M-cycle fetches one.
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        const N: u16 = 5;
+        for _ in 0..(4 * N) {
+            dmg.tick();
+        }
+        assert_eq!(dmg.cpu.pc, 0x0100 + N);
+    }
+
+    #[test]
+    fn c01_02_three_ticks_do_not_advance_pc() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        for _ in 0..3 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.cpu.pc, 0x0100);
+    }
+
+    #[test]
+    fn c01_02_reset_restarts_phase() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        // Advance 3 dots: the phase is now 3 and the CPU has not ticked.
+        for _ in 0..3 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.cpu.pc, 0x0100);
+
+        // Reset restarts the phase at 0; without it the next dot would tick the CPU.
+        dmg.reset();
+        for _ in 0..3 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.cpu.pc, 0x0100);
     }
 }
