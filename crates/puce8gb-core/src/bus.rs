@@ -23,6 +23,10 @@ pub struct Bus {
     pub hram: [u8; 0x7F],
     /// IO register file FF00-FFFF (decision A_02).
     pub io: [u8; IO_SIZE],
+    /// Serial output capture (C01_03): bytes sent on SB, drained via take_serial.
+    pub serial: [u8; 256],
+    /// Number of captured bytes currently held in `serial` (C01_03).
+    pub serial_len: usize,
 }
 
 impl Bus {
@@ -35,6 +39,8 @@ impl Bus {
             oam: [0x00; 0x100],
             hram: [0x00; 0x7F],
             io: [0xFF; IO_SIZE],
+            serial: [0x00; 256],
+            serial_len: 0,
         }
     }
 
@@ -45,6 +51,7 @@ impl Bus {
         // so it carries no separate state.
         self.wram.fill(0x00);
         self.hram.fill(0x00);
+        self.serial_len = 0; // no captured serial bytes at power-up (C01_03)
 
         // Unassigned IO reads $FF by default (decision A_02), then the documented
         // post-boot values from note 08 "Registres I/O apres boot".
@@ -137,10 +144,35 @@ impl Bus {
             }
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize] = val,
             0xFEA0..=0xFEFF => {} // unusable range: writes are ignored (note 03a)
-            0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize] = val,
+            0xFF00..=0xFF7F => {
+                self.io[(addr - 0xFF00) as usize] = val;
+                // SC ($FF02): a transfer started with the internal clock (bit7 + bit0 set,
+                // note 06 "SC") completes instantly (documented simplification, C01_03):
+                // the current SB is captured and the enable bit cleared at once. The exact
+                // duration (4096 dots) and the serial interrupt arrive with a later task.
+                if addr == 0xFF02 && val & 0x80 != 0 && val & 0x01 != 0 {
+                    if self.serial_len < self.serial.len() {
+                        self.serial[self.serial_len] = self.io[0x01]; // SB ($FF01)
+                        self.serial_len += 1;
+                    } else {
+                        // Buffer full: the new byte is dropped (C01_03).
+                    }
+                    self.io[0x02] &= !0x80;
+                }
+            }
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize] = val,
             0xFFFF => self.io[IO_SIZE - 1] = val, // IE (decision A_02)
         }
+    }
+
+    /// Drain up to `out.len()` captured serial bytes, oldest first (C01_03); returns the
+    /// number of bytes drained. The buffer is a fixed ring: no allocation.
+    pub fn take_serial(&mut self, out: &mut [u8]) -> usize {
+        let n = out.len().min(self.serial_len);
+        out[..n].copy_from_slice(&self.serial[..n]);
+        self.serial.copy_within(n..self.serial_len, 0);
+        self.serial_len -= n;
+        n
     }
 
     /// Read the raw memory at `addr` with no side effect and no gate (decision A_02):
@@ -356,5 +388,72 @@ mod tests {
             assert_eq!(bus.peek(0xFF00), 0xC5); // peek has no side effect (decision A_02)
         }
         assert_eq!(bus.read(0xFF00), 0xC5);
+    }
+
+    #[test]
+    fn c01_03_internal_clock_write_captures_sb_and_clears_bit7() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFF01, 0x41); // SB: the byte to send (note 06 "SB")
+        bus.write(0xFF02, 0x81); // SC: enable + internal clock (note 06 "SC")
+        assert_eq!(bus.io[0x02], 0x01); // bit7 cleared at once; unused bits keep the written value
+        let mut out = [0u8; 4];
+        assert_eq!(bus.take_serial(&mut out), 1);
+        assert_eq!(&out[..1], &[0x41]);
+    }
+
+    #[test]
+    fn c01_03_external_clock_write_captures_nothing() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFF01, 0x41); // SB
+        bus.write(0xFF02, 0x80); // SC: enable + external clock (bit0 clear) - no capture (C01_03)
+        assert_eq!(bus.io[0x02], 0x80); // bit7 stays as written
+        let mut out = [0u8; 4];
+        assert_eq!(bus.take_serial(&mut out), 0);
+    }
+
+    #[test]
+    fn c01_03_drain_empties_buffer() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        for (i, byte) in [0x41u8, 0x42, 0x43].into_iter().enumerate() {
+            bus.write(0xFF01, byte);
+            bus.write(0xFF02, 0x81); // internal clock: one captured byte per write (C01_03)
+            assert_eq!(bus.serial_len, i + 1);
+        }
+        let mut out = [0u8; 2];
+        assert_eq!(bus.take_serial(&mut out), 2); // oldest first
+        assert_eq!(&out[..], &[0x41, 0x42]);
+        assert_eq!(bus.serial_len, 1);
+        let mut rest = [0u8; 8];
+        assert_eq!(bus.take_serial(&mut rest), 1); // the buffer is now empty
+        assert_eq!(&rest[..1], &[0x43]);
+        assert_eq!(bus.take_serial(&mut rest), 0);
+    }
+
+    #[test]
+    fn c01_03_overflow_drops_new_bytes() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        // Fill the fixed buffer to capacity, then send one more byte: it is dropped (C01_03).
+        for i in 0u8..=255 {
+            bus.write(0xFF01, i);
+            bus.write(0xFF02, 0x81);
+        }
+        assert_eq!(bus.serial_len, bus.serial.len());
+        bus.write(0xFF01, 0xEE);
+        bus.write(0xFF02, 0x81);
+        assert_eq!(bus.serial_len, bus.serial.len()); // still full: the new byte was dropped
+        let mut out = vec![0u8; bus.serial.len()];
+        assert_eq!(bus.take_serial(&mut out), bus.serial.len());
+        assert_eq!(out[0], 0x00); // oldest byte kept, not overwritten
+        assert_ne!(out.last(), Some(&0xEE));
+    }
+
+    #[test]
+    fn c01_03_reset_clears_capture_buffer() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFF01, 0x41);
+        bus.write(0xFF02, 0x81);
+        assert_eq!(bus.serial_len, 1);
+        bus.reset();
+        assert_eq!(bus.serial_len, 0); // the capture buffer is part of the post-boot state (C01_03)
     }
 }

@@ -49,6 +49,10 @@ pub trait Machine {
     /// (decision A_04). Returns the number of samples drained.
     fn drain_audio(&mut self, into: &mut [i16]) -> usize;
 
+    /// Drain up to `out.len()` bytes sent on the serial port SB ($FF01), oldest first
+    /// (C01_03); returns the number of bytes drained. Test ROMs print through it.
+    fn take_serial_output(&mut self, out: &mut [u8]) -> usize;
+
     /// Set the current button state; the frontend drains it at frame boundaries
     /// (decision A_04).
     fn set_input(&mut self, input: Input);
@@ -126,6 +130,11 @@ impl Machine for Dmg {
 
     fn drain_audio(&mut self, into: &mut [i16]) -> usize {
         self.audio.drain(into)
+    }
+
+    fn take_serial_output(&mut self, out: &mut [u8]) -> usize {
+        // Forwards to the bus capture buffer (C01_03).
+        self.bus.take_serial(out)
     }
 
     fn set_input(&mut self, input: Input) {
@@ -332,5 +341,30 @@ mod tests {
             dmg.tick();
         }
         assert_eq!(dmg.cpu.pc, 0x0100);
+    }
+
+    #[test]
+    fn c01_03_take_serial_output_drains_bus_capture() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        // Send two bytes through the serial port (note 06 "SB"/"SC").
+        for byte in [0x41u8, 0x42] {
+            dmg.bus.write(0xFF01, byte);
+            dmg.bus.write(0xFF02, 0x81); // internal clock: captured at once (C01_03)
+        }
+        let mut out = [0u8; 8];
+        assert_eq!(dmg.take_serial_output(&mut out), 2);
+        assert_eq!(&out[..2], &[0x41, 0x42]); // oldest first
+        assert_eq!(dmg.take_serial_output(&mut out), 0); // the buffer is drained
+    }
+
+    #[test]
+    fn c01_03_take_serial_output_empty_after_reset() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        dmg.bus.write(0xFF01, 0x41);
+        dmg.bus.write(0xFF02, 0x81);
+        assert_eq!(dmg.bus.serial_len, 1);
+        dmg.reset(); // the capture buffer is part of the post-boot state (C01_03)
+        let mut out = [0u8; 4];
+        assert_eq!(dmg.take_serial_output(&mut out), 0);
     }
 }

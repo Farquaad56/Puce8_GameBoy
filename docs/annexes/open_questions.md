@@ -59,6 +59,7 @@ Voir docs/annexes/notes/04b_video_render.md.
 Voir docs/annexes/notes/06_input_serial.md.
 
 - Lecture des bits 7-6 du registre SC ($FF02) sur DMG : refs/pandocs ne documente que bit7 et bit0 ; la regle generale "unused bits read high" (IR.md L41) suggere $FE mais n'est pas etablie explicitement pour ce registre. A trancher par roms/test-roms/gambatte/serial/start_wait_read_sc_*.gbc (lisent SC apres un transfert). Statut : UNKNOWN - to confirm.
+- C01_03 simplification documentee : l'ecriture de SC ($FF02) avec bit7 + bit0 (horloge interne) complete le transfert instantanement dans le bus (SB capture, bit7 efface d'un coup), au lieu des 4096 dots reels (note 06 "Duree d'un transfert"). La duree exacte et l'interrupt serie (IF/IE bit3) arrivent avec une tache serie ulterieure ; a trancher par roms/test-roms/gambatte/serial/. Statut : UNKNOWN - to confirm.
 
 ## D_14 - En-tete de cartouche : conflits et manquants (2026-10-05)
 Voir docs/annexes/notes/07a_cart_header.md.
