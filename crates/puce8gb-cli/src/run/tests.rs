@@ -1,0 +1,125 @@
+//! Unit tests for the `run` executor (tasks C01_44, C01_45, C01_46).
+
+use puce8gb_core::media::header::Header;
+
+use super::*;
+
+/// Synthetic ROM image of at least `MIN_ROM_LEN` bytes with `code` placed at the
+/// entry point $0100 and a valid stored header checksum (note 07a).
+fn test_rom(code: &[u8]) -> Vec<u8> {
+    let mut r = vec![0x00u8; 0x150.max(0x100 + code.len())];
+    for (i, b) in code.iter().enumerate() {
+        r[0x100 + i] = *b;
+    }
+    r[0x14D] = Header::header_checksum(&r);
+    r
+}
+
+fn args(max_cycles: u64, expect_serial: Option<&str>) -> RunArgs {
+    RunArgs {
+        rom: "game.gb".to_string(),
+        max_cycles,
+        expect_serial: expect_serial.map(String::from),
+        trace: 0,
+    }
+}
+
+#[test]
+fn c01_44_rom_too_short_is_load_error() {
+    assert_eq!(run_rom(&[0u8; 100], &args(400, None)), Outcome::LoadError);
+    assert_eq!(run_rom(&[], &args(400, None)), Outcome::LoadError);
+}
+
+#[test]
+fn c01_44_valid_rom_stops_on_unimplemented_opcode() {
+    // No instruction group is implemented yet (decision C_00): an all-zero ROM fetches
+    // opcode 0x00 at $0100, records it as unimplemented and the run stops there.
+    assert_eq!(
+        run_rom(&test_rom(&[]), &args(400, None)),
+        Outcome::Unimplemented {
+            opcode: 0x00,
+            pc: 0x0100
+        }
+    );
+}
+
+#[test]
+fn c01_44_exit_code_mapping() {
+    let a = args(400, None);
+    assert_eq!(exit_code(&Outcome::LoadError, &a), 3);
+    assert_eq!(exit_code(&Outcome::MaxCycles, &a), 0);
+    let b = args(400, Some("PASS"));
+    assert_eq!(exit_code(&Outcome::MaxCycles, &b), 2);
+}
+
+#[test]
+fn c01_45_exit_code_mapping() {
+    let a = args(400, None);
+    assert_eq!(exit_code(&Outcome::Found("Passed".to_string()), &a), 0);
+    assert_eq!(exit_code(&Outcome::Failed("Failed #3".to_string()), &a), 1);
+    let b = args(400, Some("PASS"));
+    assert_eq!(exit_code(&Outcome::MaxCycles, &b), 2);
+}
+
+#[test]
+fn c01_45_serial_capture_without_instructions() {
+    // No instruction executed: write SB then SC (internal clock) directly on the bus.
+    let mut dmg = Dmg::new(&test_rom(&[])).expect("valid ROM");
+    dmg.bus.write(0xFF01, b'A');
+    dmg.bus.write(0xFF02, 0x81);
+    let mut buf = [0u8; 64];
+    assert_eq!(dmg.take_serial_output(&mut buf), 1);
+    assert_eq!(buf[0], b'A');
+}
+
+#[test]
+fn c01_46_unimplemented_message_format() {
+    // Uppercase hex, exactly 2 digits for the opcode and 4 for the PC (task C01_46).
+    assert_eq!(
+        unimplemented_message(0x00, 0x0100),
+        "UNIMPLEMENTED opcode 0x00 at PC=0x0100"
+    );
+    assert_eq!(
+        unimplemented_message(0xFF, 0xC000),
+        "UNIMPLEMENTED opcode 0xFF at PC=0xC000"
+    );
+}
+
+#[test]
+fn c01_46_check_unimplemented_none_and_some() {
+    assert_eq!(check_unimplemented(None), None);
+    assert_eq!(
+        check_unimplemented(Some((0x99, 0xC000))),
+        Some(Outcome::Unimplemented {
+            opcode: 0x99,
+            pc: 0xC000
+        })
+    );
+}
+
+#[test]
+fn c01_46_exit_code_is_four() {
+    let a = args(400, None);
+    assert_eq!(
+        exit_code(
+            &Outcome::Unimplemented {
+                opcode: 0x99,
+                pc: 0xC000
+            },
+            &a
+        ),
+        4
+    );
+}
+
+#[test]
+fn c01_46_run_stops_on_unimplemented_opcode() {
+    // No instruction group is implemented yet (decision C_00): the first fetch at $0100
+    // records opcode 0x99, so the run stops with it. Pure state check: no real opcode
+    // is executed through the CPU, so this test survives later implementations.
+    let mut dmg = Dmg::new(&test_rom(&[0x99])).expect("valid ROM");
+    for _ in 0..4 {
+        dmg.tick();
+    }
+    assert_eq!(dmg.cpu.unimplemented(), Some((0x99, 0x0100)));
+}
