@@ -105,9 +105,16 @@ impl Cpu {
         let claimed = false;
         if !claimed {
             // No group claims this opcode: record it and cost its fetch M-cycle only.
-            self.unimplemented = Some((self.opcode, self.pc.wrapping_sub(1)));
-            self.done();
+            self.record_unimplemented(self.opcode);
         }
+    }
+
+    /// Record an opcode no group claimed (decision C_00): store the byte with the address
+    /// of its byte, end the instruction so step is back to 0. No bus access here: the
+    /// fetch already happened in `tick()`.
+    fn record_unimplemented(&mut self, opcode: u8) {
+        self.unimplemented = Some((opcode, self.pc.wrapping_sub(1)));
+        self.done();
     }
 
     /// End of instruction (decision C_00): back to the boundary; F low nibble re-masked.
@@ -171,32 +178,52 @@ mod tests {
 
     #[test]
     fn c01_01_unknown_opcode_recorded_at_address_and_costs_one_tick() {
-        let mut bus = testutil::new_bus();
         // Dirty F low nibble: it must be re-masked at instruction end.
         let mut cpu = Cpu {
             f: 0xFF,
             ..Cpu::default()
         };
+        cpu.pc = 0xC001; // as if the opcode byte was just fetched from $C000
 
-        let ticks = testutil::exec(&mut cpu, &mut bus, &[0x99]);
+        cpu.record_unimplemented(0x99);
 
-        assert_eq!(ticks, 1);
         assert_eq!(cpu.unimplemented(), Some((0x99, 0xC000)));
-        assert_eq!(cpu.pc, 0xC001); // PC advanced by exactly one
+        assert_eq!(cpu.step, 0); // step back to 0
+        assert!(cpu.at_boundary());
         assert_eq!(cpu.f & 0x0F, 0); // F low nibble is 0
     }
 
     #[test]
     fn c01_01_unknown_opcode_record_overwritten_by_next_fetch() {
-        let mut bus = testutil::new_bus();
-        let mut cpu = Cpu::default();
+        let mut cpu = Cpu {
+            pc: 0xC001, // as if the first opcode byte was just fetched from $C000
+            ..Cpu::default()
+        };
 
-        testutil::exec(&mut cpu, &mut bus, &[0x99]);
+        cpu.record_unimplemented(0x99);
         assert_eq!(cpu.unimplemented(), Some((0x99, 0xC000)));
 
         // The next fetch records the new opcode at its own address.
-        bus.write(0xC001, 0xA5);
-        cpu.tick(&mut bus);
+        cpu.pc = 0xC002; // as if a second byte was just fetched from $C001
+        cpu.record_unimplemented(0xA5);
         assert_eq!(cpu.unimplemented(), Some((0xA5, 0xC001)));
+    }
+
+    #[test]
+    fn c01_42_empty_dispatch_fetches_one_byte() {
+        // One tick at an instruction boundary is exactly one bus read: the fetch. The
+        // assertions below hold whatever the dispatch chain does afterwards, so this
+        // test needs no real opcode (decision C_00).
+        let mut bus = testutil::new_bus();
+        bus.write(0xC000, 0x7E);
+        let mut cpu = Cpu {
+            pc: 0xC000,
+            ..Cpu::default()
+        };
+
+        cpu.tick(&mut bus);
+
+        assert_eq!(cpu.opcode, 0x7E); // the byte read from $C000
+        assert_eq!(cpu.pc, 0xC001); // PC advanced by exactly one
     }
 }

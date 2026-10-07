@@ -11,6 +11,7 @@ pub fn new_bus() -> Bus {
 
 /// Place `code` at $C000 through the bus, set PC there, tick until the next instruction
 /// boundary and return the tick count. Panics on a runaway (more than 64 ticks).
+#[allow(dead_code)] // used by the instruction group tests from C01_05 on (decision C_00)
 pub fn exec(cpu: &mut Cpu, bus: &mut Bus, code: &[u8]) -> u32 {
     for (i, &b) in code.iter().enumerate() {
         bus.write(0xC000u16.wrapping_add(i as u16), b);
