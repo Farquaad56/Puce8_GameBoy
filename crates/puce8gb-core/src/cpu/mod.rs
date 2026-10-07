@@ -1,71 +1,20 @@
-//! SM83 CPU (decision A_03): registers and post-boot state for now; instruction execution,
-//! interrupts and HALT/STOP arrive with later tasks.
+//! SM83 CPU engine (decision C_00): hand-written M-cycle state machine. One tick is one
+//! M-cycle with at most one bus access; opcodes are decoded by bit-field groups, no table.
 
-pub mod opcode_table;
 pub mod registers;
 
-use self::opcode_table::CB_OPCODES;
-use self::opcode_table::OPCODES as _OPCODE_TABLE;
-use self::registers::Registers;
+#[cfg(test)]
+pub(crate) mod testutil;
+
+use self::registers::{Registers, F_USED_BITS};
 use crate::bus::Bus;
 
-/// Micro-op execution state (decision A_03).
-#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InstrState {
-    /// No instruction in flight; next tick() fetches opcode from PC.
-    #[default]
-    Idle,
-    /// Currently executing one instruction (decision A_03): `info` is the decoded
-    /// entry, `remaining` counts down to 0 over the M-cycle budget, and
-    /// `op_periph_read` tracks how many operand bytes have been consumed.
-    Active {
-        info: OpInfo,
-        remaining: u8,
-        op_periph_read: u8,
-    },
-}
-
-/// Opcode metadata for the micro-op engine (decision A_03).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct OpInfo {
-    /// Total bytes in the instruction (opcode + immediate values).
-    pub bytes: u8,
-    /// M-cycle count for the "taken" case.
-    pub m_taken: u8,
-}
-
-impl Default for OpInfo {
-    fn default() -> Self {
-        // NOP-like default: 1 byte, 1 M-cycle.
-        Self {
-            bytes: 1,
-            m_taken: 1,
-        }
-    }
-}
-
-/// Minimal inline opcode table for E02_01 (full generated table arrives with E02_02).
-/// All entries default to NOP-like timing; only index 0x00 (the NOP opcode) is correct.
-const OP_NOP: OpInfo = OpInfo {
-    bytes: 1,
-    m_taken: 1,
-};
-const OP_CB: OpInfo = OpInfo {
-    bytes: 2,
-    m_taken: 2,
-};
-pub const OPCODES: [OpInfo; 256] = {
-    let mut ops = [OP_NOP; 256];
-    ops[0xCB_usize] = OP_CB;
-    ops
-};
-
-/// Post-boot CPU register state at PC=$0100 on DMG (note 08 "Registres CPU apres boot").
+/// Post-boot CPU (decision C_00): public register fields plus the private M-cycle engine
+/// state. Fixed size, Copy, no allocation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Cpu {
     pub a: u8,
-    /// Flags byte: bit 7 Z, bit 6 N, bit 5 H, bit 4 C.
-    /// Bits 3-0 are "not used (always zero)" per note 02a.
+    /// Flags byte: bit 7 Z, bit 6 N, bit 5 H, bit 4 C; bits 3-0 always zero (note 02a).
     pub f: u8,
     pub b: u8,
     pub c: u8,
@@ -76,16 +25,27 @@ pub struct Cpu {
     pub sp: u16,
     pub pc: u16,
 
-    /// Micro-op engine state (decision A_03). Exposed for integration test access.
-    #[cfg_attr(test, allow(dead_code))]
-    pub instr_state: InstrState,
+    /// Fetched opcode byte (decision C_00).
+    opcode: u8,
+    /// M-cycle step within the current instruction; 0 means instruction boundary.
+    step: u8,
+    /// Operand latch, low byte (decision C_00); used by groups from C01_05 on.
+    #[allow(dead_code)]
+    lo: u8,
+    /// Operand latch, high byte (decision C_00); used by groups from C01_05 on.
+    #[allow(dead_code)]
+    hi: u8,
+    /// CB prefix flag (decision C_00); used by the CB group in C01_25/C01_26.
+    #[allow(dead_code)]
+    cb: bool,
+    /// Last opcode no group claimed, with the address of its byte (decision C_00).
+    unimplemented: Option<(u8, u16)>,
 }
 
 impl Cpu {
     /// Post-boot values (note 02a "Valeurs de reset DMG des registres CPU"). Delegates to
     /// the register file so the reset values live in one place. Z set and N clear; H and C
     /// are both set iff the header checksum byte $014D is not $00 (Power_Up_Sequence.md#CPU-registers).
-    /// CONFLIT: specs 2001 give fixed H=1 C=1; to be settled by mooneye boot_regs-dmgABC.
     pub fn reset(checksum: u8) -> Self {
         let regs = Registers::reset(checksum);
         Cpu {
@@ -99,7 +59,7 @@ impl Cpu {
             l: regs.l,
             sp: regs.sp,
             pc: regs.pc,
-            instr_state: InstrState::Idle,
+            ..Self::default()
         }
     }
 
@@ -119,195 +79,124 @@ impl Cpu {
         }
     }
 
-    /// Execute one M-cycle (decision A_03): exactly one bus access per call.
+    /// True when no instruction is in flight (decision C_00).
+    pub fn at_boundary(&self) -> bool {
+        self.step == 0
+    }
+
+    /// Last opcode no group claimed, with the address of its byte (decision C_00).
+    pub fn unimplemented(&self) -> Option<(u8, u16)> {
+        self.unimplemented
+    }
+
+    /// Execute one M-cycle (decision C_00): at most one bus access.
     pub fn tick(&mut self, bus: &mut Bus) {
-        // Fetch new opcode if no instruction in flight (decision A_03).
-        let idling = matches!(self.instr_state, InstrState::Idle);
-
-        if idling {
-            let opcode = bus.read(self.pc);
+        if self.step == 0 {
+            // Instruction boundary: fetch the opcode at PC (one bus read).
+            let addr = self.pc;
+            self.opcode = bus.read(addr);
             self.pc = self.pc.wrapping_add(1);
-
-            let info = OPCODES[opcode as usize];
-            self.instr_state = InstrState::Active {
-                info,
-                remaining: 0, // set below after confirming we enter the active arm
-                op_periph_read: 0,
-            };
+            self.step = 1;
+        } else {
+            self.step += 1;
         }
 
-        if let InstrState::Active {
-            ref mut info,
-            ref mut remaining,
-            ref mut op_periph_read,
-        } = self.instr_state
-        {
-            *remaining += 1;
-
-            // Read next operand byte if needed (not for single-byte ops) AND still within budget.
-            if *op_periph_read < info.bytes.saturating_sub(1) && (*remaining as i32 - 1).abs() < info.m_taken as i32 {
-                let _byte = bus.read(self.pc);
-                self.pc = self.pc.wrapping_add(1);
-                *op_periph_read += 1;
-            }
-
-            if *remaining >= info.m_taken {
-                // Instruction boundary (note 02a): bits 3-0 of F are "not used (always zero)",
-                // so the low nibble is re-masked whenever an instruction completes.
-                self.f &= registers::F_USED_BITS;
-                self.instr_state = InstrState::Idle;
-            }
+        // Group dispatch chain (decision C_00): empty for now, first groups arrive in C01_05.
+        let claimed = false;
+        if !claimed {
+            // No group claims this opcode: record it and cost its fetch M-cycle only.
+            self.unimplemented = Some((self.opcode, self.pc.wrapping_sub(1)));
+            self.done();
         }
     }
 
-    /// Execute one cycle without reading additional opcodes - just for timing.
-    pub fn cycle(&mut self, bus: &mut Bus) {
-        if let InstrState::Active {
-            ref mut info,
-            ref mut remaining,
-            ..
-        }
-        | InstrState::Active {
-            info: _,
-            remaining,
-            op_periph_read: _,
-        } = self.instr_state
-        {
-            *remaining += 1;
-
-            if *remaining >= info.m_taken {
-                self.f &= registers::F_USED_BITS;
-                self.instr_state = InstrState::Idle;
-            }
-        }
+    /// End of instruction (decision C_00): back to the boundary; F low nibble re-masked.
+    fn done(&mut self) {
+        // Bits 3-0 of F are "not used (always zero)" (note 02a).
+        self.f &= F_USED_BITS;
+        self.step = 0;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::testutil;
+    use super::Cpu;
 
-    /// Helper to place code bytes in WRAM and run until the first instruction boundary.
-    pub fn exec(cpu: &mut Cpu, bus: &mut Bus, code: &[u8]) -> u32 {
-        let addr = 0xC000u16;
-        for (i, &b) in code.iter().enumerate() {
-            bus.write(addr.wrapping_add(i as u16), b);
-        }
-
-        cpu.pc = addr;
-
-        let mut mcycle_count = 0u32;
-        loop {
-            let before_idle = matches!(&cpu.instr_state, InstrState::Idle);
-            cpu.tick(bus);
-            mcycle_count += 1;
-
-            match &cpu.instr_state {
-                InstrState::Active { .. } => {} // Still in instruction, continue
-                InstrState::Idle => {
-                    if before_idle {
-                        // Single-cycle instruction (like NOP) completed this cycle.
-                        break;
-                    }
-                    // Otherwise was active, now idle = just completed an instruction.
-                    break;
-                }
-            }
-        }
-
-        mcycle_count
+    #[test]
+    fn c01_01_at_boundary_after_reset() {
+        assert!(Cpu::reset(0).at_boundary());
     }
 
     #[test]
-    fn e02_01_nop_takes_table_cycles() {
-        let mut bus = Bus::new(vec![0xA5; 32 * 1024]);
-        let start_addr = 0xC000u16;
-
-        // Write NOP to WRAM at start_addr
-        for (i, &b) in [0x00].iter().enumerate() {
-            bus.write(start_addr.wrapping_add(i as u16), b);
-        }
-
-        let mut cpu = Cpu {
-            pc: start_addr,
-            ..Cpu::default()
-        };
-
-        let cycles = exec(&mut cpu, &mut bus, &[0x00]);
-        assert_eq!(cycles, 1, "NOP should take 1 M-cycle per table");
-    }
-
-    #[test]
-    fn e02_01_nop_advances_pc() {
-        let mut bus = Bus::new(vec![0xA5; 32 * 1024]);
-        let start_addr = 0xC000u16;
-
-        // Write NOP to WRAM at start_addr
-        for (i, &b) in [0x00].iter().enumerate() {
-            bus.write(start_addr.wrapping_add(i as u16), b);
-        }
-
-        let mut cpu = Cpu {
-            pc: start_addr,
-            ..Cpu::default()
-        };
-
-        exec(&mut cpu, &mut bus, &[0x00]);
-
-        assert_eq!(cpu.pc, start_addr + 1, "PC should advance by 1 after NOP");
-    }
-
-    #[test]
-    fn e02_01_nop_preserves_f_low_nibble() {
-        let mut bus = Bus::new(vec![0xA5; 32 * 1024]);
-        let start_addr = 0xC000u16;
-
-        // Write NOP to WRAM at start_addr
-        for (i, &b) in [0x00].iter().enumerate() {
-            bus.write(start_addr.wrapping_add(i as u16), b);
-        }
-
-        // Set all flag bits (including low nibble) to 1.
-        let mut cpu = Cpu {
-            pc: start_addr,
-            f: 0x0F,
-            ..Cpu::default()
-        };
-
-        exec(&mut cpu, &mut bus, &[0x00]);
-
-        assert_eq!(cpu.f & 0x0F, 0, "low nibble of F must stay 0 after NOP");
-    }
-
-    #[test]
-    fn e02_01_stub_other_opcodes_dont_panic() {
-        let mut bus = Bus::new(vec![0xA5; 32 * 1024]);
-        // Write a non-NOP opcode (LD BC, n16) followed by two operand bytes.
-        for (i, &b) in [0x01, 0x12, 0x34].iter().enumerate() {
-            bus.write(0xC000 + i as u16, b);
-        }
-
-        let mut cpu = Cpu {
-            pc: 0xC000,
-            ..Cpu::default()
-        };
-
-        // Should not panic - all instructions behave as NOP for E02_01.
-        for _ in 0..3 {
-            cpu.tick(&mut bus);
-        }
-
-        // PC should advance past the instruction bytes (stub behavior).
-        assert_eq!(
-            cpu.pc, 0xC003,
-            "PC should advance past stubbed multi-byte opcode"
-        );
-    }
-
-    #[test]
-    fn e02_01_default_f_has_low_nibble_zero() {
+    fn c01_01_default_is_all_zero() {
         let cpu = Cpu::default();
-        // Default CPU should have valid F with low nibble zero.
-        assert_eq!(cpu.f & 0x0F, 0, "Default F must have low nibble = 0");
+        assert_eq!(
+            (cpu.a, cpu.f, cpu.b, cpu.c, cpu.d, cpu.e, cpu.h, cpu.l),
+            (0, 0, 0, 0, 0, 0, 0, 0)
+        );
+        assert_eq!(cpu.sp, 0);
+        assert_eq!(cpu.pc, 0);
+        assert!(cpu.at_boundary());
+        assert_eq!(cpu.unimplemented(), None);
+    }
+
+    #[test]
+    fn c01_01_reset_values_checksum_zero() {
+        let cpu = Cpu::reset(0);
+        assert_eq!(cpu.a, 0x01);
+        assert_eq!(cpu.f, 0x80); // Z set, N clear; H and C clear for checksum $00
+        assert_eq!(cpu.b, 0x00);
+        assert_eq!(cpu.c, 0x13);
+        assert_eq!(cpu.d, 0x00);
+        assert_eq!(cpu.e, 0xD8);
+        assert_eq!(cpu.h, 0x01);
+        assert_eq!(cpu.l, 0x4D);
+        assert_eq!(cpu.sp, 0xFFFE);
+        assert_eq!(cpu.pc, 0x0100);
+        let r = cpu.regs();
+        assert_eq!(
+            (r.a, r.f, r.b, r.c, r.d, r.e, r.h, r.l),
+            (0x01, 0x80, 0x00, 0x13, 0x00, 0xD8, 0x01, 0x4D)
+        );
+        assert_eq!(r.sp, 0xFFFE);
+        assert_eq!(r.pc, 0x0100);
+    }
+
+    #[test]
+    fn c01_01_reset_values_checksum_nonzero() {
+        let cpu = Cpu::reset(0x4D);
+        assert_eq!(cpu.f, 0xB0); // Z set plus H and C both set
+    }
+
+    #[test]
+    fn c01_01_unknown_opcode_recorded_at_address_and_costs_one_tick() {
+        let mut bus = testutil::new_bus();
+        // Dirty F low nibble: it must be re-masked at instruction end.
+        let mut cpu = Cpu {
+            f: 0xFF,
+            ..Cpu::default()
+        };
+
+        let ticks = testutil::exec(&mut cpu, &mut bus, &[0x99]);
+
+        assert_eq!(ticks, 1);
+        assert_eq!(cpu.unimplemented(), Some((0x99, 0xC000)));
+        assert_eq!(cpu.pc, 0xC001); // PC advanced by exactly one
+        assert_eq!(cpu.f & 0x0F, 0); // F low nibble is 0
+    }
+
+    #[test]
+    fn c01_01_unknown_opcode_record_overwritten_by_next_fetch() {
+        let mut bus = testutil::new_bus();
+        let mut cpu = Cpu::default();
+
+        testutil::exec(&mut cpu, &mut bus, &[0x99]);
+        assert_eq!(cpu.unimplemented(), Some((0x99, 0xC000)));
+
+        // The next fetch records the new opcode at its own address.
+        bus.write(0xC001, 0xA5);
+        cpu.tick(&mut bus);
+        assert_eq!(cpu.unimplemented(), Some((0xA5, 0xC001)));
     }
 }
