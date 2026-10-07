@@ -2,6 +2,7 @@
 //! M-cycle with at most one bus access; opcodes are decoded by bit-field groups, no table.
 
 pub mod load8;
+pub mod load_ptr;
 pub mod registers;
 
 #[cfg(test)]
@@ -110,8 +111,9 @@ impl Cpu {
         }
 
         // Group dispatch chain (decision C_00): each group returns true when it claims the
-        // current opcode; the first claim wins and stops the chain.
-        let claimed = self.exec_load8_reg(bus);
+        // current opcode; the first claim wins and stops the chain. The groups are disjoint in
+        // opcode space, so their relative order does not change which opcodes they cover.
+        let claimed = self.exec_load8_reg(bus) || self.exec_load_ptr(bus);
         if !claimed {
             // No group claims this opcode: record it and cost its fetch M-cycle only.
             self.record_unimplemented(self.opcode);

@@ -52,8 +52,8 @@ impl Cpu {
     }
 
     /// Read a plain 8-bit register by its bit-field index (0=B .. 5=L, 7=A). Index 6 is the
-    /// (HL) form and is never passed here.
-    fn read_r8(&self, idx: u8) -> u8 {
+    /// (HL) form and is never passed here. Shared with the pointer-load group (C01_06).
+    pub(super) fn read_r8(&self, idx: u8) -> u8 {
         match idx {
             0 => self.b,
             1 => self.c,
@@ -65,8 +65,9 @@ impl Cpu {
         }
     }
 
-    /// Write a plain 8-bit register by its bit-field index (0=B .. 5=L, 7=A).
-    fn store_r8(&mut self, idx: u8, value: u8) {
+    /// Write a plain 8-bit register by its bit-field index (0=B .. 5=L, 7=A). Shared with the
+    /// pointer-load group (C01_06).
+    pub(super) fn store_r8(&mut self, idx: u8, value: u8) {
         match idx {
             0 => self.b = value,
             1 => self.c = value,
