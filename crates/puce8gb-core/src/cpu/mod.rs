@@ -1,6 +1,7 @@
 //! SM83 CPU engine (decision C_00): hand-written M-cycle state machine. One tick is one
 //! M-cycle with at most one bus access; opcodes are decoded by bit-field groups, no table.
 
+pub mod call;
 pub mod jump;
 pub mod load16;
 pub mod load8;
@@ -115,11 +116,13 @@ impl Cpu {
         }
 
         // Group dispatch chain (decision C_00): each group returns true when it claims the
-        // current opcode; the first claim wins and stops the chain. The groups are disjoint in
-        // opcode space, so their relative order does not change which opcodes they cover.
+        // current opcode; the first claim wins and stops the chain. Most groups are disjoint in
+        // opcode space, but the subroutines group (C01_11) overlaps load16's LD SP,HL guard on
+        // $FF (RST $38 vs LD SP,HL), so it must run before exec_load16 to claim $FF as RST.
         let claimed = self.exec_load8_reg(bus)
             || self.exec_load_ptr(bus)
             || self.exec_load_abs(bus)
+            || self.exec_call(bus)
             || self.exec_load16(bus)
             || self.exec_stack(bus)
             || self.exec_jump(bus);
