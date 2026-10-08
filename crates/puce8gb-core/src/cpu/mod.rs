@@ -1,6 +1,7 @@
 //! SM83 CPU engine (decision C_00): hand-written M-cycle state machine. One tick is one
 //! M-cycle with at most one bus access; opcodes are decoded by bit-field groups, no table.
 
+pub mod jump;
 pub mod load16;
 pub mod load8;
 pub mod load_abs;
@@ -120,7 +121,8 @@ impl Cpu {
             || self.exec_load_ptr(bus)
             || self.exec_load_abs(bus)
             || self.exec_load16(bus)
-            || self.exec_stack(bus);
+            || self.exec_stack(bus)
+            || self.exec_jump(bus);
         if !claimed {
             // No group claims this opcode: record it and cost its fetch M-cycle only.
             self.record_unimplemented(self.opcode);
