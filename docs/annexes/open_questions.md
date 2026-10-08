@@ -21,6 +21,9 @@ Voir docs/annexes/notes/01b_timer.md.
 ## D_05 - CPU core : placement des bits du registre F a confirmer sur le materiel (2026-10-05)
 Voir docs/annexes/notes/02a_cpu_core.md. Les deux sources pandocs concordent entre elles (src/CPU_Registers_and_Flags.md#The-Flags-Register L17-L24 et historical/2001-Oct-pandocs.txt L2087-L2093) : z=bit 7, n=bit 6, h=bit 5, c=bit 4 du registre F, bits 3-0 "not used (always zero)". Ce placement contredit l'enonce du task D_05 ("low nibble of F") ; aucune source du corpus ne confirme les positions de bits sur le materiel. Statut : CONFIRME au niveau des sources - to confirm on hardware via blargg cpu_instrs flag tests (roms/test-roms/blargg/cpu_instrs).
 
+## D_18 - PUSH rr write order (2026-10-08)
+Voir docs/tasks/C01/C01_09.md. L'ordre des deux ecritures de PUSH rr (octet haut d'abord a (SP), puis octet bas a (SP)+1) n'est pas etabli explicitement dans refs/pandocs ni note 02c ; il est deduit du comportement standard SM83/GB. Statut : UNKNOWN - to confirm.
+
 ## D_06 - Interrupts CPU / HALT bug / STOP : points a confirmer (2026-10-05)
 Voir docs/annexes/notes/02b_cpu_interrupts.md.
 

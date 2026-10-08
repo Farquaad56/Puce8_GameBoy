@@ -6,6 +6,7 @@ pub mod load8;
 pub mod load_abs;
 pub mod load_ptr;
 pub mod registers;
+pub mod stack;
 
 #[cfg(test)]
 pub(crate) mod testutil;
@@ -118,7 +119,8 @@ impl Cpu {
         let claimed = self.exec_load8_reg(bus)
             || self.exec_load_ptr(bus)
             || self.exec_load_abs(bus)
-            || self.exec_load16(bus);
+            || self.exec_load16(bus)
+            || self.exec_stack(bus);
         if !claimed {
             // No group claims this opcode: record it and cost its fetch M-cycle only.
             self.record_unimplemented(self.opcode);
