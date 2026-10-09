@@ -2,6 +2,7 @@
 //! M-cycle with at most one bus access; opcodes are decoded by bit-field groups, no table.
 
 pub mod alu_add;
+pub mod alu_logic;
 pub mod call;
 pub mod incdec8;
 pub mod jump;
@@ -129,7 +130,8 @@ impl Cpu {
             || self.exec_load16(bus)
             || self.exec_stack(bus)
             || self.exec_jump(bus)
-            || self.exec_alu_add(bus);
+            || self.exec_alu_add(bus)
+            || self.exec_alu_logic(bus);
         if !claimed {
             // No group claims this opcode: record it and cost its fetch M-cycle only.
             self.record_unimplemented(self.opcode);

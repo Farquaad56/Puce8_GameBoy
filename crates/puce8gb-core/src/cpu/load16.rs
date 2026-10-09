@@ -61,8 +61,11 @@ impl Cpu {
             }
         }
 
-        // LD SP,HL: block 3, y == 7. Two M-cycles; sp = hl() on step 2 (register copy).
-        if x_is(op, 3) && y_is(op, 7) {
+        // LD SP,HL: block 3, y == 7, z == 1 ($F9 only). Two M-cycles; sp = hl() on step 2
+        // (register copy). The z guard excludes the other block-3 y == 7 opcodes ($F8 ADD
+        // SP,e8, $FA LD A,(a16), $FB/$FC/$FD, $FF RST $38): without it this group would
+        // swallow the immediate of any of them, such as CP A,n ($FE).
+        if x_is(op, 3) && y_is(op, 7) && z_is(op, 1) {
             match self.step {
                 1 => return true, // fetch M-cycle: no bus access yet
                 _ => {
