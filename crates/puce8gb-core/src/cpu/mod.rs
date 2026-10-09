@@ -2,6 +2,7 @@
 //! M-cycle with at most one bus access; opcodes are decoded by bit-field groups, no table.
 
 pub mod call;
+pub mod incdec8;
 pub mod jump;
 pub mod load16;
 pub mod load8;
@@ -123,6 +124,7 @@ impl Cpu {
             || self.exec_load_ptr(bus)
             || self.exec_load_abs(bus)
             || self.exec_call(bus)
+            || self.exec_incdec8(bus)
             || self.exec_load16(bus)
             || self.exec_stack(bus)
             || self.exec_jump(bus);

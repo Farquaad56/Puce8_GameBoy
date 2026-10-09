@@ -92,7 +92,7 @@ impl Cpu {
     }
 
     /// The 16-bit value of HL, computed from the public register fields.
-    fn hl(&self) -> u16 {
+    pub(super) fn hl(&self) -> u16 {
         ((self.h as u16) << 8) | self.l as u16
     }
 
