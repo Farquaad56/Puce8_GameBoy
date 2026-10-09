@@ -108,7 +108,7 @@ impl Machine for Dmg {
         let checksum = self.bus.rom[ROM_HEADER_CHECKSUM];
         self.cpu = Cpu::reset(checksum);
         self.bus.reset();
-        self.video.frame.fill(0x00);
+        self.video.reset(); // LY and dot counter restart at line 0 (C01_15)
         self.audio.head = 0;
         self.audio.tail = 0;
         self.dot_phase = 0;
@@ -121,6 +121,15 @@ impl Machine for Dmg {
         self.dot_phase = (self.dot_phase + 1) % 4;
         if self.dot_phase == 0 {
             self.cpu.tick(&mut self.bus);
+        }
+        // PPU advances one dot per Machine::tick() (decision A_01, C01_15). LY is mirrored
+        // into the bus so $FF44 reads are side-effect-free; entry into VBlank (LY 143 -> 144)
+        // raises the IF vblank bit once per frame (note 02b "vblank", note 01_timing.md).
+        let was_vblank = self.video.vblank();
+        let line_changed = self.video.tick();
+        self.bus.ly = self.video.ly();
+        if line_changed && !was_vblank && self.video.vblank() {
+            self.bus.io[0x0F] |= 0x01; // IF bit 0: vblank request (note 02b)
         }
     }
 
@@ -366,5 +375,54 @@ mod tests {
         dmg.reset(); // the capture buffer is part of the post-boot state (C01_03)
         let mut out = [0u8; 4];
         assert_eq!(dmg.take_serial_output(&mut out), 0);
+    }
+
+    #[test]
+    fn c01_15_ly_visible_through_bus_read() {
+        use crate::video::{LINE_DOTS, VBLANK_FIRST_LINE};
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        assert_eq!(dmg.bus.read(0xFF44), 0x00); // post-boot LY (note 08)
+                                                // Advance to the start of line 5: $FF44 must read 5 through the bus.
+        for _ in 0..(LINE_DOTS * 5) {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.read(0xFF44), 5);
+        // Advance into VBlank (line 144): $FF44 reads the line index.
+        for _ in 0..(LINE_DOTS * u32::from(VBLANK_FIRST_LINE - 5)) {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.read(0xFF44), VBLANK_FIRST_LINE);
+    }
+
+    #[test]
+    fn c01_15_vblank_if_bit_raised_once_per_frame() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        // IF bit 0 (vblank) is set at power-up (note 08: IF = $E1).
+        assert_eq!(dmg.bus.io[0x0F] & 0x01, 0x01);
+
+        // Clear the request (as a ROM would by reading IF), then run exactly one frame and
+        // count rising edges of the vblank bit: it must be raised exactly once per frame.
+        dmg.bus.io[0x0F] &= !0x01;
+        let mut raises = 0u32;
+        for _ in 0..FRAME_DOTS {
+            let before = dmg.bus.io[0x0F] & 0x01;
+            dmg.tick();
+            if before == 0 && dmg.bus.io[0x0F] & 0x01 != 0 {
+                raises += 1; // a clear -> set transition (note 02b)
+            }
+        }
+        assert_eq!(raises, 1); // exactly one vblank request per frame (note 02b)
+    }
+
+    #[test]
+    fn c01_15_reset_restarts_ly_and_vblank() {
+        use crate::video::{LINE_DOTS, VBLANK_FIRST_LINE};
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        for _ in 0..(LINE_DOTS * u32::from(VBLANK_FIRST_LINE)) {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.read(0xFF44), VBLANK_FIRST_LINE); // in VBlank before reset
+        dmg.reset();
+        assert_eq!(dmg.bus.read(0xFF44), 0x00); // LY restarts at line 0 (note 08)
     }
 }

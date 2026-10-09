@@ -27,6 +27,9 @@ pub struct Bus {
     pub serial: [u8; 256],
     /// Number of captured bytes currently held in `serial` (C01_03).
     pub serial_len: usize,
+    /// Current PPU scanline = LY ($FF44), owned by the PPU and mirrored here so reads are
+    /// side-effect-free; writes to $FF44 are ignored (C01_15, note 04a "LY").
+    pub ly: u8,
 }
 
 impl Bus {
@@ -41,6 +44,7 @@ impl Bus {
             io: [0xFF; IO_SIZE],
             serial: [0x00; 256],
             serial_len: 0,
+            ly: 0, // LY ($FF44) post-boot value (note 08, C01_15)
         }
     }
 
@@ -52,6 +56,7 @@ impl Bus {
         self.wram.fill(0x00);
         self.hram.fill(0x00);
         self.serial_len = 0; // no captured serial bytes at power-up (C01_03)
+        self.ly = 0; // LY ($FF44) post-boot value (note 08, C01_15)
 
         // Unassigned IO reads $FF by default (decision A_02), then the documented
         // post-boot values from note 08 "Registres I/O apres boot".
@@ -123,6 +128,7 @@ impl Bus {
             }
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize],
             0xFEA0..=0xFEFF => 0x00, // unusable range: $00 on DMG outside OAM block (note 03a)
+            0xFF44 => self.ly,       // LY ($FF44): PPU-owned scanline, read-only (C01_15)
             0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.io[IO_SIZE - 1], // IE (decision A_02)
@@ -144,6 +150,7 @@ impl Bus {
             }
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize] = val,
             0xFEA0..=0xFEFF => {} // unusable range: writes are ignored (note 03a)
+            0xFF44 => {} // LY ($FF44) is read-only; writes are ignored (C01_15, note 04a "LY")
             0xFF00..=0xFF7F => {
                 self.io[(addr - 0xFF00) as usize] = val;
                 // SC ($FF02): a transfer started with the internal clock (bit7 + bit0 set,
@@ -190,6 +197,7 @@ impl Bus {
             }
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize],
             0xFEA0..=0xFEFF => 0x00, // unusable range: $00 on DMG outside OAM block (note 03a)
+            0xFF44 => self.ly,       // LY ($FF44): PPU-owned scanline, read-only (C01_15)
             0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.io[IO_SIZE - 1], // IE (decision A_02)
@@ -294,6 +302,17 @@ mod tests {
         assert_eq!(bus.read(0xFF00), 0xC5);
         bus.write(0xFF7F, 0x3C);
         assert_eq!(bus.read(0xFF7F), 0x3C);
+    }
+
+    #[test]
+    fn c01_15_ff44_reads_ly_and_writes_are_ignored() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        assert_eq!(bus.read(0xFF44), 0x00); // post-boot LY (note 08)
+        bus.ly = 0x90; // the PPU advances the scanline (C01_15)
+        assert_eq!(bus.read(0xFF44), 0x90); // $FF44 reflects the current line
+        assert_eq!(bus.peek(0xFF44), 0x90); // peek is side-effect-free too
+        bus.write(0xFF44, 0x5A); // LY is read-only: writes are ignored (note 04a "LY")
+        assert_eq!(bus.read(0xFF44), 0x90);
     }
 
     #[test]
