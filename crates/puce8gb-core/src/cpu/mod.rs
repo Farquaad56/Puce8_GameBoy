@@ -3,8 +3,10 @@
 
 pub mod alu_add;
 pub mod alu_logic;
+pub mod arith16;
 pub mod call;
 pub mod incdec8;
+pub mod interrupt;
 pub mod jump;
 pub mod load16;
 pub mod load8;
@@ -48,6 +50,10 @@ pub struct Cpu {
     /// CB prefix flag (decision C_00); used by the CB group in C01_25/C01_26.
     #[allow(dead_code)]
     cb: bool,
+    /// Interrupt master enable (note 02b): set by ei/reti, cleared by di and at reset; read
+    /// by interrupt dispatch from task C01_32 on. Written here by DI (task C01_16).
+    #[allow(dead_code)]
+    ime: bool,
     /// Last opcode no group claimed, with the address of its byte (decision C_00).
     unimplemented: Option<(u8, u16)>,
 }
@@ -127,11 +133,13 @@ impl Cpu {
             || self.exec_load_abs(bus)
             || self.exec_call(bus)
             || self.exec_incdec8(bus)
+            || self.exec_arith16(bus)
             || self.exec_load16(bus)
             || self.exec_stack(bus)
             || self.exec_jump(bus)
             || self.exec_alu_add(bus)
-            || self.exec_alu_logic(bus);
+            || self.exec_alu_logic(bus)
+            || self.exec_interrupt_ops(bus);
         if !claimed {
             // No group claims this opcode: record it and cost its fetch M-cycle only.
             self.record_unimplemented(self.opcode);

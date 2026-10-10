@@ -54,17 +54,17 @@ C01_12	CODE	0	docs/tasks/C01/C01_12.md	INC and DEC 8-bit
 C01_13	CODE	0	docs/tasks/C01/C01_13.md	ADD, ADC, SUB, SBC
 C01_14	CODE	0	docs/tasks/C01/C01_14.md	AND, XOR, OR, CP
 C01_15	CODE	0	docs/tasks/C01/C01_15.md	Minimal LY / VBlank stub
+C01_16	TEST	1	docs/tasks/C01/C01_16.md	blargg cpu_instrs 06 ld r,r
 C01_17	CODE	0	docs/tasks/C01/C01_17.md	INC/DEC rr and ADD HL,rr
 C01_18	CODE	0	docs/tasks/C01/C01_18.md	ADD SP,e8 and LD HL,SP+e8
-C01_22	CODE	0	docs/tasks/C01/C01_22.md	Accumulator rotates, CPL, SCF, CCF
-C01_23	CODE	0	docs/tasks/C01/C01_23.md	DAA
-C01_25	CODE	0	docs/tasks/C01/C01_25.md	CB rotates, shifts and SWAP
-C01_26	CODE	0	docs/tasks/C01/C01_26.md	CB BIT, RES, SET
-C01_16	TEST	1	docs/tasks/C01/C01_16.md	blargg cpu_instrs 06 ld r,r
 C01_19	TEST	1	docs/tasks/C01/C01_19.md	blargg cpu_instrs 03 op sp,hl
 C01_20	TEST	1	docs/tasks/C01/C01_20.md	blargg cpu_instrs 04 op r,imm
 C01_21	TEST	1	docs/tasks/C01/C01_21.md	blargg cpu_instrs 05 op rp
+C01_22	CODE	0	docs/tasks/C01/C01_22.md	Accumulator rotates, CPL, SCF, CCF
+C01_23	CODE	0	docs/tasks/C01/C01_23.md	DAA
 C01_24	TEST	1	docs/tasks/C01/C01_24.md	blargg cpu_instrs 01 special
+C01_25	CODE	0	docs/tasks/C01/C01_25.md	CB rotates, shifts and SWAP
+C01_26	CODE	0	docs/tasks/C01/C01_26.md	CB BIT, RES, SET
 C01_27	TEST	1	docs/tasks/C01/C01_27.md	blargg cpu_instrs 09 op r,r
 C01_28	TEST	1	docs/tasks/C01/C01_28.md	blargg cpu_instrs 10 bit ops
 C01_29	TEST	1	docs/tasks/C01/C01_29.md	blargg cpu_instrs 11 op a,(hl)
