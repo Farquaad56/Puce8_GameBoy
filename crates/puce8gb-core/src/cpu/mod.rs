@@ -13,6 +13,7 @@ pub mod load8;
 pub mod load_abs;
 pub mod load_ptr;
 pub mod registers;
+pub mod sp_offset;
 pub mod stack;
 
 #[cfg(test)]
@@ -131,6 +132,7 @@ impl Cpu {
         let claimed = self.exec_load8_reg(bus)
             || self.exec_load_ptr(bus)
             || self.exec_load_abs(bus)
+            || self.exec_sp_offset(bus)
             || self.exec_call(bus)
             || self.exec_incdec8(bus)
             || self.exec_arith16(bus)
