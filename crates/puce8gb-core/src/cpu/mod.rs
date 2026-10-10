@@ -6,6 +6,7 @@ pub mod alu_add;
 pub mod alu_logic;
 pub mod arith16;
 pub mod call;
+pub mod daa;
 pub mod incdec8;
 pub mod interrupt;
 pub mod jump;
@@ -140,6 +141,8 @@ impl Cpu {
             // exec_acc_misc runs before exec_load16: its RRCA ($0F, x==0 y==1) would otherwise be
             // over-claimed by load16's LD (a16),SP guard (x_is(op,0) && y_is(op,1), no z check).
             || self.exec_acc_misc(bus)
+            // DAA ($27): acc_misc's y == 4 fall-through; no overlap with any other group.
+            || self.exec_daa(bus)
             || self.exec_load16(bus)
             || self.exec_stack(bus)
             || self.exec_jump(bus)
