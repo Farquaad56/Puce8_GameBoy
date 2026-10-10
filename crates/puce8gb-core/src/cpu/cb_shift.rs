@@ -31,16 +31,18 @@ impl Cpu {
                 self.cb = true;
                 true
             }
-            // Step 2: fetch the second byte at PC (one bus access). A shift/rotate op has a
-            // second byte < $40; anything >= $40 is another CB group and is handed off after
-            // this fetch (the fetch already happened, so we must not re-read it downstream).
+            // Step 2: fetch the second byte at PC (one bus access). Latch it in `lo` before any
+            // hand-off so a later CB group (C01_26 BIT/RES/SET) can reuse the same fetch. A
+            // shift/rotate op has a second byte < $40; anything >= $40 is another CB group and
+            // is handed off after this fetch (the fetch already happened, so we must not re-read
+            // it downstream).
             2 => {
                 let cb_op = bus.read(self.pc);
                 self.pc = self.pc.wrapping_add(1);
+                self.lo = cb_op; // latch the second byte once for this CB instruction
                 if cb_op >= 0x40 {
                     return false; // not this group: hand off to a later CB group / unimplemented
                 }
-                self.lo = cb_op; // latch the op for the (HL) read/write steps
                 if (cb_op & 7) != 6 {
                     // Register form: two M-cycles total. Apply the op now, no memory access.
                     let value = self.read_r8(cb_op & 7);

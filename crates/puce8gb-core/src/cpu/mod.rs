@@ -6,6 +6,7 @@ pub mod alu_add;
 pub mod alu_logic;
 pub mod arith16;
 pub mod call;
+pub mod cb_bit;
 pub mod cb_shift;
 pub mod daa;
 pub mod incdec8;
@@ -151,6 +152,10 @@ impl Cpu {
             || self.exec_alu_logic(bus)
             // CB-prefixed rotate/shift family (C01_25): only claims $CB; no other group does.
             || self.exec_cb_shift(bus)
+            // CB-prefixed single-bit family (C01_26): BIT/RES/SET on a register or (HL). Runs
+            // after exec_cb_shift, which fetches the second byte and latches it in `lo`; this
+            // group reuses that latch so the second-byte fetch happens exactly once.
+            || self.exec_cb_bit(bus)
             || self.exec_interrupt_ops(bus);
         if !claimed {
             // No group claims this opcode: record it and cost its fetch M-cycle only.
