@@ -6,6 +6,7 @@ pub mod alu_add;
 pub mod alu_logic;
 pub mod arith16;
 pub mod call;
+pub mod cb_shift;
 pub mod daa;
 pub mod incdec8;
 pub mod interrupt;
@@ -148,6 +149,8 @@ impl Cpu {
             || self.exec_jump(bus)
             || self.exec_alu_add(bus)
             || self.exec_alu_logic(bus)
+            // CB-prefixed rotate/shift family (C01_25): only claims $CB; no other group does.
+            || self.exec_cb_shift(bus)
             || self.exec_interrupt_ops(bus);
         if !claimed {
             // No group claims this opcode: record it and cost its fetch M-cycle only.
