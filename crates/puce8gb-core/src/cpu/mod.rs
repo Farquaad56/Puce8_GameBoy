@@ -1,6 +1,7 @@
 //! SM83 CPU engine (decision C_00): hand-written M-cycle state machine. One tick is one
 //! M-cycle with at most one bus access; opcodes are decoded by bit-field groups, no table.
 
+pub mod acc_misc;
 pub mod alu_add;
 pub mod alu_logic;
 pub mod arith16;
@@ -136,6 +137,9 @@ impl Cpu {
             || self.exec_call(bus)
             || self.exec_incdec8(bus)
             || self.exec_arith16(bus)
+            // exec_acc_misc runs before exec_load16: its RRCA ($0F, x==0 y==1) would otherwise be
+            // over-claimed by load16's LD (a16),SP guard (x_is(op,0) && y_is(op,1), no z check).
+            || self.exec_acc_misc(bus)
             || self.exec_load16(bus)
             || self.exec_stack(bus)
             || self.exec_jump(bus)
