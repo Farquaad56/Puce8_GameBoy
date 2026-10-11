@@ -13,8 +13,8 @@ impl Cpu {
     ///   affected. The fetch is step 1 (no bus access); the register write happens on step 2
     ///   (a register copy, so no bus access). At most one bus access per M-cycle (decision C_00).
     /// - ADD HL,rr ($09/$19/$29/$39): block 0, z == 1, y odd; the pair is selected by
-    ///   y>>1 (BC/DE/HL/SP). 8 T = 2 M-cycles; flags "-0hc" (note 02a: Z untouched, N cleared, H from bit 11 of
-    ///   the sum, C from bit 15). The fetch is step 1 (no bus access); the register write
+    ///   y>>1 (BC/DE/HL/SP). 8 T = 2 M-cycles; flags "-0hc" (note 02a: Z untouched, N cleared;
+    ///   H is the carry out of bit 11, C is the carry out of bit 15). The fetch is step 1 (no bus access); the register write
     ///   happens on step 2 (a register copy, so no bus access).
     pub(super) fn exec_arith16(&mut self, _bus: &mut Bus) -> bool {
         let op = self.opcode;
@@ -72,13 +72,14 @@ impl Cpu {
                         2 => self.hl(), // HL (read before the write below)
                         _ => self.sp,   // SP
                     };
-                    let sum = (self.hl() as u32) + operand as u32; // at most 0x1FFFF
+                    let hl = self.hl() as u32; // at most 0xFFFF
+                    let sum = hl + operand as u32; // at most 0x1FFFE
                     let mut f = self.f & 0x80; // Z untouched (note 02a: "-0hc")
-                    if (sum >> 11) & 1 != 0 {
-                        f |= 0x20; // H from bit 11 of the sum
+                    if ((hl & 0x0FFF) + (operand as u32 & 0x0FFF)) > 0x0FFF {
+                        f |= 0x20; // H: carry out of bit 11
                     }
                     if sum > 0xFFFF {
-                        f |= 0x10; // C from bit 15 of the sum (carry out)
+                        f |= 0x10; // C: carry out of bit 15 (carry out)
                     }
                     let result = sum as u16; // wraps mod $10000
                     self.h = (result >> 8) as u8;
@@ -370,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn c01_17_add_hl_sets_half_carry_at_bit_11() {
+    fn c01_17_add_hl_no_half_carry_below_bit_12() {
         let mut bus = testutil::new_bus();
         let mut cpu = Cpu {
             b: 0x00,
@@ -383,12 +384,12 @@ mod tests {
         testutil::exec(&mut cpu, &mut bus, &[0x09]); // ADD HL,BC
 
         assert_eq!((cpu.h as u16) << 8 | cpu.l as u16, 0x0800); // $07FF + $0001
-        assert_eq!(cpu.f & 0x20, 0x20); // H set: bit 11 of the sum is 1 (note 02a)
-        assert_eq!(cpu.f & 0x10, 0); // C clear: no carry out
+        assert_eq!(cpu.f & 0x20, 0); // H clear: no carry out of bit 11 ($7FF + $1 = $800)
+        assert_eq!(cpu.f & 0x10, 0); // C clear: no carry out of bit 15
     }
 
     #[test]
-    fn c01_17_add_hl_carry_boundary_keeps_c_clear() {
+    fn c01_17_add_hl_no_carry_at_0xffff() {
         let mut bus = testutil::new_bus();
         let mut cpu = Cpu {
             b: 0x00,
@@ -401,8 +402,8 @@ mod tests {
         testutil::exec(&mut cpu, &mut bus, &[0x09]); // ADD HL,BC
 
         assert_eq!((cpu.h as u16) << 8 | cpu.l as u16, 0xFFFF); // just below the wrap
-        assert_eq!(cpu.f & 0x20, 0x20); // H set: bit 11 of $FFFF is 1
-        assert_eq!(cpu.f & 0x10, 0); // C clear: no carry out yet
+        assert_eq!(cpu.f & 0x20, 0); // H clear: no carry out of bit 11 ($FFE + $1 = $FFF)
+        assert_eq!(cpu.f & 0x10, 0); // C clear: no carry out of bit 15 yet
     }
 
     #[test]
@@ -449,5 +450,61 @@ mod tests {
         testutil::exec(&mut cpu, &mut bus, &[0x09]); // ADD HL,BC
 
         assert_eq!(cpu.unimplemented(), None); // $09 is claimed by the arith16 group
+    }
+
+    // ---- Task C01_19: ROM 03 "op sp,hl" fails only on ADD HL,SP ($39) ----
+
+    #[test]
+    fn c01_19_add_hl_sp_sets_half_carry_on_bit_11_carry_out() {
+        let mut bus = testutil::new_bus();
+        let mut cpu = Cpu {
+            sp: 0x0605,
+            h: 0x8A,
+            l: 0x23, // HL = $8A23
+            ..Cpu::default()
+        };
+
+        testutil::exec(&mut cpu, &mut bus, &[0x39]); // ADD HL,SP
+
+        assert_eq!((cpu.h as u16) << 8 | cpu.l as u16, 0x9028); // $8A23 + $0605
+        assert_eq!(cpu.f & 0x20, 0x20); // H set: carry out of bit 11 ($8A23 & $FFF = $A23; +$605 > $FFF)
+        assert_eq!(cpu.f & 0x10, 0); // C clear: no carry out of bit 15
+    }
+
+    #[test]
+    fn c01_19_add_hl_sp_keeps_z_set_when_result_is_zero() {
+        let mut bus = testutil::new_bus();
+        let mut cpu = Cpu {
+            sp: 0x0001,
+            h: 0x0F,
+            l: 0xFF, // HL = $0FFF
+            f: 0x80, // Z set before the instruction; must stay untouched
+            ..Cpu::default()
+        };
+
+        testutil::exec(&mut cpu, &mut bus, &[0x39]); // ADD HL,SP
+
+        assert_eq!((cpu.h as u16) << 8 | cpu.l as u16, 0x1000); // $0FFF + $0001
+        assert_eq!(cpu.f & 0x20, 0x20); // H set: carry out of bit 11 ($FFF + $1 = $1000)
+        assert_eq!(cpu.f & 0x10, 0); // C clear: no carry out of bit 15
+        assert_eq!(cpu.f & 0x80, 0x80); // Z untouched (note 02a "-0hc")
+    }
+
+    #[test]
+    fn c01_19_add_hl_sp_sets_carry_and_keeps_z_clear_on_wrap() {
+        let mut bus = testutil::new_bus();
+        let mut cpu = Cpu {
+            sp: 0x0001,
+            h: 0xFF,
+            l: 0xFF, // HL = $FFFF
+            ..Cpu::default()
+        };
+
+        testutil::exec(&mut cpu, &mut bus, &[0x39]); // ADD HL,SP
+
+        assert_eq!((cpu.h as u16) << 8 | cpu.l as u16, 0x0000); // $FFFF + $0001 wraps to $0000
+        assert_eq!(cpu.f & 0x20, 0x20); // H set: carry out of bit 11 ($FFF + $1 = $1000)
+        assert_eq!(cpu.f & 0x10, 0x10); // C set: carry out of bit 15
+        assert_eq!(cpu.f & 0x80, 0); // Z untouched (clear): a zero result does not set it
     }
 }
