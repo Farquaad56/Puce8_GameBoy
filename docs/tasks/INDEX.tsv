@@ -68,6 +68,7 @@ C01_24	TEST	1	docs/tasks/C01/C01_24.md	blargg cpu_instrs 01 special
 C01_27	TEST	1	docs/tasks/C01/C01_27.md	blargg cpu_instrs 09 op r,r
 C01_28	TEST	1	docs/tasks/C01/C01_28.md	blargg cpu_instrs 10 bit ops
 C01_29	TEST	1	docs/tasks/C01/C01_29.md	blargg cpu_instrs 11 op a,(hl)
+C01_49	CODE	0	docs/tasks/C01/C01_49.md	Doctor mode: fixed LY value (--ly-fixed)
 C01_30	TEST	1	docs/tasks/C01/C01_30.md	blargg cpu_instrs 07 jr,jp,call,ret,rst
 C01_31	TEST	1	docs/tasks/C01/C01_31.md	blargg cpu_instrs 08 misc instrs
 C01_32	CODE	0	docs/tasks/C01/C01_32.md	EI, DI, IME and interrupt dispatch, RETI
