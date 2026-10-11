@@ -1,3 +1,6 @@
 target/
 roms/
 refs/
+
+trace*.txt
+trace*.log
