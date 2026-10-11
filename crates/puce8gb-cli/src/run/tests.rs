@@ -26,6 +26,7 @@ fn args(max_cycles: u64, expect_serial: Option<&str>) -> RunArgs {
         max_cycles,
         expect_serial: expect_serial.map(String::from),
         trace: 0,
+        ly_fixed: None,
     }
 }
 

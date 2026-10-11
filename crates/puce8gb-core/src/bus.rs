@@ -30,6 +30,9 @@ pub struct Bus {
     /// Current PPU scanline = LY ($FF44), owned by the PPU and mirrored here so reads are
     /// side-effect-free; writes to $FF44 are ignored (C01_15, note 04a "LY").
     pub ly: u8,
+    /// Debug tool for trace comparison, task C01_49: when Some(v), every read of $FF44
+    /// returns v instead of the PPU scanline; None (default) keeps normal behaviour.
+    ly_override: Option<u8>,
 }
 
 impl Bus {
@@ -44,7 +47,8 @@ impl Bus {
             io: [0xFF; IO_SIZE],
             serial: [0x00; 256],
             serial_len: 0,
-            ly: 0, // LY ($FF44) post-boot value (note 08, C01_15)
+            ly: 0,             // LY ($FF44) post-boot value (note 08, C01_15)
+            ly_override: None, // no debug override by default (C01_49)
         }
     }
 
@@ -128,11 +132,18 @@ impl Bus {
             }
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize],
             0xFEA0..=0xFEFF => 0x00, // unusable range: $00 on DMG outside OAM block (note 03a)
-            0xFF44 => self.ly,       // LY ($FF44): PPU-owned scanline, read-only (C01_15)
+            0xFF44 => self.ly_override.unwrap_or(self.ly), // LY ($FF44): PPU-owned scanline, read-only (C01_15); debug override wins (C01_49)
             0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.io[IO_SIZE - 1], // IE (decision A_02)
         }
+    }
+
+    /// Debug tool for trace comparison, task C01_49: force every $FF44 read to `v`, or
+    /// restore the normal PPU scanline with None.
+    #[doc(hidden)]
+    pub fn debug_set_ly_override(&mut self, v: Option<u8>) {
+        self.ly_override = v;
     }
 
     /// Write a byte to the bus (decision A_02). ROM and unmapped/unusable ranges are
@@ -197,7 +208,7 @@ impl Bus {
             }
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize],
             0xFEA0..=0xFEFF => 0x00, // unusable range: $00 on DMG outside OAM block (note 03a)
-            0xFF44 => self.ly,       // LY ($FF44): PPU-owned scanline, read-only (C01_15)
+            0xFF44 => self.ly_override.unwrap_or(self.ly), // LY ($FF44): PPU-owned scanline, read-only (C01_15); debug override wins (C01_49)
             0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.io[IO_SIZE - 1], // IE (decision A_02)

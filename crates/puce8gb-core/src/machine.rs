@@ -100,6 +100,13 @@ impl Dmg {
         dmg.reset();
         Ok(dmg)
     }
+
+    /// Debug tool for trace comparison, task C01_49: force every $FF44 read to `v`, or
+    /// restore the normal PPU scanline with None.
+    #[doc(hidden)]
+    pub fn debug_set_ly_override(&mut self, v: Option<u8>) {
+        self.bus.debug_set_ly_override(v);
+    }
 }
 
 impl Machine for Dmg {
@@ -424,5 +431,20 @@ mod tests {
         assert_eq!(dmg.bus.read(0xFF44), VBLANK_FIRST_LINE); // in VBlank before reset
         dmg.reset();
         assert_eq!(dmg.bus.read(0xFF44), 0x00); // LY restarts at line 0 (note 08)
+    }
+
+    #[test]
+    fn c01_49_ly_override_forces_ff44_reads() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        dmg.debug_set_ly_override(Some(0x90)); // debug tool for trace comparison (C01_49)
+        assert_eq!(dmg.bus.read(0xFF44), 0x90); // forced before any tick
+        assert_eq!(dmg.bus.peek(0xFF44), 0x90); // peek agrees with read
+        for _ in 0..100_000 {
+            dmg.tick(); // many M-cycles: the PPU advances LY underneath the override
+        }
+        assert_eq!(dmg.bus.read(0xFF44), 0x90); // still forced after the ticks
+        dmg.debug_set_ly_override(None); // removes the override (call compiles)
+        dmg.bus.ly = 0x37; // sentinel different from 0x90: normal LY logic applies again
+        assert_eq!(dmg.bus.read(0xFF44), 0x37); // not forced anymore (no specific PPU LY asserted)
     }
 }

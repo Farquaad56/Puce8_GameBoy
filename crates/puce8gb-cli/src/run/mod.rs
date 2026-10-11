@@ -69,12 +69,16 @@ pub fn trace_line(
 }
 
 /// Run a ROM image for at most `args.max_cycles` T-cycles (task C01_44). No file access:
-/// the caller reads the bytes. Builds the machine and delegates to `run_machine`.
+/// the caller reads the bytes. Builds the machine and delegates to `run_machine`. With
+/// `--ly-fixed HEX`, every $FF44 read returns that value (task C01_49).
 pub fn run_rom(rom: &[u8], args: &RunArgs) -> Outcome {
     let mut dmg = match Dmg::new(rom) {
         Ok(dmg) => dmg,
         Err(_) => return Outcome::LoadError,
     };
+    if let Some(v) = args.ly_fixed {
+        dmg.debug_set_ly_override(Some(v)); // debug tool for trace comparison (C01_49)
+    }
     run_machine(&mut dmg, args)
 }
 

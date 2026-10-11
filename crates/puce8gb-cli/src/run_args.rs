@@ -1,5 +1,5 @@
 //! Argument parsing for the `run` command (task C01_43):
-//! `run <rom> [--max-cycles N] [--expect-serial TEXT] [--trace N]`.
+//! `run <rom> [--max-cycles N] [--expect-serial TEXT] [--trace N] [--ly-fixed HEX]`.
 
 /// Default execution budget in T-cycles: 100_000_000.
 const DEFAULT_MAX_CYCLES: u64 = 100_000_000;
@@ -14,6 +14,9 @@ pub struct RunArgs {
     pub expect_serial: Option<String>,
     /// Trace window size in instructions; 0 disables tracing (default 0) (task C01_47).
     pub trace: u64,
+    /// Fixed value returned by every $FF44 (LY) read; None keeps normal behaviour
+    /// (`--ly-fixed HEX`, task C01_49). Debug tool for trace comparison.
+    pub ly_fixed: Option<u8>,
 }
 
 /// Parse the arguments that follow the word `run`. The first positional argument is the
@@ -24,6 +27,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
     let mut max_cycles = DEFAULT_MAX_CYCLES;
     let mut expect_serial: Option<String> = None;
     let mut trace: u64 = 0;
+    let mut ly_fixed: Option<u8> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -31,6 +35,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
             "--max-cycles" => max_cycles = number(args, &mut i, "--max-cycles")?,
             "--trace" => trace = number(args, &mut i, "--trace")?,
             "--expect-serial" => expect_serial = Some(value(args, &mut i, "--expect-serial")?),
+            "--ly-fixed" => ly_fixed = Some(hex_byte(args, &mut i, "--ly-fixed")?),
             other if other.starts_with("--") => return Err(format!("unknown flag: {other}")),
             positional => {
                 if rom.is_none() {
@@ -47,7 +52,20 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
         max_cycles,
         expect_serial,
         trace,
+        ly_fixed,
     })
+}
+
+/// Take the value of a flag that expects a hex byte (the next argument), with or without
+/// a `0x` prefix (`90` and `0x90` are the same, task C01_49). Errors if it is missing
+/// or not a valid hex byte.
+fn hex_byte(args: &[String], i: &mut usize, flag: &str) -> Result<u8, String> {
+    let raw = value(args, i, flag)?;
+    let digits = raw
+        .strip_prefix("0x")
+        .or_else(|| raw.strip_prefix("0X"))
+        .unwrap_or(&raw);
+    u8::from_str_radix(digits, 16).map_err(|_| format!("{flag} expects a hex byte"))
 }
 
 /// Take the value of a flag that expects a number (the next argument).
@@ -88,6 +106,7 @@ mod tests {
         assert_eq!(a.max_cycles, 100_000_000);
         assert_eq!(a.expect_serial, None);
         assert_eq!(a.trace, 0);
+        assert_eq!(a.ly_fixed, None);
     }
 
     #[test]
@@ -145,5 +164,26 @@ mod tests {
         // A negative or overflowing value is not a valid u64 either.
         let err = err_of(&[arg("game.gb"), arg("--max-cycles"), arg("-1")]);
         assert_eq!(err, "--max-cycles expects a number");
+    }
+
+    #[test]
+    fn c01_49_ly_fixed_parses_hex_byte() {
+        let a = parse_run_args(&[arg("game.gb"), arg("--ly-fixed"), arg("90")])
+            .expect("a hex byte parses");
+        assert_eq!(a.ly_fixed, Some(0x90));
+    }
+
+    #[test]
+    fn c01_49_ly_fixed_parses_with_0x_prefix() {
+        let a = parse_run_args(&[arg("game.gb"), arg("--ly-fixed"), arg("0x90")])
+            .expect("a 0x-prefixed hex byte parses");
+        assert_eq!(a.ly_fixed, Some(0x90));
+    }
+
+    #[test]
+    fn c01_49_ly_fixed_invalid_value_is_usage_error() {
+        // A parse error routes to exit code 64 in main (EXIT_BAD_RUN_ARGS).
+        let err = err_of(&[arg("game.gb"), arg("--ly-fixed"), arg("zz")]);
+        assert_eq!(err, "--ly-fixed expects a hex byte");
     }
 }

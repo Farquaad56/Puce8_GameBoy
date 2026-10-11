@@ -30,7 +30,7 @@ fn main() -> ExitCode {
         _ => {
             eprintln!(
                 "usage: puce8gb-cli [info <rom> | run <rom> [--max-cycles N] \
-                 [--expect-serial TEXT] [--trace N]]"
+                 [--expect-serial TEXT] [--trace N] [--ly-fixed HEX]]"
             );
             ExitCode::from(2)
         }
