@@ -6,12 +6,15 @@ use crate::bus::Bus;
 
 impl Cpu {
     /// Subroutines (task C01_11). Returns true when the current opcode is in this group, false
-    /// otherwise. Timings and flag effects from note 02c (seed Opcodes.json):
+    /// otherwise. Timings and flag effects from note 02c (seed Opcodes.json); byte order of the
+    /// pushed return address confirmed by trace comparison against real hardware (task C01_30):
+    /// a push stores the high byte at [SP-1] and the low byte at [SP-2], where SP is the value
+    /// before the push; a pop reads the low byte from [SP] and the high byte from [SP]+1.
     /// - CALL a16 ($CD; block 3, y == 1, z == 5): 3 bytes, 24 T = 6 M-cycles, no flags. The low
     ///   byte of a16 is read on step 2 and the high byte on step 3 (little-endian order); SP is
     ///   decremented by two on step 4 (an internal M-cycle with no bus access, decision C_00),
-    ///   the high byte of the return address is stored at (SP) on step 5 and the low byte at
-    ///   (SP)+1 on step 6, where PC is also set to a16. The return address is the instruction
+    ///   the high byte of the return address is stored at [SP-1] on step 5 and the low byte at
+    ///   [SP-2] on step 6, where PC is also set to a16. The return address is the instruction
     ///   after the three-byte CALL (PC + 3).
     /// - CALL cc,a16 ($C4/$CC/$D4/$DC; block 3, z == 4, bit5 clear so y < 4): 3 bytes. Taken:
     ///   24 T = 6 M-cycles; not taken: 12 T = 3 M-cycles. No flags. The low byte of a16 is read
@@ -19,9 +22,9 @@ impl Cpu {
     ///   (selected by y) is met, SP is decremented on step 4 and the return address pushed on
     ///   steps 5-6 with PC set to a16. When not met the instruction ends after three M-cycles
     ///   with PC advanced past the three bytes.
-    /// - RET ($C9; block 3, y == 1, z == 1): 1 byte, 16 T = 4 M-cycles, no flags. The high byte
-    ///   of the return address is read from (SP) on step 2 and the low byte from (SP)+1 on step
-    ///   3; PC is set to the popped value and SP incremented by two on step 4.
+    /// - RET ($C9; block 3, y == 1, z == 1): 1 byte, 16 T = 4 M-cycles, no flags. The low byte
+    ///   of the return address is read from [SP] on step 2 and the high byte from [SP]+1 on
+    ///   step 3; PC is set to the popped value and SP incremented by two on step 4.
     /// - RET cc ($C0/$C8/$D0/$D8; block 3, z == 0, bit5 clear so y < 4): 1 byte. Taken:
     ///   20 T = 5 M-cycles; not taken: 8 T = 2 M-cycles. No flags. The condition (selected by y)
     ///   is checked on step 2 with no bus access; when met, the return address is popped on steps
@@ -29,8 +32,8 @@ impl Cpu {
     ///   ends after two M-cycles with PC advanced past the opcode.
     /// - RST n ($C7/$CF/$D7/$DF/$E7/$EF/$F7/$FF; block 3, z == 7): 1 byte, 16 T = 4 M-cycles,
     ///   no flags. SP is decremented by two on step 2 (an internal M-cycle with no bus access),
-    ///   the high byte of the return address is stored at (SP) on step 3 and the low byte at
-    ///   (SP)+1 on step 4, where PC is also set to the vector address n * 8 (n = y). The return
+    ///   the high byte of the return address is stored at [SP-1] on step 3 and the low byte at
+    ///   [SP-2] on step 4, where PC is also set to the vector address n * 8 (n = y). The return
     ///   address is the instruction after the one-byte RST (PC + 1).
     pub(super) fn exec_call(&mut self, bus: &mut Bus) -> bool {
         let op = self.opcode;
@@ -58,18 +61,19 @@ impl Cpu {
                     self.sp = self.sp.wrapping_sub(2);
                     return true;
                 }
-                // Step 5: store the high byte of the return address at (SP) (one bus access).
+                // Step 5: store the high byte of the return address at [SP-1] (one bus access),
+                // where SP is now two below its pre-push value.
                 5 => {
                     let ret_addr = self.pc;
-                    bus.write(self.sp, (ret_addr >> 8) as u8);
+                    bus.write(self.sp.wrapping_add(1), (ret_addr >> 8) as u8);
                     return true;
                 }
-                // Step 6: store the low byte of the return address at (SP)+1 (one bus access),
+                // Step 6: store the low byte of the return address at [SP-2] (one bus access),
                 // set PC to a16 (a register write, so no bus access), then end.
                 _ => {
                     let ret_addr = self.pc;
                     let target = ((self.hi as u16) << 8) | self.lo as u16;
-                    bus.write(self.sp.wrapping_add(1), (ret_addr & 0xFF) as u8);
+                    bus.write(self.sp, (ret_addr & 0xFF) as u8);
                     self.pc = target; // CALL a16: PC = a16 (register write, no bus access)
                     self.done();
                     return true;
@@ -106,17 +110,17 @@ impl Cpu {
                     self.sp = self.sp.wrapping_sub(2);
                     return true;
                 }
-                // Step 5 (taken only): store the high byte of the return address at (SP).
+                // Step 5 (taken only): store the high byte of the return address at [SP-1].
                 5 => {
                     let ret_addr = self.pc;
-                    bus.write(self.sp, (ret_addr >> 8) as u8);
+                    bus.write(self.sp.wrapping_add(1), (ret_addr >> 8) as u8);
                     return true;
                 }
-                // Step 6 (taken only): store the low byte at (SP)+1, set PC to a16, then end.
+                // Step 6 (taken only): store the low byte at [SP-2], set PC to a16, then end.
                 _ => {
                     let ret_addr = self.pc;
                     let target = ((self.hi as u16) << 8) | self.lo as u16;
-                    bus.write(self.sp.wrapping_add(1), (ret_addr & 0xFF) as u8);
+                    bus.write(self.sp, (ret_addr & 0xFF) as u8);
                     self.pc = target; // taken: PC = a16 (register write, no bus access)
                     self.done();
                     return true;
@@ -129,14 +133,14 @@ impl Cpu {
             match self.step {
                 // Step 1 is the fetch M-cycle (decision C_00): no bus access yet.
                 1 => return true,
-                // Step 2: read the high byte of the return address from (SP); SP not advanced yet.
+                // Step 2: read the low byte of the return address from [SP]; SP not advanced yet.
                 2 => {
-                    self.hi = bus.read(self.sp);
+                    self.lo = bus.read(self.sp);
                     return true;
                 }
-                // Step 3: read the low byte of the return address from (SP)+1.
+                // Step 3: read the high byte of the return address from [SP]+1.
                 3 => {
-                    self.lo = bus.read(self.sp.wrapping_add(1));
+                    self.hi = bus.read(self.sp.wrapping_add(1));
                     return true;
                 }
                 // Step 4: PC = popped value, SP += 2 (register writes only), then end.
@@ -165,14 +169,14 @@ impl Cpu {
                     }
                     return true;
                 }
-                // Step 3 (taken only): read the high byte of the return address from (SP).
+                // Step 3 (taken only): read the low byte of the return address from [SP].
                 3 => {
-                    self.hi = bus.read(self.sp);
+                    self.lo = bus.read(self.sp);
                     return true;
                 }
-                // Step 4 (taken only): read the low byte of the return address from (SP)+1.
+                // Step 4 (taken only): read the high byte of the return address from [SP]+1.
                 4 => {
-                    self.lo = bus.read(self.sp.wrapping_add(1));
+                    self.hi = bus.read(self.sp.wrapping_add(1));
                     return true;
                 }
                 // Step 5 (taken only): PC = popped value, SP += 2 (register writes), then end.
@@ -198,18 +202,19 @@ impl Cpu {
                     self.sp = self.sp.wrapping_sub(2);
                     return true;
                 }
-                // Step 3: store the high byte of the return address at (SP) (one bus access).
+                // Step 3: store the high byte of the return address at [SP-1] (one bus access),
+                // where SP is now two below its pre-push value.
                 3 => {
                     let ret_addr = self.pc;
-                    bus.write(self.sp, (ret_addr >> 8) as u8);
+                    bus.write(self.sp.wrapping_add(1), (ret_addr >> 8) as u8);
                     return true;
                 }
-                // Step 4: store the low byte of the return address at (SP)+1 (one bus access),
+                // Step 4: store the low byte of the return address at [SP-2] (one bus access),
                 // set PC to the vector address (a register write, so no bus access), then end.
                 _ => {
                     let ret_addr = self.pc;
                     let vector = y_of(op) as u16 * 8; // RST n: PC = n * 8 (register write)
-                    bus.write(self.sp.wrapping_add(1), (ret_addr & 0xFF) as u8);
+                    bus.write(self.sp, (ret_addr & 0xFF) as u8);
                     self.pc = vector;
                     self.done();
                     return true;
@@ -270,16 +275,16 @@ mod tests {
         assert_eq!(ticks, 6); // note 02c: 24 T = 6 M-cycles
         assert_eq!(cpu.pc, 0x7856); // PC set to the target
         assert_eq!(cpu.sp, 0xC0FE); // SP decremented by two (0xC100 - 2)
-        assert_eq!(bus.peek(0xC0FE), 0xC0); // high byte of return address ($C003) at (SP)
-        assert_eq!(bus.peek(0xC0FF), 0x03); // low byte of the return address at (SP)+1
+        assert_eq!(bus.peek(0xC0FF), 0xC0); // high byte of return address ($C003) at [SP-1]
+        assert_eq!(bus.peek(0xC0FE), 0x03); // low byte of the return address at [SP-2]
         assert_eq!(cpu.f, 0x80); // flags unchanged (Z preserved)
     }
 
     #[test]
     fn c01_11_call_a16_sp_wraps_at_bottom_of_memory() {
         // Edge case: SP = $0001; CALL decrements it past $0000 and wraps to $FFFF. The high
-        // byte of the return address is stored at (SP) = $FFFF; the low-byte write to $0000
-        // lands in ROM, which is read-only (decision A_06), so it is dropped by the bus.
+        // byte of the return address is stored at [SP-1] = $0000, which lands in ROM (read-only,
+        // decision A_06) so the bus drops it; the low-byte write to [SP-2] = $FFFF succeeds.
         let mut bus = testutil::new_bus();
         let mut cpu = Cpu {
             sp: 0x0001,
@@ -290,8 +295,8 @@ mod tests {
 
         assert_eq!(ticks, 6); // note 02c: 24 T = 6 M-cycles
         assert_eq!(cpu.sp, 0xFFFF); // SP wrapped past $0000 (0x0001 - 2)
-        assert_eq!(bus.peek(0xFFFF), 0xC0); // high byte of return address ($C003) at (SP) = $FFFF
-        assert_eq!(bus.peek(0x0000), 0x00); // low-byte write to $0000 dropped (ROM read-only)
+        assert_eq!(bus.peek(0x0000), 0x00); // high-byte write to [SP-1] = $0000 dropped (ROM read-only)
+        assert_eq!(bus.peek(0xFFFF), 0x03); // low byte of the return address at [SP-2] = $FFFF
         assert_eq!(cpu.pc, 0x7856); // PC set to the target
     }
 
@@ -329,8 +334,8 @@ mod tests {
         assert_eq!(ticks, 6); // note 02c: taken = 24 T = 6 M-cycles
         assert_eq!(cpu.pc, 0x7856); // PC set to the target
         assert_eq!(cpu.sp, 0xC0FE); // SP decremented by two
-        assert_eq!(bus.peek(0xC0FE), 0xC0); // high byte of return address ($C003) at (SP)
-        assert_eq!(bus.peek(0xC0FF), 0x03); // low byte at (SP)+1
+        assert_eq!(bus.peek(0xC0FF), 0xC0); // high byte of return address ($C003) at [SP-1]
+        assert_eq!(bus.peek(0xC0FE), 0x03); // low byte at [SP-2]
     }
 
     #[test]
@@ -437,10 +442,10 @@ mod tests {
     #[test]
     fn c01_11_ret_costs_four_ticks_and_pops_return_address() {
         let mut bus = testutil::new_bus();
-        // Seed the stack with a return address (high byte at (SP), low byte at (SP)+1).
+        // Seed the stack with a return address (low byte at [SP], high byte at [SP]+1).
         let sp = 0xC100u16;
-        bus.write(sp, 0x78); // high byte of the return address ($7856) at (SP)
-        bus.write(sp.wrapping_add(1), 0x56); // low byte at (SP)+1
+        bus.write(sp, 0x56); // low byte of the return address ($7856) at [SP]
+        bus.write(sp.wrapping_add(1), 0x78); // high byte at [SP]+1
         let mut cpu = Cpu {
             sp,
             f: 0x80, // Z set
@@ -460,8 +465,8 @@ mod tests {
         // Flag boundary: a dirty low nibble of F is re-masked at instruction end.
         let mut bus = testutil::new_bus();
         let sp = 0xC100u16;
-        bus.write(sp, 0x78);
-        bus.write(sp.wrapping_add(1), 0x56);
+        bus.write(sp, 0x56); // low byte of the return address ($7856) at [SP]
+        bus.write(sp.wrapping_add(1), 0x78); // high byte at [SP]+1
         let mut cpu = Cpu {
             sp,
             f: 0xFF, // all flags set plus dirty low nibble
@@ -481,8 +486,8 @@ mod tests {
         // $C0 RET NZ with Z clear: the return is taken.
         let mut bus = testutil::new_bus();
         let sp = 0xC100u16;
-        bus.write(sp, 0x78);
-        bus.write(sp.wrapping_add(1), 0x56);
+        bus.write(sp, 0x56); // low byte of the return address ($7856) at [SP]
+        bus.write(sp.wrapping_add(1), 0x78); // high byte at [SP]+1
         let mut cpu = Cpu {
             sp,
             f: 0x00, // Z clear (NZ true)
@@ -501,8 +506,8 @@ mod tests {
         // $C0 RET NZ with Z set: the return is not taken.
         let mut bus = testutil::new_bus();
         let sp = 0xC100u16;
-        bus.write(sp, 0x78);
-        bus.write(sp.wrapping_add(1), 0x56);
+        bus.write(sp, 0x56); // low byte of the return address ($7856) at [SP]
+        bus.write(sp.wrapping_add(1), 0x78); // high byte at [SP]+1
         let mut cpu = Cpu {
             sp,
             f: 0x80, // Z set (NZ false)
@@ -521,8 +526,8 @@ mod tests {
         // $C8 RET Z with Z set: the return is taken.
         let mut bus = testutil::new_bus();
         let sp = 0xC100u16;
-        bus.write(sp, 0xAB); // high byte of the return address ($ABCD) at (SP)
-        bus.write(sp.wrapping_add(1), 0xCD); // low byte at (SP)+1
+        bus.write(sp, 0xCD); // low byte of the return address ($ABCD) at [SP]
+        bus.write(sp.wrapping_add(1), 0xAB); // high byte at [SP]+1
         let mut cpu = Cpu {
             sp,
             f: 0x80, // Z set (Z true)
@@ -540,8 +545,8 @@ mod tests {
         // $D0 RET NC with C set: the return is not taken.
         let mut bus = testutil::new_bus();
         let sp = 0xC100u16;
-        bus.write(sp, 0x78);
-        bus.write(sp.wrapping_add(1), 0x56);
+        bus.write(sp, 0x56); // low byte of the return address ($7856) at [SP]
+        bus.write(sp.wrapping_add(1), 0x78); // high byte at [SP]+1
         let mut cpu = Cpu {
             sp,
             f: 0x90, // Z and C set (NC false)
@@ -560,8 +565,8 @@ mod tests {
         // $D8 RET C with C set: the return is taken.
         let mut bus = testutil::new_bus();
         let sp = 0xC100u16;
-        bus.write(sp, 0x00); // high byte of the return address ($00FF) at (SP)
-        bus.write(sp.wrapping_add(1), 0xFF); // low byte at (SP)+1
+        bus.write(sp, 0xFF); // low byte of the return address ($00FF) at [SP]
+        bus.write(sp.wrapping_add(1), 0x00); // high byte at [SP]+1
         let mut cpu = Cpu {
             sp,
             f: 0x10, // C set (C true)
@@ -578,8 +583,8 @@ mod tests {
     fn c01_11_ret_cc_not_taken_preserves_flags() {
         let mut bus = testutil::new_bus();
         let sp = 0xC100u16;
-        bus.write(sp, 0x78);
-        bus.write(sp.wrapping_add(1), 0x56);
+        bus.write(sp, 0x56); // low byte of the return address ($7856) at [SP]
+        bus.write(sp.wrapping_add(1), 0x78); // high byte at [SP]+1
         let mut cpu = Cpu {
             sp,
             f: 0x80, // Z set
@@ -598,8 +603,8 @@ mod tests {
         // is true (taken); the other flags and the dirty low nibble are present before the mask.
         let mut bus = testutil::new_bus();
         let sp = 0xC100u16;
-        bus.write(sp, 0x78);
-        bus.write(sp.wrapping_add(1), 0x56);
+        bus.write(sp, 0x56); // low byte of the return address ($7856) at [SP]
+        bus.write(sp.wrapping_add(1), 0x78); // high byte at [SP]+1
         let mut cpu = Cpu {
             sp,
             f: 0x7F, // Z clear (NZ true) plus N/H/C set and a dirty low nibble
@@ -629,8 +634,8 @@ mod tests {
         assert_eq!(ticks, 4); // note 02c: 16 T = 4 M-cycles
         assert_eq!(cpu.pc, 0x38); // PC set to the vector address ($38)
         assert_eq!(cpu.sp, 0xC0FE); // SP decremented by two (0xC100 - 2)
-        assert_eq!(bus.peek(0xC0FE), 0xC0); // high byte of return address ($C001) at (SP)
-        assert_eq!(bus.peek(0xC0FF), 0x01); // low byte of the return address at (SP)+1
+        assert_eq!(bus.peek(0xC0FF), 0xC0); // high byte of return address ($C001) at [SP-1]
+        assert_eq!(bus.peek(0xC0FE), 0x01); // low byte of the return address at [SP-2]
         assert_eq!(cpu.f, 0x80); // flags unchanged
     }
 
@@ -651,8 +656,8 @@ mod tests {
     #[test]
     fn c01_11_rst_sp_wraps_at_bottom_of_memory() {
         // Edge case: SP = $0001; RST decrements it past $0000 and wraps to $FFFF. The high
-        // byte of the return address is stored at (SP) = $FFFF; the low-byte write to $0000
-        // lands in ROM, which is read-only (decision A_06), so it is dropped by the bus.
+        // byte of the return address is stored at [SP-1] = $0000, which lands in ROM (read-only,
+        // decision A_06) so the bus drops it; the low-byte write to [SP-2] = $FFFF succeeds.
         let mut bus = testutil::new_bus();
         let mut cpu = Cpu {
             sp: 0x0001,
@@ -663,7 +668,8 @@ mod tests {
 
         assert_eq!(ticks, 4);
         assert_eq!(cpu.sp, 0xFFFF); // SP wrapped past $0000 (0x0001 - 2)
-        assert_eq!(bus.peek(0xFFFF), 0xC0); // high byte of return address ($C001) at (SP) = $FFFF
+        assert_eq!(bus.peek(0x0000), 0x00); // high-byte write to [SP-1] = $0000 dropped (ROM read-only)
+        assert_eq!(bus.peek(0xFFFF), 0x01); // low byte of the return address at [SP-2] = $FFFF
         assert_eq!(cpu.pc, 0x38); // PC set to the vector address
     }
 
@@ -681,5 +687,55 @@ mod tests {
 
         assert_eq!(ticks, 4);
         assert_eq!(cpu.f, 0xF0); // high nibble preserved, low nibble masked to zero
+    }
+
+    // ---- Family 6: exact byte order of the pushed return address (task C01_30) ----
+    // Confirmed by trace comparison against real hardware: a push stores the high byte at
+    // [SP-1] and the low byte at [SP-2], where SP is the value before the push.
+
+    #[test]
+    fn c01_30_stack_order_call_a16_high_at_sp_minus_one() {
+        let mut bus = testutil::new_bus();
+        let mut cpu = Cpu {
+            sp: 0xC100,
+            ..Cpu::default()
+        };
+
+        testutil::exec(&mut cpu, &mut bus, &[0xCD, 0x56, 0x78]); // CALL $7856
+
+        assert_eq!(cpu.sp, 0xC0FE); // SP decremented by two (SP before the push was 0xC100)
+        assert_eq!(bus.peek(0xC0FF), 0xC0); // high byte of return address ($C003) at [SP-1] = $C0FF
+        assert_eq!(bus.peek(0xC0FE), 0x03); // low byte of the return address at [SP-2] = $C0FE
+    }
+
+    #[test]
+    fn c01_30_stack_order_call_cc_taken_high_at_sp_minus_one() {
+        let mut bus = testutil::new_bus();
+        let mut cpu = Cpu {
+            sp: 0xC100,
+            f: 0x80, // Z set (Z true)
+            ..Cpu::default()
+        };
+
+        testutil::exec(&mut cpu, &mut bus, &[0xCC, 0xAB, 0xCD]); // CALL Z,$CDAB (taken)
+
+        assert_eq!(cpu.sp, 0xC0FE);
+        assert_eq!(bus.peek(0xC0FF), 0xC0); // high byte of return address ($C003) at [SP-1] = $C0FF
+        assert_eq!(bus.peek(0xC0FE), 0x03); // low byte of the return address at [SP-2] = $C0FE
+    }
+
+    #[test]
+    fn c01_30_stack_order_rst_high_at_sp_minus_one() {
+        let mut bus = testutil::new_bus();
+        let mut cpu = Cpu {
+            sp: 0xC100,
+            ..Cpu::default()
+        };
+
+        testutil::exec(&mut cpu, &mut bus, &[0xFF]); // RST $38
+
+        assert_eq!(cpu.sp, 0xC0FE); // SP decremented by two (SP before the push was 0xC100)
+        assert_eq!(bus.peek(0xC0FF), 0xC0); // high byte of return address ($C001) at [SP-1] = $C0FF
+        assert_eq!(bus.peek(0xC0FE), 0x01); // low byte of the return address at [SP-2] = $C0FE
     }
 }

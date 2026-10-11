@@ -6,18 +6,19 @@ use crate::bus::Bus;
 
 impl Cpu {
     /// Stack transfers (task C01_09). Returns true when the current opcode is in this group,
-    /// false otherwise. Timings and flag effects from note 02c (seed Opcodes.json):
+    /// false otherwise. Timings and flag effects from note 02c (seed Opcodes.json); byte order
+    /// confirmed by trace comparison against real hardware (task C01_30): a push stores the
+    /// high byte at [SP-1] and the low byte at [SP-2], where SP is the value before the push.
     /// - PUSH rr ($C5/$D5/$E5/$F5; block 3, z == 5, y even so y>>1 selects BC/DE/HL/AF):
     ///   1 byte, 16 T = 4 M-cycles, no flags. SP is decremented by two on step 2 (a register
-    ///   write, so no bus access); the high byte of rr is stored at (SP) on step 3 and the low
-    ///   byte at (SP)+1 on step 4 (one bus write each). The high-byte-first order is deduced
-    ///   from standard SM83/GB behavior; see open_questions.md. At most one bus access per
+    ///   write, so no bus access); the high byte of rr is stored at [SP-1] on step 3 and the
+    ///   low byte at [SP-2] on step 4 (one bus write each). At most one bus access per
     ///   M-cycle (decision C_00).
     /// - POP rr ($C1/$D1/$E1/$F1; block 3, z == 1, y even so y>>1 selects BC/DE/HL/AF):
-    ///   1 byte, 12 T = 3 M-cycles. The high byte is read from (SP) on step 2 and the low byte
-    ///   from (SP)+1 on step 3 (one bus read each); rr is set and SP is advanced by two on
-    ///   step 3. No flags are affected except that POP AF restores F verbatim from the stack;
-    ///   the low nibble of F is then re-masked to zero at instruction end (decision C_00).
+    ///   1 byte, 12 T = 3 M-cycles. The low byte is read from [SP] on step 2 and the high
+    ///   byte from [SP]+1 on step 3 (one bus read each); rr is set and SP is advanced by two
+    ///   on step 3. No flags are affected except that POP AF restores F verbatim from the
+    ///   stack; the low nibble of F is then re-masked to zero at instruction end (decision C_00).
     pub(super) fn exec_stack(&mut self, bus: &mut Bus) -> bool {
         let op = self.opcode;
 
@@ -31,16 +32,17 @@ impl Cpu {
                     self.sp = self.sp.wrapping_sub(2);
                     return true;
                 }
-                // Step 3: store the high byte of rr at (SP) (one bus access).
+                // Step 3: store the high byte of rr at [SP-1] (one bus access), where SP is
+                // now two below its pre-push value.
                 3 => {
                     let value = self.pair(y_of(op));
-                    bus.write(self.sp, (value >> 8) as u8);
+                    bus.write(self.sp.wrapping_add(1), (value >> 8) as u8);
                     return true;
                 }
-                // Step 4: store the low byte of rr at (SP)+1 (one bus access), then end.
+                // Step 4: store the low byte of rr at [SP-2] (one bus access), then end.
                 _ => {
                     let value = self.pair(y_of(op));
-                    bus.write(self.sp.wrapping_add(1), value as u8);
+                    bus.write(self.sp, value as u8);
                     self.done();
                     return true;
                 }
@@ -52,14 +54,14 @@ impl Cpu {
             match self.step {
                 // Step 1 is the fetch M-cycle (decision C_00): no bus access yet.
                 1 => return true,
-                // Step 2: read the high byte from (SP); SP is not advanced yet.
+                // Step 2: read the low byte from [SP]; SP is not advanced yet.
                 2 => {
-                    self.hi = bus.read(self.sp);
+                    self.lo = bus.read(self.sp);
                     return true;
                 }
-                // Step 3: read the low byte from (SP)+1, set rr, advance SP by two, then end.
+                // Step 3: read the high byte from [SP]+1, set rr, advance SP by two, then end.
                 _ => {
-                    let value = ((self.hi as u16) << 8) | bus.read(self.sp.wrapping_add(1)) as u16;
+                    let value = (bus.read(self.sp.wrapping_add(1)) as u16) << 8 | self.lo as u16;
                     self.store_pair(y_of(op), value);
                     self.sp = self.sp.wrapping_add(2);
                     self.done();
@@ -141,8 +143,8 @@ mod tests {
         let ticks = testutil::exec(&mut cpu, &mut bus, &[0xC5]); // PUSH BC
 
         assert_eq!(ticks, 4); // note 02c: 16 T = 4 M-cycles
-        assert_eq!(bus.peek(DATA.wrapping_sub(2)), 0x12); // high byte of BC stored at (SP)
-        assert_eq!(bus.peek(DATA.wrapping_sub(1)), 0x34); // low byte of BC stored at (SP)+1
+        assert_eq!(bus.peek(DATA.wrapping_sub(1)), 0x12); // high byte of BC stored at [SP-1]
+        assert_eq!(bus.peek(DATA.wrapping_sub(2)), 0x34); // low byte of BC stored at [SP-2]
         assert_eq!(cpu.sp, DATA.wrapping_sub(2)); // SP decremented by two
         assert_eq!(cpu.pc, 0xC001); // PC advanced past the opcode
         assert_eq!(cpu.f, 0x80); // flags unchanged (Z preserved)
@@ -161,8 +163,8 @@ mod tests {
         let ticks = testutil::exec(&mut cpu, &mut bus, &[0xD5]); // PUSH DE
 
         assert_eq!(ticks, 4); // note 02c: 16 T = 4 M-cycles
-        assert_eq!(bus.peek(DATA.wrapping_sub(2)), 0xCD); // high byte of DE stored at (SP)
-        assert_eq!(bus.peek(DATA.wrapping_sub(1)), 0xAB); // low byte of DE stored at (SP)+1
+        assert_eq!(bus.peek(DATA.wrapping_sub(1)), 0xCD); // high byte of DE stored at [SP-1]
+        assert_eq!(bus.peek(DATA.wrapping_sub(2)), 0xAB); // low byte of DE stored at [SP-2]
         assert_eq!(cpu.sp, DATA.wrapping_sub(2));
     }
 
@@ -179,8 +181,8 @@ mod tests {
         let ticks = testutil::exec(&mut cpu, &mut bus, &[0xE5]); // PUSH HL
 
         assert_eq!(ticks, 4); // note 02c: 16 T = 4 M-cycles
-        assert_eq!(bus.peek(DATA.wrapping_sub(2)), 0x87); // high byte of HL stored at (SP)
-        assert_eq!(bus.peek(DATA.wrapping_sub(1)), 0x65); // low byte of HL stored at (SP)+1
+        assert_eq!(bus.peek(DATA.wrapping_sub(1)), 0x87); // high byte of HL stored at [SP-1]
+        assert_eq!(bus.peek(DATA.wrapping_sub(2)), 0x65); // low byte of HL stored at [SP-2]
         assert_eq!(cpu.sp, DATA.wrapping_sub(2));
     }
 
@@ -197,8 +199,8 @@ mod tests {
         let ticks = testutil::exec(&mut cpu, &mut bus, &[0xF5]); // PUSH AF
 
         assert_eq!(ticks, 4); // note 02c: 16 T = 4 M-cycles
-        assert_eq!(bus.peek(DATA.wrapping_sub(2)), 0x34); // A (high byte) stored at (SP)
-        assert_eq!(bus.peek(DATA.wrapping_sub(1)), 0x12); // F (low byte, verbatim) stored at (SP)+1
+        assert_eq!(bus.peek(DATA.wrapping_sub(1)), 0x34); // A (high byte) stored at [SP-1]
+        assert_eq!(bus.peek(DATA.wrapping_sub(2)), 0x12); // F (low byte, verbatim) stored at [SP-2]
         assert_eq!(cpu.sp, DATA.wrapping_sub(2));
         assert_eq!(cpu.a, 0x34); // A unchanged
         assert_eq!(cpu.f, 0x10); // no flag affected; F low nibble re-masked to zero at instruction end (C_00)
@@ -226,8 +228,8 @@ mod tests {
     #[test]
     fn c01_09_push_sp_wraps_at_bottom_of_memory() {
         // Edge case: SP = $0001; PUSH decrements it past $0000 and wraps to $FFFF. The high
-        // byte is stored at (SP) = $FFFF (the IE cell); the low-byte write to $0000 lands in
-        // ROM, which is read-only (decision A_06), so it is dropped by the bus.
+        // byte is stored at [SP-1] = $0000, which lands in ROM (read-only, decision A_06) so
+        // the bus drops it; the low-byte write to [SP-2] = $FFFF (the IE cell) succeeds.
         let mut bus = testutil::new_bus();
         let mut cpu = Cpu {
             b: 0x12,
@@ -240,8 +242,8 @@ mod tests {
 
         assert_eq!(ticks, 4); // note 02c: 16 T = 4 M-cycles
         assert_eq!(cpu.sp, 0xFFFF); // SP wrapped past $0000
-        assert_eq!(bus.peek(0xFFFF), 0x12); // high byte of BC stored at (SP) = $FFFF
-        assert_eq!(bus.peek(0x0000), 0x00); // low-byte write to $0000 dropped (ROM read-only)
+        assert_eq!(bus.peek(0x0000), 0x00); // high-byte write to [SP-1] = $0000 dropped (ROM read-only)
+        assert_eq!(bus.peek(0xFFFF), 0x34); // low byte of BC stored at [SP-2] = $FFFF (the IE cell)
     }
 
     // ---- Family 2: POP rr (note 02c seed Opcodes.json: [12 T = 3 M], no flags except AF) ----
@@ -249,8 +251,8 @@ mod tests {
     #[test]
     fn c01_09_pop_bc_costs_three_ticks() {
         let mut bus = testutil::new_bus();
-        bus.write(DATA, 0x12); // high byte at (SP)
-        bus.write(DATA.wrapping_add(1), 0x34); // low byte at (SP)+1
+        bus.write(DATA, 0x34); // low byte of BC at [SP]
+        bus.write(DATA.wrapping_add(1), 0x12); // high byte at [SP]+1
         let mut cpu = Cpu {
             b: 0x00,
             c: 0x00,
@@ -271,8 +273,8 @@ mod tests {
     #[test]
     fn c01_09_pop_de_loads_pair() {
         let mut bus = testutil::new_bus();
-        bus.write(DATA, 0xCD); // high byte at (SP)
-        bus.write(DATA.wrapping_add(1), 0xAB); // low byte at (SP)+1
+        bus.write(DATA, 0xAB); // low byte of DE at [SP]
+        bus.write(DATA.wrapping_add(1), 0xCD); // high byte at [SP]+1
         let mut cpu = Cpu {
             d: 0x00,
             e: 0x00,
@@ -290,8 +292,8 @@ mod tests {
     #[test]
     fn c01_09_pop_hl_loads_pair() {
         let mut bus = testutil::new_bus();
-        bus.write(DATA, 0x87); // high byte at (SP)
-        bus.write(DATA.wrapping_add(1), 0x65); // low byte at (SP)+1
+        bus.write(DATA, 0x65); // low byte of HL at [SP]
+        bus.write(DATA.wrapping_add(1), 0x87); // high byte at [SP]+1
         let mut cpu = Cpu {
             h: 0x00,
             l: 0x00,
@@ -309,8 +311,8 @@ mod tests {
     #[test]
     fn c01_09_pop_af_restores_flags() {
         let mut bus = testutil::new_bus();
-        bus.write(DATA, 0x34); // A (high byte) at (SP)
-        bus.write(DATA.wrapping_add(1), 0x50); // F (low byte) at (SP)+1: N and C set, clean nibble
+        bus.write(DATA, 0x50); // F (low byte) at [SP]: N and C set, clean nibble
+        bus.write(DATA.wrapping_add(1), 0x34); // A (high byte) at [SP]+1
         let mut cpu = Cpu {
             a: 0x00,
             f: 0x80, // Z set before the POP
@@ -331,8 +333,8 @@ mod tests {
         // Flag boundary: POP AF restores F verbatim from the stack; a dirty low nibble in the
         // stored value is re-masked to zero at instruction end. The high nibble survives.
         let mut bus = testutil::new_bus();
-        bus.write(DATA, 0x34); // A (high byte) at (SP)
-        bus.write(DATA.wrapping_add(1), 0xFF); // F (low byte) with all bits set
+        bus.write(DATA, 0xFF); // F (low byte) at [SP] with all bits set
+        bus.write(DATA.wrapping_add(1), 0x34); // A (high byte) at [SP]+1
         let mut cpu = Cpu {
             a: 0x00,
             f: 0x80,
@@ -345,5 +347,109 @@ mod tests {
         assert_eq!(ticks, 3);
         assert_eq!(cpu.a, 0x34);
         assert_eq!(cpu.f, 0xF0); // restored verbatim then masked: high nibble kept, low nibble zero
+    }
+
+    // ---- Family 3: exact byte order on the stack (task C01_30) ----
+    // Confirmed by trace comparison against real hardware: PUSH DE with SP = $DF80 and
+    // D = $DE E = $FB leaves [SP-1] = $DE (high byte) and [SP-2] = $FB (low byte). POP is
+    // the mirror image: low byte from [SP], high byte from [SP]+1.
+
+    #[test]
+    fn c01_30_stack_order_push_bc_high_at_sp_minus_one() {
+        let mut bus = testutil::new_bus();
+        let mut cpu = Cpu {
+            b: 0x12,
+            c: 0x34,
+            sp: DATA,
+            ..Cpu::default()
+        };
+
+        testutil::exec(&mut cpu, &mut bus, &[0xC5]); // PUSH BC
+
+        assert_eq!(bus.peek(DATA.wrapping_sub(1)), 0x12); // high byte of BC at [SP-1] (SP before the push)
+        assert_eq!(bus.peek(DATA.wrapping_sub(2)), 0x34); // low byte of BC at [SP-2]
+    }
+
+    #[test]
+    fn c01_30_stack_order_push_de_matches_trace() {
+        // The exact case from the trace comparison: D = $DE, E = $FB.
+        let mut bus = testutil::new_bus();
+        let mut cpu = Cpu {
+            d: 0xDE,
+            e: 0xFB,
+            sp: DATA,
+            ..Cpu::default()
+        };
+
+        testutil::exec(&mut cpu, &mut bus, &[0xD5]); // PUSH DE
+
+        assert_eq!(bus.peek(DATA.wrapping_sub(1)), 0xDE); // high byte of DE at [SP-1]
+        assert_eq!(bus.peek(DATA.wrapping_sub(2)), 0xFB); // low byte of DE at [SP-2]
+    }
+
+    #[test]
+    fn c01_30_stack_order_push_hl_high_at_sp_minus_one() {
+        let mut bus = testutil::new_bus();
+        let mut cpu = Cpu {
+            h: 0x87,
+            l: 0x65,
+            sp: DATA,
+            ..Cpu::default()
+        };
+
+        testutil::exec(&mut cpu, &mut bus, &[0xE5]); // PUSH HL
+
+        assert_eq!(bus.peek(DATA.wrapping_sub(1)), 0x87); // high byte of HL at [SP-1]
+        assert_eq!(bus.peek(DATA.wrapping_sub(2)), 0x65); // low byte of HL at [SP-2]
+    }
+
+    #[test]
+    fn c01_30_stack_order_push_af_a_at_sp_minus_one_f_at_sp_minus_two() {
+        let mut bus = testutil::new_bus();
+        let mut cpu = Cpu {
+            a: 0x34,
+            f: 0x50, // N and C set, clean low nibble
+            sp: DATA,
+            ..Cpu::default()
+        };
+
+        testutil::exec(&mut cpu, &mut bus, &[0xF5]); // PUSH AF
+
+        assert_eq!(bus.peek(DATA.wrapping_sub(1)), 0x34); // A (high byte) at [SP-1]
+        assert_eq!(bus.peek(DATA.wrapping_sub(2)), 0x50); // F (low byte, verbatim) at [SP-2]
+    }
+
+    #[test]
+    fn c01_30_stack_order_pop_bc_reads_low_from_sp_then_high() {
+        let mut bus = testutil::new_bus();
+        bus.write(DATA, 0x34); // low byte of BC at [SP]
+        bus.write(DATA.wrapping_add(1), 0x12); // high byte of BC at [SP]+1
+        let mut cpu = Cpu {
+            b: 0x00,
+            c: 0x00,
+            sp: DATA,
+            ..Cpu::default()
+        };
+
+        testutil::exec(&mut cpu, &mut bus, &[0xC1]); // POP BC
+
+        assert_eq!((cpu.b as u16) << 8 | cpu.c as u16, 0x1234); // B = [SP]+1 (high), C = [SP] (low)
+    }
+
+    #[test]
+    fn c01_30_stack_order_pop_de_reads_low_from_sp_then_high() {
+        let mut bus = testutil::new_bus();
+        bus.write(DATA, 0xFB); // low byte of DE at [SP]
+        bus.write(DATA.wrapping_add(1), 0xDE); // high byte of DE at [SP]+1
+        let mut cpu = Cpu {
+            d: 0x00,
+            e: 0x00,
+            sp: DATA,
+            ..Cpu::default()
+        };
+
+        testutil::exec(&mut cpu, &mut bus, &[0xD1]); // POP DE
+
+        assert_eq!((cpu.d as u16) << 8 | cpu.e as u16, 0xDEFB); // D = [SP]+1 (high), E = [SP] (low)
     }
 }
