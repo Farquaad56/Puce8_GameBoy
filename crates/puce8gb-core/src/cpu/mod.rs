@@ -9,6 +9,7 @@ pub mod call;
 pub mod cb_bit;
 pub mod cb_shift;
 pub mod daa;
+pub mod halt;
 pub mod incdec8;
 pub mod interrupt;
 pub mod jump;
@@ -65,6 +66,15 @@ pub struct Cpu {
     interrupt_step: u8,
     /// IF bit being acknowledged by the in-progress interrupt entry (task C01_32).
     interrupt_mask: u8,
+    /// HALT state (task C01_33): false at power-on; while set, each tick is one idle M-cycle
+    /// until a request becomes pending.
+    halted: bool,
+    /// CPU lock-up by an illegal opcode (task C01_33): false at power-on; while set, every
+    /// later tick is one idle M-cycle and nothing changes, not even the interrupt dispatch.
+    locked: bool,
+    /// HALT bug flag (task C01_33, note 02b): armed when HALT executes with IME=0 and a
+    /// request pending; the next opcode fetch reads its byte without incrementing PC.
+    halt_bug: bool,
     /// Last opcode no group claimed, with the address of its byte (decision C_00).
     unimplemented: Option<(u8, u16)>,
 }
@@ -116,6 +126,16 @@ impl Cpu {
         self.unimplemented
     }
 
+    /// True while HALT is in effect (task C01_33); false at power-on.
+    pub fn halted(&self) -> bool {
+        self.halted
+    }
+
+    /// True after an illegal opcode locked the CPU (task C01_33); false at power-on.
+    pub fn locked(&self) -> bool {
+        self.locked
+    }
+
     /// Test seam for other crates (task C01_48): store an unimplemented-opcode record
     /// without executing anything. Not used by the engine itself.
     #[doc(hidden)]
@@ -126,6 +146,19 @@ impl Cpu {
     /// Execute one M-cycle (decision C_00): at most one bus access.
     pub fn tick(&mut self, bus: &mut Bus) {
         if self.step == 0 {
+            // CPU lock-up by an illegal opcode (task C01_33): every later tick is one idle
+            // M-cycle; nothing changes, not even the interrupt dispatch.
+            if self.locked {
+                return;
+            }
+            // HALT (task C01_33): while no request is pending, each tick is one idle M-cycle
+            // with no bus access and no PC change. When a request becomes pending, wake up in
+            // this same tick: the boundary logic below then dispatches it (IME=1) or fetches
+            // the next opcode (IME=0; the IF bit stays set).
+            if self.halted && bus.pending_interrupts() == 0 {
+                return;
+            }
+            self.halted = false;
             // Instruction boundary (task C01_32): an interrupt is served before the fetch when
             // IME is set and a request is pending; it runs as its own five-M-cycle sequence.
             if self.interrupt_step != 0 {
@@ -134,18 +167,30 @@ impl Cpu {
             }
             let mask = bus.pending_interrupts();
             if self.ime && mask != 0 {
-                // Start the entry sequence (note 02b): M1/M2 internal, push PC on M3/M4,
-                // jump to the vector of the lowest pending bit; IME cleared and the IF bit
-                // acknowledged at the end. The pushed PC is the address that was not fetched.
-                self.interrupt_step = 1;
-                // Lowest pending bit first (note 02b): isolate it with its two's complement.
-                self.interrupt_mask = mask & (0u8.wrapping_sub(mask));
-                return;
+                // HALT (case 2) and the eleven illegal opcodes must execute before any dispatch at
+                // their boundary (task C01_33): peek at the opcode; only a non-exempt opcode is
+                // preempted by the entry, which starts here with PC unchanged so the interrupted
+                // instruction is re-fetched after RETI. An exempt opcode is fetched normally and
+                // claimed by the chain below (HALT defers its dispatch to the next boundary).
+                let peek = bus.read(self.pc);
+                if !halt::preempt_exempt(peek) {
+                    self.interrupt_step = 1;
+                    // Lowest pending bit first (note 02b): isolate it with its two's complement.
+                    self.interrupt_mask = mask & (0u8.wrapping_sub(mask));
+                    return;
+                }
+                self.opcode = peek;
+            } else {
+                let addr = self.pc;
+                self.opcode = bus.read(addr);
             }
-            // Instruction boundary: fetch the opcode at PC (one bus read).
-            let addr = self.pc;
-            self.opcode = bus.read(addr);
-            self.pc = self.pc.wrapping_add(1);
+            // HALT bug (task C01_33, note 02b): when armed, this fetch reads its byte without
+            // incrementing PC, so that byte is fetched twice; the flag clears after it.
+            if !self.halt_bug {
+                self.pc = self.pc.wrapping_add(1);
+            } else {
+                self.halt_bug = false;
+            }
             self.step = 1;
         } else {
             self.step += 1;
@@ -155,7 +200,10 @@ impl Cpu {
         // current opcode; the first claim wins and stops the chain. Most groups are disjoint in
         // opcode space, but the subroutines group (C01_11) overlaps load16's LD SP,HL guard on
         // $FF (RST $38 vs LD SP,HL), so it must run before exec_load16 to claim $FF as RST.
-        let claimed = self.exec_load8_reg(bus)
+        let claimed = self.exec_halt_stop(bus)
+            // HALT ($76), STOP ($10) and the eleven illegal opcodes (C01_33): runs first so it
+            // claims $76/$10 before exec_load_ptr's LD (HL),r / LD A,(rr) guards over-claim them.
+            || self.exec_load8_reg(bus)
             || self.exec_load_ptr(bus)
             || self.exec_load_abs(bus)
             || self.exec_sp_offset(bus)
