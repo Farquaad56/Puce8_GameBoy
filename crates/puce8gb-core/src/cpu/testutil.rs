@@ -4,9 +4,13 @@
 use super::Cpu;
 use crate::bus::Bus;
 
-/// A bus with a 32 KiB zero ROM, all RAM zeroed.
+/// A bus with a 32 KiB zero ROM in its power-up state (note 08): RAM zeroed, IO registers at
+/// their post-boot values including IE = $00 and IF = $E1. CPU tests start from this so no
+/// interrupt is pending unless a test sets one up explicitly (task C01_32).
 pub fn new_bus() -> Bus {
-    Bus::new(vec![0x00; 32 * 1024])
+    let mut bus = Bus::new(vec![0x00; 32 * 1024]);
+    bus.reset();
+    bus
 }
 
 /// Place `code` at $C000 through the bus, set PC there, tick until the next instruction

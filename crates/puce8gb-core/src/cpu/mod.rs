@@ -57,8 +57,14 @@ pub struct Cpu {
     cb: bool,
     /// Interrupt master enable (note 02b): set by ei/reti, cleared by di and at reset; read
     /// by interrupt dispatch from task C01_32 on. Written here by DI (task C01_16).
-    #[allow(dead_code)]
     ime: bool,
+    /// EI one-instruction delay (task C01_32): set by ei, decremented in done(); IME is set
+    /// when it reaches 0, so the effect of ei lands after the next instruction completes.
+    ei_delay: u8,
+    /// M-cycle step of an in-progress interrupt entry (task C01_32); 0 = not in progress.
+    interrupt_step: u8,
+    /// IF bit being acknowledged by the in-progress interrupt entry (task C01_32).
+    interrupt_mask: u8,
     /// Last opcode no group claimed, with the address of its byte (decision C_00).
     unimplemented: Option<(u8, u16)>,
 }
@@ -120,6 +126,22 @@ impl Cpu {
     /// Execute one M-cycle (decision C_00): at most one bus access.
     pub fn tick(&mut self, bus: &mut Bus) {
         if self.step == 0 {
+            // Instruction boundary (task C01_32): an interrupt is served before the fetch when
+            // IME is set and a request is pending; it runs as its own five-M-cycle sequence.
+            if self.interrupt_step != 0 {
+                self.advance_interrupt(bus);
+                return;
+            }
+            let mask = bus.pending_interrupts();
+            if self.ime && mask != 0 {
+                // Start the entry sequence (note 02b): M1/M2 internal, push PC on M3/M4,
+                // jump to the vector of the lowest pending bit; IME cleared and the IF bit
+                // acknowledged at the end. The pushed PC is the address that was not fetched.
+                self.interrupt_step = 1;
+                // Lowest pending bit first (note 02b): isolate it with its two's complement.
+                self.interrupt_mask = mask & (0u8.wrapping_sub(mask));
+                return;
+            }
             // Instruction boundary: fetch the opcode at PC (one bus read).
             let addr = self.pc;
             self.opcode = bus.read(addr);
@@ -176,6 +198,58 @@ impl Cpu {
         // Bits 3-0 of F are "not used (always zero)" (note 02a).
         self.f &= F_USED_BITS;
         self.step = 0;
+        // EI delay (task C01_32): the effect of ei lands after the next instruction ends.
+        if self.ei_delay != 0 {
+            self.ei_delay -= 1;
+            if self.ei_delay == 0 {
+                self.ime = true;
+            }
+        }
+    }
+
+    /// Advance one M-cycle of an in-progress interrupt entry (task C01_32, note 02b): five
+    /// M-cycles total, at most one bus access each. M1/M2 internal, M3 writes the PC high
+    /// byte at [SP-1], M4 writes the low byte at [SP-2], M5 internal; then SP = SP - 2,
+    /// PC = vector of the lowest pending bit, IME cleared and that IF bit acknowledged.
+    fn advance_interrupt(&mut self, bus: &mut Bus) {
+        match self.interrupt_step {
+            // M2: internal wait cycle, no bus access (M1 was the tick that started it).
+            1 => {}
+            // M3: push the high byte of the PC at [SP-1] (one bus access).
+            2 => {
+                bus.write(self.sp.wrapping_sub(1), (self.pc >> 8) as u8);
+            }
+            // M4: push the low byte of the PC at [SP-2] (one bus access).
+            3 => {
+                bus.write(self.sp.wrapping_sub(2), (self.pc & 0xFF) as u8);
+            }
+            // M5: internal; finish the entry. The pushed PC is the address that was not
+            // fetched, so it stays put; SP drops by two and PC jumps to the vector.
+            _ => {
+                self.sp = self.sp.wrapping_sub(2);
+                self.pc = interrupt_vector(self.interrupt_mask);
+                self.ime = false;
+                bus.clear_if_bit(self.interrupt_mask);
+            }
+        }
+        // Advance to the next M-cycle, or end the sequence after M5 (interrupt_step 4).
+        if self.interrupt_step >= 4 {
+            self.interrupt_step = 0;
+        } else {
+            self.interrupt_step += 1;
+        }
+    }
+}
+
+/// Interrupt vector for a single IF bit (task C01_32, note 02b): vblank $40, stat $48,
+/// timer $50, serial $58, joypad $60.
+fn interrupt_vector(mask: u8) -> u16 {
+    match mask {
+        0x01 => 0x40,
+        0x02 => 0x48,
+        0x04 => 0x50,
+        0x08 => 0x58,
+        _ => 0x60, // bit 4: joypad
     }
 }
 

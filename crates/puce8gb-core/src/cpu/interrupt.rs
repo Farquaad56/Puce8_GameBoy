@@ -1,6 +1,6 @@
-//! Interrupt control opcodes (task C01_16): DI ($F3). Task C01_30 adds RETI ($D9). EI and
-//! interrupt dispatch arrive with task C01_32. Decoded by opcode bit fields per decision
-//! C_00; no table.
+//! Interrupt control opcodes (task C01_16): DI ($F3). Task C01_30 adds RETI ($D9); task
+//! C01_32 adds EI ($FB) with its one-instruction delay. Decoded by opcode bit fields per
+//! decision C_00; no table.
 
 use super::Cpu;
 use crate::bus::Bus;
@@ -20,9 +20,21 @@ impl Cpu {
     ///   followed by a RET).
     pub(super) fn exec_interrupt_ops(&mut self, bus: &mut Bus) -> bool {
         if self.opcode == 0xF3 {
-            // DI: clear IME (note 02b "DI : efface IME"). No flag affected; the fetch is the
-            // whole instruction.
+            // DI (task C01_32): IME cleared immediately and any pending EI cancelled. No flag
+            // affected; the fetch is the whole instruction (decision C_00), so no bus access.
             self.ime = false;
+            self.ei_delay = 0;
+            self.done();
+            return true;
+        }
+
+        if self.opcode == 0xFB {
+            // EI (task C01_32): IME is set only after the NEXT instruction completes, so a
+            // one-instruction delay is armed here and resolved in done() (note 02b "EI : delai
+            // d'une instruction"): done() decrements ei_delay at the end of each following
+            // instruction and sets IME when it reaches 0. No flag affected; the fetch is the
+            // whole instruction (decision C_00), so this handler calls done() itself.
+            self.ei_delay = 2;
             self.done();
             return true;
         }
@@ -197,5 +209,148 @@ mod tests {
         testutil::exec(&mut cpu, &mut bus, &[0xD9]); // RETI
 
         assert_eq!(cpu.unimplemented(), None); // $D9 is claimed by the interrupt group
+    }
+
+    // ---- Task C01_32: EI delay, DI cancellation, dispatch, priority, RETI immediacy ----
+
+    /// Address where test code is placed (work RAM; the ROM area $0000-$7FFF ignores writes).
+    const CODE: u16 = 0xC000;
+
+    /// Place `code` at CODE (work RAM) and return a CPU with PC there.
+    fn cpu_at_code(bus: &mut crate::bus::Bus, code: &[u8]) -> Cpu {
+        for (i, &b) in code.iter().enumerate() {
+            bus.write(CODE.wrapping_add(i as u16), b);
+        }
+        Cpu {
+            pc: CODE,
+            ..Cpu::default()
+        }
+    }
+
+    #[test]
+    fn c01_32_ei_delay_takes_effect_after_next_instruction_then_dispatches() {
+        let mut bus = testutil::new_bus();
+        let mut cpu = cpu_at_code(&mut bus, &[0xFB, 0x00, 0x00]); // EI, NOP, NOP at CODE
+        cpu.sp = 0xDFFE;
+        bus.write(0xFFFF, 0x01); // IE: vblank enabled
+        bus.io[0x0F] = 0x01; // IF bit 0 (vblank) requested
+
+        cpu.tick(&mut bus); // EI fetch: IME must still be 0 (one-instruction delay)
+        assert!(!cpu.ime);
+
+        cpu.tick(&mut bus); // first NOP completes: the EI effect lands now
+        assert!(cpu.ime);
+
+        for _ in 0..5 {
+            cpu.tick(&mut bus); // five M-cycles of interrupt entry (note 02b)
+        }
+
+        assert_eq!(cpu.pc, 0x0040); // vector of IF bit 0 (vblank)
+        assert_eq!(cpu.sp, 0xDFFC); // SP = SP - 2
+        assert_eq!(bus.read(0xDFFD), 0xC0); // pushed PC high byte at [SP-1]: the NOP not fetched is CODE+2
+        assert_eq!(bus.read(0xDFFC), 0x02); // pushed PC low byte at [SP-2] = $C002
+        assert_eq!(bus.read(0xFF0F), 0xE0); // IF bit 0 acknowledged (bits 5-7 read as 1)
+        assert!(!cpu.ime); // IME cleared by the service of the interrupt
+    }
+
+    #[test]
+    fn c01_32_di_cancels_pending_ei_and_blocks_dispatch() {
+        let mut bus = testutil::new_bus();
+        let mut cpu = cpu_at_code(&mut bus, &[0xFB, 0xF3, 0x00]); // EI, DI, NOP at CODE
+        bus.write(0xFFFF, 0x01); // IE: vblank enabled
+        bus.io[0x0F] = 0x01; // IF bit 0 (vblank) requested
+
+        for _ in 0..3 {
+            cpu.tick(&mut bus); // EI + DI + NOP: three M-cycles, no dispatch
+        }
+
+        assert_eq!(cpu.pc, CODE.wrapping_add(3)); // PC advanced past all three instructions
+        assert!(!cpu.ime); // the pending EI was cancelled by the DI
+    }
+
+    #[test]
+    fn c01_32_dispatch_takes_five_m_cycles_and_pushes_next_pc() {
+        let mut bus = testutil::new_bus();
+        let mut cpu = cpu_at_code(&mut bus, &[0x00]); // NOP at CODE
+        cpu.sp = 0xDFFE;
+        cpu.ime = true;
+        bus.write(0xFFFF, 0x01); // IE: vblank enabled
+        bus.io[0x0F] = 0x01; // IF bit 0 (vblank) requested
+
+        for _ in 0..5 {
+            cpu.tick(&mut bus); // the whole entry sequence is five M-cycles
+        }
+
+        assert_eq!(cpu.pc, 0x0040); // vector of IF bit 0
+        assert_eq!(cpu.sp, 0xDFFC);
+        assert_eq!(bus.read(0xDFFD), 0xC0); // high byte: dispatch happened before any fetch, so PC = CODE
+        assert_eq!(bus.read(0xDFFC), 0x00); // low byte of the address not fetched ($C000)
+        assert!(!cpu.ime);
+    }
+
+    #[test]
+    fn c01_32_priority_lowest_bit_first() {
+        let mut bus = testutil::new_bus();
+        let mut cpu = cpu_at_code(&mut bus, &[0x00]); // NOP at CODE
+        cpu.ime = true;
+        bus.write(0xFFFF, 0x1F); // IE: all five sources enabled
+        bus.io[0x0F] = 0x05; // IF: vblank (bit 0) + timer (bit 2) requested
+
+        for _ in 0..5 {
+            cpu.tick(&mut bus);
+        }
+
+        assert_eq!(cpu.pc, 0x0040); // bit 0 (vblank) wins over bit 2 (timer)
+        assert_eq!(bus.io[0x0F], 0x04); // only the served bit is acknowledged: IF becomes $04
+    }
+
+    #[test]
+    fn c01_32_reti_sets_ime_immediately_and_dispatches_right_after() {
+        let mut bus = testutil::new_bus();
+        let mut cpu = cpu_at_code(&mut bus, &[0xD9]); // RETI at CODE
+        cpu.sp = 0xDFFC;
+        bus.write(0xDFFC, 0x34); // low byte of the return address ($1234) at [SP]
+        bus.write(0xDFFD, 0x12); // high byte at [SP]+1
+        cpu.ime = false;
+        bus.write(0xFFFF, 0x01); // IE: vblank enabled
+        bus.io[0x0F] = 0x01; // IF bit 0 (vblank) requested
+
+        for _ in 0..4 {
+            cpu.tick(&mut bus); // RETI is four M-cycles (note 02b)
+        }
+
+        assert_eq!(cpu.pc, 0x1234); // PC popped from the stack like RET
+        assert!(cpu.ime); // IME set immediately by RETI, no delay
+
+        for _ in 0..5 {
+            cpu.tick(&mut bus); // dispatch starts right after: five M-cycles
+        }
+
+        assert_eq!(cpu.pc, 0x0040); // vector of IF bit 0
+        assert_eq!(bus.read(0xDFFD), 0x12); // pushed PC high byte at [SP-1] = $DFFD (PC was $1234)
+        assert_eq!(bus.read(0xDFFC), 0x34); // pushed PC low byte at [SP-2] = $DFFC
+    }
+
+    #[test]
+    fn c01_32_no_dispatch_when_ime_clear() {
+        let mut bus = testutil::new_bus();
+        let mut cpu = cpu_at_code(&mut bus, &[0x00]); // NOP at CODE
+        cpu.ime = false;
+        bus.write(0xFFFF, 0x01); // IE: vblank enabled
+        bus.io[0x0F] = 0x01; // IF bit 0 (vblank) requested
+
+        cpu.tick(&mut bus); // the NOP executes normally; no dispatch happens
+
+        assert_eq!(cpu.pc, CODE.wrapping_add(1)); // PC advanced past the NOP
+    }
+
+    #[test]
+    fn c01_32_if_register_bits5_to_7_read_as_one() {
+        let mut bus = testutil::new_bus();
+        bus.write(0xFF0F, 0x01); // IF: only bit 0 writable
+        assert_eq!(bus.read(0xFF0F), 0xE1); // bits 5-7 read as 1 (task C01_32)
+
+        bus.write(0xFFFF, 0xFF); // IE is a plain eight-bit register
+        assert_eq!(bus.read(0xFFFF), 0xFF);
     }
 }
