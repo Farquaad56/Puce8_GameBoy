@@ -7,3 +7,6 @@ trace*.log
 
 trace*.txt
 trace*.log
+
+t_*.txt
+out.txt

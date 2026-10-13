@@ -80,13 +80,23 @@ C01_37	TEST	1	docs/tasks/C01/C01_37.md	blargg instr_timing
 C01_38	TEST	1	docs/tasks/C01/C01_38.md	blargg mem_timing 01 read_timing
 C01_39	TEST	1	docs/tasks/C01/C01_39.md	blargg mem_timing 02 write_timing
 C01_40	TEST	1	docs/tasks/C01/C01_40.md	blargg mem_timing 03 modify_timing
-C01_41	TEST	1	docs/tasks/C01/C01_41.md	blargg halt_bug
-E03_01	CODE	0	docs/tasks/E03/E03_01.md	PPU timing, modes, STAT, LCDC
-E03_02	CODE	0	docs/tasks/E03/E03_02.md	OAM scan and VRAM/OAM access blocking
-E03_03	CODE	0	docs/tasks/E03/E03_03.md	Background and window pixel pipeline
-E03_04	CODE	0	docs/tasks/E03/E03_04.md	Sprites in the pipeline
+C01_41	TEST	1	docs/tasks/C01/C01_41.md	CPU restart closure gate (cpu_instrs 01-11)
+E03_01	CODE	0	docs/tasks/E03/E03_01.md	PPU line and frame timing, modes, LY, VBlank
+E03_08	CODE	0	docs/tasks/E03/E03_08.md	LYC, STAT register and STAT interrupt line
+E03_09	CODE	0	docs/tasks/E03/E03_09.md	LCDC, LCD on and off, plain video registers
+E03_02	CODE	0	docs/tasks/E03/E03_02.md	OAM scan: sprite selection per line
+E03_10	CODE	0	docs/tasks/E03/E03_10.md	VRAM and OAM access blocking
+E03_03	CODE	0	docs/tasks/E03/E03_03.md	Background pixel pipeline (no fine scroll, no window)
+E03_11	CODE	0	docs/tasks/E03/E03_11.md	Background fine scroll and variable mode 3 length
+E03_12	CODE	0	docs/tasks/E03/E03_12.md	Window
+E03_04	CODE	0	docs/tasks/E03/E03_04.md	Sprites in the pipeline (without mode 3 penalty)
+E03_13	CODE	0	docs/tasks/E03/E03_13.md	Sprite penalty on mode 3 length
 E03_05	CODE	0	docs/tasks/E03/E03_05.md	Palettes and framebuffer
-E03_06	CODE	0	docs/tasks/E03/E03_06.md	OAM DMA
+E03_14	CODE	0	docs/tasks/E03/E03_14.md	Frame completion: run_frame and determinism
+E03_16	CODE	0	docs/tasks/E03/E03_16.md	CLI image dump: --frames and --dump-ppm
+E03_17	TEST	1	docs/tasks/E03/E03_17.md	blargg halt_bug on screen (image comparison)
+E03_06	CODE	0	docs/tasks/E03/E03_06.md	OAM DMA: register and transfer
+E03_15	CODE	0	docs/tasks/E03/E03_15.md	OAM DMA: bus restrictions for the CPU
 E03_07	TEST	1	docs/tasks/E03/E03_07.md	dmg-acid2 and framebuffer hash
 E04_01	CODE	0	docs/tasks/E04/E04_01.md	APU skeleton and frame sequencer
 E04_02	CODE	0	docs/tasks/E04/E04_02.md	Pulse channels 1 and 2

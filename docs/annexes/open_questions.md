@@ -91,3 +91,4 @@ Voir docs/annexes/notes/09_test_roms.md.
 - Duree d'execution de dmg-acid2 (ni README, ni howto, ni refs/pandocs ne donne de chiffre). A trancher en mesurant la duree jusqu'a l'opcode 0x40 (LD B,B) sur un emulator. Statut : UNKNOWN - to confirm.
 - Durees d'execution des suites cgb-acid2 / cgb-acid-hell (aucune .gb locale dans v7.0 ; howto sans chiffre). Statut : UNKNOWN - to confirm.
 - C01_16 blocked: ROM 06 reaches opcode 0xCB at PC=0xC06A which is outside the LIST of C01_16
+- C01_41 blocked: halt_bug.gb is screen-only: needs PPU and E03_16

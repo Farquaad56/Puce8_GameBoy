@@ -1,0 +1,21 @@
+# E03_04 - Sprites in the pipeline
+Role: CODE
+Goal: Sprite fetch, priority, flip, palettes, mode 3 penalties.
+Prerequisites: E03_03
+Read (max 3 files, give line ranges): docs/annexes/notes/04a_video_regs.md (1-150); docs/annexes/notes/04b_video_render.md (1-150); docs/annexes/decisions.md (A_01)
+Write only in: crates/puce8gb-core/src/video/, crates/puce8gb-core/src/bus.rs, crates/puce8gb-core/src/machine.rs
+## Work
+1. Sprite fetch triggered per note; mode 3 extension per sprite as documented.
+2. X/Y flip, OBJ palette select, BG-over-OBJ priority flag, sprite-sprite priority (lower X wins, then OAM order).
+3. Tests: single sprite, overlapping sprites, priority flag, flipped 8x16 sprite, penalty length.
+## Rules
+- Identifiers and comments in English, ASCII only. Zero invention: unknown => UNKNOWN - to confirm.
+- Name every unit test fn starting with `e03_04_` (the check filters on it).
+- Penalty values only from the note; otherwise UNKNOWN.
+## Exit tests
+- unit tests e03_04_* pass (at least one)
+- cargo fmt --check, clippy -D warnings, cargo test --workspace (added automatically)
+- non-regression: all earlier exit tests (run by `done`)
+## CLOSURE
+python3 docs/tools/task.py check   (repeat until SCORE is full)
+python3 docs/tools/task.py done    (commit + push + next task)

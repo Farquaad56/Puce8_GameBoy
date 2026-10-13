@@ -1,0 +1,21 @@
+# E03_02 - OAM scan and VRAM/OAM access blocking
+Role: CODE
+Goal: Mode 2 sprite selection and access restrictions.
+Prerequisites: E03_01
+Read (max 3 files, give line ranges): docs/annexes/notes/04a_video_regs.md (1-150); docs/annexes/notes/04b_video_render.md (1-150); docs/annexes/decisions.md (A_01)
+Write only in: crates/puce8gb-core/src/video/, crates/puce8gb-core/src/bus.rs, crates/puce8gb-core/src/machine.rs
+## Work
+1. Mode 2: scan OAM during 80 dots, keep at most 10 sprites for the line by the Y/height rule of the note.
+2. VRAM unreadable in mode 3, OAM unreadable in modes 2-3 (value returned per the note); writes ignored accordingly.
+3. Tests: 10-sprite limit, 8x8 and 8x16 selection, blocking per mode and per dot range given in the note.
+## Rules
+- Identifiers and comments in English, ASCII only. Zero invention: unknown => UNKNOWN - to confirm.
+- Name every unit test fn starting with `e03_02_` (the check filters on it).
+- Blocking boundaries in dots exactly as documented; undocumented => UNKNOWN.
+## Exit tests
+- unit tests e03_02_* pass (at least one)
+- cargo fmt --check, clippy -D warnings, cargo test --workspace (added automatically)
+- non-regression: all earlier exit tests (run by `done`)
+## CLOSURE
+python3 docs/tools/task.py check   (repeat until SCORE is full)
+python3 docs/tools/task.py done    (commit + push + next task)
