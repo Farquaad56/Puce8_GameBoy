@@ -353,4 +353,38 @@ mod tests {
         bus.write(0xFFFF, 0xFF); // IE is a plain eight-bit register
         assert_eq!(bus.read(0xFFFF), 0xFF);
     }
+
+    // ---- Task C01_36: blargg cpu_instrs 02 interrupts - per-source vector routing ----
+
+    /// The ROM exercises every interrupt source; verify each IF bit routes to its
+    /// documented vector (note 02b) in five M-cycles, clears IME and acknowledges the bit.
+    #[test]
+    fn c01_36_interrupt_vectors_route_to_correct_address() {
+        let cases = [
+            (0x01, 0x40), // vblank
+            (0x02, 0x48), // stat
+            (0x04, 0x50), // timer overflow
+            (0x08, 0x58), // serial transfer end
+            (0x10, 0x60), // joypad
+        ];
+        for (bit, vector) in cases {
+            let mut bus = testutil::new_bus();
+            let mut cpu = cpu_at_code(&mut bus, &[0x00]); // NOP at CODE
+            cpu.sp = 0xDFFE;
+            cpu.ime = true;
+            bus.write(0xFFFF, bit); // IE: only this source enabled
+            bus.io[0x0F] = bit; // IF: only this source requested
+
+            for _ in 0..5 {
+                cpu.tick(&mut bus); // five M-cycles of interrupt entry (note 02b)
+            }
+
+            assert_eq!(
+                cpu.pc, vector,
+                "IF bit {bit:#04x} must route to ${vector:04X}"
+            );
+            assert!(!cpu.ime); // IME cleared by the service of the interrupt
+            assert_eq!(bus.io[0x0F] & 0x1F, 0); // the served IF bit is acknowledged
+        }
+    }
 }
