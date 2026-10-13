@@ -30,7 +30,7 @@ pub struct Bus {
     /// Number of captured bytes currently held in `serial` (C01_03).
     pub serial_len: usize,
     /// Current PPU scanline = LY ($FF44), owned by the PPU and mirrored here so reads are
-    /// side-effect-free; writes to $FF44 are ignored (C01_15, note 04a "LY").
+    /// side-effect-free; writes to $FF44 are ignored (E03_01, note 04a "LY").
     pub ly: u8,
     /// Debug tool for trace comparison, task C01_49: when Some(v), every read of $FF44
     /// returns v instead of the PPU scanline; None (default) keeps normal behaviour.

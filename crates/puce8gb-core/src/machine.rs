@@ -7,7 +7,7 @@ use crate::cpu::Cpu;
 use crate::input::Input;
 use crate::media::Media;
 use crate::savestate::StateError;
-use crate::video::Video;
+use crate::video::Ppu;
 
 /// Dots per frame: 70224 (note 01_timing.md, decision A_01).
 pub const FRAME_DOTS: u32 = 70224;
@@ -70,7 +70,7 @@ pub trait Machine {
 pub struct Dmg {
     pub bus: Bus,
     pub cpu: Cpu,
-    pub video: Video,
+    pub ppu: Ppu,
     pub audio: Audio,
     pub media: Media,
     /// Current button state (decision A_04).
@@ -91,7 +91,7 @@ impl Dmg {
         let mut dmg = Dmg {
             bus: Bus::new(rom.to_vec()),
             cpu: Cpu::default(),
-            video: Video::default(),
+            ppu: Ppu::default(),
             audio: Audio::default(),
             media: Media,
             input: Input::default(),
@@ -115,7 +115,7 @@ impl Machine for Dmg {
         let checksum = self.bus.rom[ROM_HEADER_CHECKSUM];
         self.cpu = Cpu::reset(checksum);
         self.bus.reset();
-        self.video.reset(); // LY and dot counter restart at line 0 (C01_15)
+        self.ppu.reset(); // LY, dot counter and mode restart at the start of line 0 (E03_01)
         self.audio.head = 0;
         self.audio.tail = 0;
         self.dot_phase = 0;
@@ -137,19 +137,19 @@ impl Machine for Dmg {
                 self.bus.io[0x0F] |= 0x04; // IF bit 2: timer interrupt request (note 01b)
             }
         }
-        // PPU advances one dot per Machine::tick() (decision A_01, C01_15). LY is mirrored
+        // PPU advances one dot per Machine::tick() (decision A_01, E03_01). LY is mirrored
         // into the bus so $FF44 reads are side-effect-free; entry into VBlank (LY 143 -> 144)
         // raises the IF vblank bit once per frame (note 02b "vblank", note 01_timing.md).
-        let was_vblank = self.video.vblank();
-        let line_changed = self.video.tick();
-        self.bus.ly = self.video.ly();
-        if line_changed && !was_vblank && self.video.vblank() {
+        let was_vblank = self.ppu.vblank();
+        let line_changed = self.ppu.tick();
+        self.bus.ly = self.ppu.ly();
+        if line_changed && !was_vblank && self.ppu.vblank() {
             self.bus.io[0x0F] |= 0x01; // IF bit 0: vblank request (note 02b)
         }
     }
 
     fn framebuffer(&self) -> &[u8; FRAMEBUFFER_SIZE] {
-        &self.video.frame
+        &self.ppu.frame
     }
 
     fn drain_audio(&mut self, into: &mut [i16]) -> usize {
@@ -427,6 +427,24 @@ mod tests {
             }
         }
         assert_eq!(raises, 1); // exactly one vblank request per frame (note 02b)
+    }
+
+    #[test]
+    fn e03_01_vblank_if_bit_requested_once_per_frame() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        // Clear the request (as a ROM would by reading IF), then drive the machine through one
+        // full frame and count rising edges of the vblank bit: it must be raised exactly once,
+        // on the dot where LY becomes 144 (E03_01).
+        dmg.bus.io[0x0F] &= !0x01;
+        let mut raises = 0u32;
+        for _ in 0..FRAME_DOTS {
+            let before = dmg.bus.io[0x0F] & 0x01;
+            dmg.tick();
+            if before == 0 && dmg.bus.io[0x0F] & 0x01 != 0 {
+                raises += 1; // a clear -> set transition (note 02b)
+            }
+        }
+        assert_eq!(raises, 1); // exactly one vblank request per frame (E03_01, note 02b)
     }
 
     #[test]
