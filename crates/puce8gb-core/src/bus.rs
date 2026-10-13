@@ -603,9 +603,69 @@ mod tests {
         dmg.bus.write(0xFF06, 0x7E); // TMA reload value (note 01b)
         assert_eq!(dmg.bus.io[0x0F] & 0x04, 0x00); // no timer request yet
         for _ in 0..(4 * 4) {
-            dmg.tick();
+            dmg.tick(); // M-cycle N: the increment overflows at its end (note 01b "Retard d'un M-cycle")
+        }
+        assert_eq!(dmg.bus.io[0x0F] & 0x04, 0x00); // IF bit 2 not set yet on this M-cycle
+        assert_eq!(dmg.bus.read(0xFF05), 0x00); // TIMA wrapped to $00; the reload is not visible yet
+        for _ in 0..4 {
+            dmg.tick(); // M-cycle N+1: the delayed request lands at its end (note 01b)
         }
         assert_eq!(dmg.bus.io[0x0F] & 0x04, 0x04); // IF bit 2: timer interrupt requested (note 01b)
         assert_eq!(dmg.bus.read(0xFF05), 0x7E); // TIMA reloaded with the current TMA value
+    }
+
+    #[test]
+    fn c01_35_cpu_serves_timer_interrupt_through_the_machine() {
+        let mut dmg = Dmg::new(&zero_rom(32 * 1024)).expect("ROM loads"); // all-NOP ROM, PC at $0100
+        dmg.bus.write(0xFF04, 0x00); // zero the system counter
+        dmg.bus.write(0xFF07, 0x05); // one increment every 4 M-cycles (note 01b)
+        dmg.bus.write(0xFF05, 0xFF); // TIMA at its maximum: the next increment overflows
+        dmg.bus.write(0xFF06, 0x23); // TMA reload value (note 01b)
+        dmg.bus.io[0x0F] = 0xE0; // IF: no request yet (bits 5-7 read as 1)
+        dmg.bus.write(0xFFFF, 0x04); // IE bit 2: timer interrupt enabled (note 02b)
+        dmg.bus.write(0xC000, 0xFB); // EI in WRAM; the CPU runs NOPs from $C001 on
+        for i in 1..8u16 {
+            dmg.bus.write(0xC000 + i, 0x00); // explicit NOPs after the EI
+        }
+        dmg.cpu.sp = 0xDFFE; // IME is false by default (note 02b: cleared at reset)
+        dmg.cpu.pc = 0xC000;
+
+        let mut dispatched = false;
+        for _ in 0..200 {
+            dmg.tick(); // one M-cycle per tick (decision C_00)
+            if dmg.cpu.pc == 0x0050 {
+                dispatched = true; // timer vector reached: the dispatch completed (note 02b)
+                break;
+            }
+        }
+        assert!(dispatched, "no timer dispatch");
+
+        assert_eq!(dmg.bus.io[0x0F] & 0x04, 0x00); // IF bit 2 acknowledged at entry (note 02b)
+        assert_eq!(dmg.cpu.sp, 0xDFFC); // SP = SP - 2
+        let pushed = ((dmg.bus.read(0xDFFD) as u16) << 8) | dmg.bus.read(0xDFFC) as u16;
+        assert!(
+            (0xC001..=0xC010).contains(&pushed),
+            "pushed PC {:#06x} not in $C001..=$C010",
+            pushed
+        );
+        // TIMA was reloaded with TMA ($23); the timer keeps counting during the entry, so at
+        // most one further increment (TAC select 1: every 4 M-cycles) can have landed by the
+        // time the dispatch completes. The exact reload timing is covered by c01_35 unit tests.
+        assert!(
+            dmg.bus.read(0xFF05).wrapping_sub(0x23) <= 1,
+            "TIMA {:#04x} not reloaded from TMA",
+            dmg.bus.read(0xFF05)
+        );
+
+        dmg.bus.io[0x0F] |= 0x01; // IF bit 0 (vblank): a second request, pending
+        dmg.bus.write(0xFFFF, 0x05); // IE bits 0 and 2 enabled (note 02b)
+        for _ in 0..20 {
+            dmg.tick(); // IME was cleared by the service: no second dispatch to $0040 (note 02b)
+        }
+        assert!(
+            (0x0050..=0x0070).contains(&dmg.cpu.pc),
+            "second dispatch to vblank: PC {:#06x}",
+            dmg.cpu.pc
+        );
     }
 }

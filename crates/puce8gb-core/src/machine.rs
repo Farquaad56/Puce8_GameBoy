@@ -129,10 +129,12 @@ impl Machine for Dmg {
         if self.dot_phase == 0 {
             self.cpu.tick(&mut self.bus);
             // Timer advances one M-cycle per M-cycle, after the CPU so a DIV/TAC write is
-            // visible in the same dot (decision A_01). An overflow by increment requests
-            // the timer interrupt: IF bit 2 (note 01b).
+            // visible in the same dot (decision A_01). The timer tick returns true when the
+            // delayed request of an overflow by increment lands: one M-cycle after the
+            // increment that overflows, TIMA takes TMA and IF bit 2 is set (note 01b "Retard
+            // d'un M-cycle").
             if self.bus.timer.mcycle() {
-                self.bus.io[0x0F] |= 0x04;
+                self.bus.io[0x0F] |= 0x04; // IF bit 2: timer interrupt request (note 01b)
             }
         }
         // PPU advances one dot per Machine::tick() (decision A_01, C01_15). LY is mirrored
