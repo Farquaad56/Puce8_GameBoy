@@ -2,6 +2,8 @@
 //! read/write dispatch and side-effect-free peek() per decision A_02; PPU-mode blocking
 //! and OAM DMA gating arrive with E03.
 
+use crate::timer::Timer;
+
 /// IO register file FF00-FFFF size, including IF ($FF0F) and IE ($FFFF) (decision A_02).
 pub const IO_SIZE: usize = 0x100;
 
@@ -33,6 +35,8 @@ pub struct Bus {
     /// Debug tool for trace comparison, task C01_49: when Some(v), every read of $FF44
     /// returns v instead of the PPU scanline; None (default) keeps normal behaviour.
     ly_override: Option<u8>,
+    /// Timer and divider registers DIV/TIMA/TMA/TAC ($FF04-$FF07, note 01b).
+    pub timer: Timer,
 }
 
 impl Bus {
@@ -47,8 +51,9 @@ impl Bus {
             io: [0xFF; IO_SIZE],
             serial: [0x00; 256],
             serial_len: 0,
-            ly: 0,             // LY ($FF44) post-boot value (note 08, C01_15)
-            ly_override: None, // no debug override by default (C01_49)
+            ly: 0,                   // LY ($FF44) post-boot value (note 08, C01_15)
+            ly_override: None,       // no debug override by default (C01_49)
+            timer: Timer::default(), // DIV/TIMA/TMA/TAC are set in reset() (note 08)
         }
     }
 
@@ -61,6 +66,7 @@ impl Bus {
         self.hram.fill(0x00);
         self.serial_len = 0; // no captured serial bytes at power-up (C01_03)
         self.ly = 0; // LY ($FF44) post-boot value (note 08, C01_15)
+        self.timer.reset(); // DIV/TIMA/TMA/TAC post-boot values (note 08, note 01b)
 
         // Unassigned IO reads $FF by default (decision A_02), then the documented
         // post-boot values from note 08 "Registres I/O apres boot".
@@ -134,6 +140,10 @@ impl Bus {
             0xFEA0..=0xFEFF => 0x00, // unusable range: $00 on DMG outside OAM block (note 03a)
             0xFF44 => self.ly_override.unwrap_or(self.ly), // LY ($FF44): PPU-owned scanline, read-only (C01_15); debug override wins (C01_49)
             0xFF0F => 0xE0 | (self.io[0x0F] & 0x1F), // IF ($FF0F): bits 5-7 read as 1 (task C01_32)
+            0xFF04 => self.timer.div(),              // DIV ($FF04, note 01b)
+            0xFF05 => self.timer.tima(),             // TIMA ($FF05, note 01b)
+            0xFF06 => self.timer.tma(),              // TMA ($FF06, note 01b)
+            0xFF07 => self.timer.tac(),              // TAC ($FF07, note 01b)
             0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.io[IO_SIZE - 1], // IE (decision A_02)
@@ -164,6 +174,10 @@ impl Bus {
             0xFEA0..=0xFEFF => {} // unusable range: writes are ignored (note 03a)
             0xFF44 => {} // LY ($FF44) is read-only; writes are ignored (C01_15, note 04a "LY")
             0xFF0F => self.io[0x0F] = val & 0x1F, // IF ($FF0F): only bits 0-4 writable (task C01_32)
+            0xFF04 => self.timer.write_div(val), // DIV ($FF04): any value resets the counter (note 01b)
+            0xFF05 => self.timer.write_tima(val), // TIMA ($FF05, note 01b)
+            0xFF06 => self.timer.write_tma(val), // TMA ($FF06, note 01b)
+            0xFF07 => self.timer.write_tac(val), // TAC ($FF07, note 01b)
             0xFF00..=0xFF7F => {
                 self.io[(addr - 0xFF00) as usize] = val;
                 // SC ($FF02): a transfer started with the internal clock (bit7 + bit0 set,
@@ -224,6 +238,10 @@ impl Bus {
             0xFEA0..=0xFEFF => 0x00, // unusable range: $00 on DMG outside OAM block (note 03a)
             0xFF44 => self.ly_override.unwrap_or(self.ly), // LY ($FF44): PPU-owned scanline, read-only (C01_15); debug override wins (C01_49)
             0xFF0F => 0xE0 | (self.io[0x0F] & 0x1F), // IF ($FF0F): bits 5-7 read as 1 (task C01_32)
+            0xFF04 => self.timer.div(),              // DIV ($FF04, note 01b)
+            0xFF05 => self.timer.tima(),             // TIMA ($FF05, note 01b)
+            0xFF06 => self.timer.tma(),              // TMA ($FF06, note 01b)
+            0xFF07 => self.timer.tac(),              // TAC ($FF07, note 01b)
             0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.io[IO_SIZE - 1], // IE (decision A_02)
@@ -234,6 +252,7 @@ impl Bus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::machine::{Dmg, Machine};
 
     /// ROM image of `len` bytes filled with $A5 (distinct from the open-bus $FF), header
     /// checksum byte $014D set to $5A.
@@ -243,6 +262,11 @@ mod tests {
             r[ROM_HEADER_CHECKSUM] = 0x5A;
         }
         r
+    }
+
+    /// Zero-filled ROM image of `len` bytes: full of unknown opcodes (task C01_34).
+    fn zero_rom(len: usize) -> Vec<u8> {
+        vec![0u8; len]
     }
 
     #[test]
@@ -495,10 +519,93 @@ mod tests {
     #[test]
     fn c01_03_reset_clears_capture_buffer() {
         let mut bus = Bus::new(test_rom(32 * 1024));
-        bus.write(0xFF01, 0x41);
-        bus.write(0xFF02, 0x81);
+        bus.write(0xFF01, 0x41); // SB
+        bus.write(0xFF02, 0x81); // SC: internal clock (note 06)
         assert_eq!(bus.serial_len, 1);
         bus.reset();
         assert_eq!(bus.serial_len, 0); // the capture buffer is part of the post-boot state (C01_03)
+    }
+
+    #[test]
+    fn c01_34_timer_registers_live_on_their_bus_addresses() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.reset(); // post-boot values (note 08)
+        assert_eq!(bus.read(0xFF04), 0xAB); // DIV
+        assert_eq!(bus.read(0xFF05), 0x00); // TIMA
+        assert_eq!(bus.read(0xFF06), 0x00); // TMA
+        assert_eq!(bus.read(0xFF07), 0xF8); // TAC
+
+        bus.write(0xFF04, 0x5A); // DIV: the written value is ignored (note 01b)
+        assert_eq!(bus.read(0xFF04), 0x00);
+        bus.write(0xFF05, 0x3C); // TIMA
+        assert_eq!(bus.read(0xFF05), 0x3C);
+        bus.write(0xFF06, 0x7E); // TMA
+        assert_eq!(bus.read(0xFF06), 0x7E);
+        bus.write(0xFF07, 0x04); // TAC: timer enabled, clock select 00 (note 01b)
+        assert_eq!(bus.read(0xFF07), 0x04);
+
+        // peek is side-effect-free and agrees with read on the timer registers.
+        for addr in [0xFF04u16, 0xFF05, 0xFF06, 0xFF07] {
+            assert_eq!(bus.peek(addr), bus.read(addr));
+        }
+    }
+
+    #[test]
+    fn c01_34_div_counts_through_the_machine() {
+        let mut dmg = Dmg::new(&zero_rom(32 * 1024)).expect("ROM loads");
+        assert_eq!(dmg.bus.read(0xFF04), 0xAB); // post-boot DIV (note 08)
+        dmg.bus.write(0xFF04, 0x5A); // reset the system counter to $00 (note 01b)
+        for _ in 0..(64 * 4 - 1) {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.read(0xFF04), 0x00); // DIV changes every 256 dots = 64 M-cycles (note 01b)
+        dmg.tick(); // the 64th M-cycle: the counter crosses $0100
+        assert_eq!(dmg.bus.read(0xFF04), 0x01);
+    }
+
+    #[test]
+    fn c01_34_tima_counts_through_the_machine_for_each_tac() {
+        for (select, period_mcycles) in [(0u8, 256u32), (1, 4), (2, 16), (3, 64)] {
+            let mut dmg = Dmg::new(&zero_rom(32 * 1024)).expect("ROM loads");
+            dmg.bus.write(0xFF04, 0x00); // zero the system counter: every selected bit starts at 0
+            dmg.bus.write(0xFF07, 0x04 | select); // timer enabled + clock select (note 01b)
+            for _ in 0..(2 * period_mcycles * 4) {
+                dmg.tick();
+            }
+            assert_eq!(
+                dmg.bus.read(0xFF05),
+                2,
+                "TAC select {} must tick every {} M-cycles",
+                select,
+                period_mcycles
+            );
+        }
+    }
+
+    #[test]
+    fn c01_34_disabled_timer_does_not_count_through_the_machine() {
+        let mut dmg = Dmg::new(&zero_rom(32 * 1024)).expect("ROM loads");
+        dmg.bus.write(0xFF04, 0x00); // zero the system counter
+        dmg.bus.write(0xFF07, 0x05 & !0x04); // clock select 01, enable clear (note 01b)
+        for _ in 0..(256 * 4 * 4) {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.read(0xFF05), 0x00); // TIMA never increments while disabled
+        assert_ne!(dmg.bus.read(0xFF04), 0x00); // DIV keeps counting regardless (note 01b)
+    }
+
+    #[test]
+    fn c01_34_tima_overflow_requests_timer_interrupt_through_the_machine() {
+        let mut dmg = Dmg::new(&zero_rom(32 * 1024)).expect("ROM loads");
+        dmg.bus.write(0xFF04, 0x00); // zero the system counter
+        dmg.bus.write(0xFF07, 0x05); // one increment every 4 M-cycles (note 01b)
+        dmg.bus.write(0xFF05, 0xFF); // TIMA at its maximum: the next increment overflows
+        dmg.bus.write(0xFF06, 0x7E); // TMA reload value (note 01b)
+        assert_eq!(dmg.bus.io[0x0F] & 0x04, 0x00); // no timer request yet
+        for _ in 0..(4 * 4) {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.io[0x0F] & 0x04, 0x04); // IF bit 2: timer interrupt requested (note 01b)
+        assert_eq!(dmg.bus.read(0xFF05), 0x7E); // TIMA reloaded with the current TMA value
     }
 }

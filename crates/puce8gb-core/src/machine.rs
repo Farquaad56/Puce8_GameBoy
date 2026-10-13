@@ -128,6 +128,12 @@ impl Machine for Dmg {
         self.dot_phase = (self.dot_phase + 1) % 4;
         if self.dot_phase == 0 {
             self.cpu.tick(&mut self.bus);
+            // Timer advances one M-cycle per M-cycle, after the CPU so a DIV/TAC write is
+            // visible in the same dot (decision A_01). An overflow by increment requests
+            // the timer interrupt: IF bit 2 (note 01b).
+            if self.bus.timer.mcycle() {
+                self.bus.io[0x0F] |= 0x04;
+            }
         }
         // PPU advances one dot per Machine::tick() (decision A_01, C01_15). LY is mirrored
         // into the bus so $FF44 reads are side-effect-free; entry into VBlank (LY 143 -> 144)
