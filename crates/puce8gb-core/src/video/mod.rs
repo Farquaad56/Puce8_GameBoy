@@ -81,8 +81,12 @@ pub struct Ppu {
     /// Pixels output into `line_buf` this line, 0..=160 (E03_03 spec): mode 3 ends when it
     /// reaches 160.
     pixels_output: u8,
-    /// Pixels produced into the FIFO this line by the fetcher, 0..=160 (note 04b).
+    /// Pixels produced this line by the fetcher, up to 160 + SCX mod 8 (note 04b).
     produce_count: u8,
+    /// Fine scroll offset, 0..7: the low 3 bits of SCX latched at the first dot of mode 3
+    /// (dot 80) of each visible line; a mid-line write changes only the high bits, which keep
+    /// being re-read per tile fetch (note 04a "SCY / SCX").
+    fine_scroll: u8,
     /// Pixel FIFO of color indices for the current line, up to 16 entries (note 04b "FIFO de pixels").
     fifo: [u8; FIFO_CAP],
     fifo_head: usize,
@@ -109,6 +113,7 @@ impl Default for Ppu {
             oam_scan_pending: true, // line 0 starts in mode 2 at power-up (E03_01): the scan is due
             pixels_output: 0,
             produce_count: 0,
+            fine_scroll: 0, // SCX is $00 at power-up (note 08): no fine scroll
             fifo: [0x00; FIFO_CAP],
             fifo_head: 0,
             fifo_count: 0,
@@ -138,10 +143,12 @@ impl Ppu {
     }
 
     /// Reset the pixel fetcher state for a new visible line (E03_03): no pixels produced or
-    /// output yet, empty FIFO, and a tile load forced on the first production.
+    /// output yet, empty FIFO, fine scroll cleared until it is latched at dot 80 (E03_11), and
+    /// a tile load forced on the first production.
     fn reset_pixel_state(&mut self) {
         self.pixels_output = 0;
         self.produce_count = 0;
+        self.fine_scroll = 0; // re-latched from SCX at the first dot of mode 3 (E03_11 spec)
         self.fifo_head = 0;
         self.fifo_count = 0;
         self.fetcher_col = 0xFF; // sentinel: force a tile load on the first production (E03_03)
@@ -255,22 +262,36 @@ impl Ppu {
 
     /// One dot of pixel fetching (E03_03): during mode 3 the fetcher produces one color index
     /// per dot into its FIFO and, once the initial FETCH_INITIAL_DOTS dots are done, one pixel
-    /// leaves the FIFO per dot into `line_buf`. The tile map and tile data are read directly
-    /// from VRAM, bypassing CPU access blocking (E03_10 spec). Windows and sprites arrive with
-    /// E03_11/E03_12; OBJ penalties with E03_13.
+    /// leaves the FIFO per dot into `line_buf`. The low 3 bits of SCX are latched at the first
+    /// dot of mode 3; the first SCX mod 8 produced pixels are discarded from the leftmost tile
+    /// and delay the first output by that many dots, so mode 3 lasts 172 + SCX mod 8 (E03_11
+    /// spec, note 04a "SCY / SCX"). The tile map and tile data are read directly from VRAM,
+    /// bypassing CPU access blocking (E03_10 spec). Windows arrive with E03_12; OBJ penalties
+    /// with E03_13.
     pub(crate) fn fetch_pixels(&mut self, vram: &[u8], scx: u8, scy: u8) {
         if !self.lcd_on || self.mode != 3 {
             return; // only the pixel phase of a visible line (E03_03 spec); LCD off forces mode 0
         }
         let dots_in_mode3 = self.dot_in_line - MODE2_DOTS; // 0 at dot 80, FETCH_INITIAL_DOTS at the first output dot
-        if u32::from(self.produce_count) < u32::from(LINE_PIXELS) {
-            // The fetcher produces one pixel per dot until the line is done (note 04b).
+        if dots_in_mode3 == 0 {
+            // The low 3 bits of SCX are read only at the beginning of the scanline (note 04a "SCY / SCX");
+            // a mid-line write changes only the high bits, which keep being re-read per tile fetch.
+            self.fine_scroll = scx & 7;
+        }
+        if u32::from(self.produce_count) < u32::from(LINE_PIXELS) + u32::from(self.fine_scroll) {
+            // The fetcher produces one pixel per dot until the line is done (note 04b); the first
+            // SCX mod 8 pixels are discarded from the leftmost tile (E03_11 spec).
             let color = self.next_color(vram, scx, scy);
-            self.fifo_push(color);
+            if u32::from(self.produce_count) >= u32::from(self.fine_scroll) {
+                // Discarded pixels are not pushed into the FIFO (E03_11 spec).
+                self.fifo_push(color);
+            }
             self.produce_count += 1;
         }
-        if dots_in_mode3 >= FETCH_INITIAL_DOTS && self.fifo_count > 0 {
-            // One pixel leaves the FIFO per dot (E03_03 spec).
+        if dots_in_mode3 >= FETCH_INITIAL_DOTS + u32::from(self.fine_scroll) && self.fifo_count > 0
+        {
+            // One pixel leaves the FIFO per dot (E03_03 spec); the fine scroll pause delays the first
+            // output by SCX mod 8 dots, so mode 3 lasts 172 + SCX mod 8 (E03_11 spec).
             let color = self.fifo_pop();
             self.line_buf[self.pixels_output as usize] = color;
             self.pixels_output += 1;
@@ -290,7 +311,7 @@ impl Ppu {
             self.load_tile_row(vram, scy, col as u8);
             self.fetcher_col = col as u8;
         }
-        let pixel_in_tile = (x + (u32::from(scx) & 7)) & 7; // fine scroll offset (0 in this task)
+        let pixel_in_tile = x & 7; // position within the tile: the fine scroll is handled by discarding produced pixels (E03_11 spec)
         let low_bit = (self.tile_low >> (7 - pixel_in_tile)) & 1;
         let high_bit = (self.tile_high >> (7 - pixel_in_tile)) & 1;
         (high_bit << 1) | low_bit // bit plane 0 = low, bit plane 1 = high (note 04a "Tile data format")
@@ -1002,5 +1023,108 @@ mod tests {
             };
             assert_eq!(p.line_buf[x], expected, "pixel {x}");
         }
+    }
+
+    #[test]
+    fn e03_11_line_buf_is_shifted_by_the_fine_scroll_for_scx_1_to_7() {
+        for scx in 1..=7u8 {
+            let mut p = Ppu::default();
+            let vram = vram_with_tile(0x55, 0xCC); // one tile row yields all four color indexes (E03_03 spec)
+            for dot in 0..LINE_DOTS {
+                if dot > 0 {
+                    p.tick();
+                }
+                p.fetch_pixels(&vram, scx, 0);
+            }
+            assert_eq!(p.pixels_output, LINE_PIXELS); // all 160 pixels of the line are output (E03_11 spec)
+            for x in 0..LINE_PIXELS as usize {
+                // visible pixel x is background pixel SCX + x: shifted by the fine scroll (E03_11 spec)
+                assert_eq!(
+                    p.line_buf[x],
+                    expected_color(0x55, 0xCC, x + scx as usize),
+                    "scx {scx}, pixel {x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn e03_11_mode_boundaries_for_each_scx_mod_8() {
+        for scx in 0..=7u8 {
+            let mut p = Ppu::default();
+            let vram = [0x00u8; 0x2000];
+            // Last dot of mode 3: dots 80..=251+SCX mod 8, i.e. a duration of 172 + SCX mod 8 (E03_11 spec).
+            let mode3_end = MODE2_DOTS + MODE3_LEN - 1 + u32::from(scx);
+            for dot in 0..LINE_DOTS {
+                if dot > 0 {
+                    p.tick();
+                }
+                p.fetch_pixels(&vram, scx, 0);
+                let expected = if dot < MODE2_DOTS {
+                    2 // OAM scan: dots 0..79 (note 04a "STAT bits")
+                } else if dot <= mode3_end {
+                    3 // mode 3 lasts 172 + SCX mod 8 dots, i.e. 80..=251+SCX mod 8 (E03_11 spec)
+                } else {
+                    0 // HBlank: from dot 252+SCX mod 8 to dot 455 (note 04b)
+                };
+                assert_eq!(p.mode(), expected, "scx {scx}, mode at dot {dot}");
+            }
+        }
+    }
+
+    #[test]
+    fn e03_11_mode_transitions_from_3_to_0_at_the_exact_dot() {
+        for scx in 0..=7u8 {
+            let mut p = Ppu::default();
+            let vram = [0x00u8; 0x2000];
+            let mode3_end = MODE2_DOTS + MODE3_LEN - 1 + u32::from(scx); // last dot of mode 3 (E03_11 spec)
+            for dot in 0..=mode3_end {
+                if dot > 0 {
+                    p.tick();
+                }
+                p.fetch_pixels(&vram, scx, 0);
+            }
+            assert_eq!(
+                p.mode(),
+                3,
+                "scx {scx}: mode is still 3 on its last dot {mode3_end}"
+            );
+            p.tick(); // dot mode3_end + 1: the exact transition dot from mode 3 to mode 0 (E03_11 spec)
+            assert_eq!(p.mode(), 0, "scx {scx}: mode is 0 on dot {}", mode3_end + 1);
+            for dot in mode3_end + 2..LINE_DOTS {
+                p.tick(); // mode 0 runs from the transition dot to dot 455 (note 04b)
+                assert_eq!(p.mode(), 0, "scx {scx}, mode at dot {dot}");
+            }
+        }
+    }
+
+    #[test]
+    fn e03_11_mid_line_scx_write_does_not_change_the_fine_scroll() {
+        let mut p = Ppu::default();
+        let vram = vram_with_tile(0x55, 0xCC); // uniform tile row: only the bit position matters (E03_03 spec)
+        let mut last_mode3_dot = 0u32;
+        for dot in 0..LINE_DOTS {
+            if dot > 0 {
+                p.tick();
+            }
+            // The low bits of SCX are latched on the first dot of mode 3 (dot 80); a mid-line write
+            // changes only the high bits, which keep being re-read per tile fetch (E03_11 spec).
+            let scx = if dot <= MODE2_DOTS { 3u8 } else { 19 };
+            p.fetch_pixels(&vram, scx, 0);
+            if p.mode() == 3 {
+                last_mode3_dot = dot;
+            }
+        }
+        assert_eq!(p.pixels_output, LINE_PIXELS); // all 160 pixels of the line are output (E03_11 spec)
+        for x in 0..LINE_PIXELS as usize {
+            // fine scroll stays at the value captured on dot 80: a shift of 3 (E03_11 spec)
+            assert_eq!(
+                p.line_buf[x],
+                expected_color(0x55, 0xCC, x + 3),
+                "pixel {x}"
+            );
+        }
+        // mode 3 still lasts 172 + 3 dots: it ends on dot 254 (E03_11 spec)
+        assert_eq!(last_mode3_dot, MODE2_DOTS + MODE3_LEN + 3 - 1);
     }
 }
