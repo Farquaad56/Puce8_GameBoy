@@ -77,6 +77,9 @@ pub struct Dmg {
     pub input: Input,
     /// Dot phase within the current M-cycle; 0..3, wraps to 0 every 4 dots (decision A_01).
     dot_phase: u8,
+    /// Previous value of the STAT interrupt line for rising-edge detection (E03_08): IF bit 1
+    /// is set only on a 0 -> 1 transition; while the line stays high no new request is raised.
+    stat_line_prev: bool,
 }
 
 impl Dmg {
@@ -96,6 +99,7 @@ impl Dmg {
             media: Media,
             input: Input::default(),
             dot_phase: 0,
+            stat_line_prev: false, // no STAT request pending at power-up (E03_08)
         };
         dmg.reset();
         Ok(dmg)
@@ -106,6 +110,19 @@ impl Dmg {
     #[doc(hidden)]
     pub fn debug_set_ly_override(&mut self, v: Option<u8>) {
         self.bus.debug_set_ly_override(v);
+    }
+
+    /// Value of the STAT interrupt line from the current PPU mode and registers (E03_08):
+    /// each source contributes only when its select bit in STAT ($FF41) is set, OR'ed into one
+    /// shared line (note 04a "Ligne d'interrupt STAT"). The exact dot of the LYC compare and
+    /// the STAT write quirk are UNKNOWN - to confirm: not implemented.
+    fn stat_line(&self) -> bool {
+        let stat = self.bus.io[0x41]; // STAT ($FF41): select bits 6..3 as written (E03_08 spec)
+        let mode = self.ppu.mode();
+        (stat & 0x40 != 0 && self.ppu.ly() == self.bus.io[0x45]) // bit 6: LYC == LY coincidence
+            || (stat & 0x20 != 0 && mode == 2) // bit 5: OAM scan
+            || (stat & 0x10 != 0 && mode == 1) // bit 4: VBlank
+            || (stat & 0x08 != 0 && mode == 0) // bit 3: HBlank
     }
 }
 
@@ -119,6 +136,8 @@ impl Machine for Dmg {
         self.audio.head = 0;
         self.audio.tail = 0;
         self.dot_phase = 0;
+        // The STAT interrupt line is low at power-up: no pending request (E03_08).
+        self.stat_line_prev = false;
     }
 
     fn tick(&mut self) {
@@ -142,10 +161,20 @@ impl Machine for Dmg {
         // raises the IF vblank bit once per frame (note 02b "vblank", note 01_timing.md).
         let was_vblank = self.ppu.vblank();
         let line_changed = self.ppu.tick();
-        self.bus.ly = self.ppu.ly();
+        self.bus.ly = self.ppu.ly(); // LY ($FF44) mirror (E03_01); the coincidence flag reads it too (E03_08)
+        self.bus.ppu_mode = self.ppu.mode(); // PPU mode mirror for the STAT readback (E03_08 spec, decision A_02)
         if line_changed && !was_vblank && self.ppu.vblank() {
             self.bus.io[0x0F] |= 0x01; // IF bit 0: vblank request (note 02b)
         }
+        // STAT interrupt line, rising-edge detection (E03_08): the request is raised only on a
+        // 0 -> 1 transition of the shared line; while it stays high no new request is emitted
+        // ("STAT blocking", note 04a "Ligne d'interrupt STAT"). The previous value is kept in
+        // stat_line_prev and compared after every step.
+        let line_now = self.stat_line();
+        if line_now && !self.stat_line_prev {
+            self.bus.io[0x0F] |= 0x02; // IF bit 1: STAT request (note 04a)
+        }
+        self.stat_line_prev = line_now;
     }
 
     fn framebuffer(&self) -> &[u8; FRAMEBUFFER_SIZE] {
@@ -472,5 +501,88 @@ mod tests {
         dmg.debug_set_ly_override(None); // removes the override (call compiles)
         dmg.bus.ly = 0x37; // sentinel different from 0x90: normal LY logic applies again
         assert_eq!(dmg.bus.read(0xFF44), 0x37); // not forced anymore (no specific PPU LY asserted)
+    }
+
+    /// Count rising edges of the shared STAT line over `n` ticks, starting from a cleared request.
+    /// Each observed request is acknowledged by clearing IF bit 1, so while the line stays high no
+    /// new request is raised and only fresh edges are counted (note 04a "Ligne d'interrupt STAT").
+    fn count_stat_raises(dmg: &mut Dmg, n: u32) -> u32 {
+        dmg.bus.io[0x0F] &= !0x02; // clear the pending request (as a write to IF bit 1 would)
+        let mut raises = 0u32;
+        for _ in 0..n {
+            let before = dmg.bus.io[0x0F] & 0x02;
+            dmg.tick();
+            if before == 0 && dmg.bus.io[0x0F] & 0x02 != 0 {
+                raises += 1; // a rising edge of the STAT line (E03_08)
+                dmg.bus.io[0x0F] &= !0x02; // acknowledge so the next edge is counted again
+            }
+        }
+        raises
+    }
+
+    #[test]
+    fn e03_08_lyc_coincidence_raises_if_bit1_once() {
+        use crate::video::LINE_DOTS;
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        // At power-up LY = 0 and LYC = 0: the coincidence source is active from the first dot.
+        // Enable only bit 6 (LYC == LY) so no other source can contribute (E03_08 spec).
+        dmg.bus.write(0xFF41, 0x40);
+        let raises = count_stat_raises(&mut dmg, LINE_DOTS * 2); // two lines: coincidence active only on line 0
+                                                                 // One rising edge at power-up; the line stays high through line 0 (LY == LYC == 0),
+                                                                 // then falls when LY -> 1 and never re-rises over these two lines.
+        assert_eq!(raises, 1); // a single request for the sustained-high coincidence window (note 04a "LYC")
+    }
+
+    #[test]
+    fn e03_08_each_source_raises_if_bit1_once() {
+        use crate::video::LINE_DOTS;
+        // Each of the four select bits, alone, produces exactly one rising edge over a window that
+        // captures its single high period (E03_08 spec: "each of the four sources raises IF bit 1 once").
+        let cases = [
+            (0x40u8, LINE_DOTS * 2), // coincidence: high all of line 0 (LY == LYC == 0), falls on line 1
+            (0x20, LINE_DOTS - 1), // mode 2: power-up OAM window; stop before the wrap re-enters mode 2
+            (0x10, FRAME_DOTS),    // VBlank: one rise entering vblank per frame
+            (0x08, LINE_DOTS),     // HBlank: one rise on line 0's HBlank
+        ];
+        for (stat, n) in cases {
+            let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+            dmg.bus.write(0xFF41, stat); // enable only this source
+            assert_eq!(
+                count_stat_raises(&mut dmg, n),
+                1,
+                "source {stat:02X} must raise once"
+            );
+        }
+    }
+
+    #[test]
+    fn e03_08_two_overlapping_sources_raise_if_bit1_once() {
+        use crate::video::{LINE_DOTS, MODE2_DOTS};
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        // Enable coincidence (bit 6) and mode 2 (bit 5): both are high on line 0's OAM scan, so the
+        // shared line is one continuous window from tick 1 through line 1's OAM scan ("STAT blocking",
+        // note 04a). It falls only when line 1 leaves mode 3 and coincidence is false (LY = 1 != LYC = 0).
+        dmg.bus.write(0xFF41, 0x60);
+        let raises = count_stat_raises(&mut dmg, LINE_DOTS + MODE2_DOTS - 1); // stop before the fall at line 1 dot 80
+        assert_eq!(raises, 1); // two overlapping sources merge into a single request (E03_08 spec)
+    }
+
+    #[test]
+    fn e03_08_new_request_after_the_line_fell() {
+        use crate::video::{LINE_DOTS, MODE2_DOTS};
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        // Enable only mode 2 (OAM scan): the line is high for dots 0..79 of each visible line.
+        dmg.bus.write(0xFF41, 0x20);
+        let raises = count_stat_raises(&mut dmg, LINE_DOTS * 3); // 1 edge at the STAT write (power-up is in mode 2) + 1 per line wrap at ticks 456, 912, 1368
+        assert_eq!(raises, 4); // a new request after each time the line fell (E03_08 spec)
+        dmg.bus.io[0x0F] &= !0x02;
+        for _ in 0..(LINE_DOTS - MODE2_DOTS) {
+            dmg.tick(); // stay within mode 3/0 of this line: no rising edge, bit stays clear
+        }
+        assert_eq!(dmg.bus.io[0x0F] & 0x02, 0x00); // still blocked while the line is low...
+        for _ in 0..(LINE_DOTS - MODE2_DOTS) {
+            dmg.tick(); // ...until the next OAM scan starts: one new request (E03_08 spec)
+        }
+        assert_eq!(dmg.bus.io[0x0F] & 0x02, 0x02);
     }
 }

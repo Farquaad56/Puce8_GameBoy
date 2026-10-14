@@ -32,6 +32,9 @@ pub struct Bus {
     /// Current PPU scanline = LY ($FF44), owned by the PPU and mirrored here so reads are
     /// side-effect-free; writes to $FF44 are ignored (E03_01, note 04a "LY").
     pub ly: u8,
+    /// Current PPU mode 0-3, mirrored from the PPU for the STAT ($FF41) readback so reads stay
+    /// side-effect-free (decision A_02, E03_08); updated by Machine::tick.
+    pub ppu_mode: u8,
     /// Debug tool for trace comparison, task C01_49: when Some(v), every read of $FF44
     /// returns v instead of the PPU scanline; None (default) keeps normal behaviour.
     ly_override: Option<u8>,
@@ -52,7 +55,8 @@ impl Bus {
             serial: [0x00; 256],
             serial_len: 0,
             ly: 0,                   // LY ($FF44) post-boot value (note 08, C01_15)
-            ly_override: None,       // no debug override by default (C01_49)
+            ppu_mode: 2, // PPU mode at the start of line 0 is OAM scan (E03_01); Machine::tick keeps it current
+            ly_override: None, // no debug override by default (C01_49)
             timer: Timer::default(), // DIV/TIMA/TMA/TAC are set in reset() (note 08)
         }
     }
@@ -66,6 +70,7 @@ impl Bus {
         self.hram.fill(0x00);
         self.serial_len = 0; // no captured serial bytes at power-up (C01_03)
         self.ly = 0; // LY ($FF44) post-boot value (note 08, C01_15)
+        self.ppu_mode = 2; // PPU mode restarts at the start of line 0: OAM scan (E03_01)
         self.timer.reset(); // DIV/TIMA/TMA/TAC post-boot values (note 08, note 01b)
 
         // Unassigned IO reads $FF by default (decision A_02), then the documented
@@ -139,11 +144,12 @@ impl Bus {
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize],
             0xFEA0..=0xFEFF => 0x00, // unusable range: $00 on DMG outside OAM block (note 03a)
             0xFF44 => self.ly_override.unwrap_or(self.ly), // LY ($FF44): PPU-owned scanline, read-only (C01_15); debug override wins (C01_49)
+            0xFF41 => self.stat_read(), // STAT ($FF41): composed readback, side-effect-free (E03_08 spec)
             0xFF0F => 0xE0 | (self.io[0x0F] & 0x1F), // IF ($FF0F): bits 5-7 read as 1 (task C01_32)
-            0xFF04 => self.timer.div(),              // DIV ($FF04, note 01b)
-            0xFF05 => self.timer.tima(),             // TIMA ($FF05, note 01b)
-            0xFF06 => self.timer.tma(),              // TMA ($FF06, note 01b)
-            0xFF07 => self.timer.tac(),              // TAC ($FF07, note 01b)
+            0xFF04 => self.timer.div(), // DIV ($FF04, note 01b)
+            0xFF05 => self.timer.tima(), // TIMA ($FF05, note 01b)
+            0xFF06 => self.timer.tma(), // TMA ($FF06, note 01b)
+            0xFF07 => self.timer.tac(), // TAC ($FF07, note 01b)
             0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.io[IO_SIZE - 1], // IE (decision A_02)
@@ -173,6 +179,7 @@ impl Bus {
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize] = val,
             0xFEA0..=0xFEFF => {} // unusable range: writes are ignored (note 03a)
             0xFF44 => {} // LY ($FF44) is read-only; writes are ignored (C01_15, note 04a "LY")
+            0xFF41 => self.io[0x41] = val & 0x78, // STAT ($FF41): only the select bits 6..3 are writable (E03_08 spec); bit 2 and bits 1..0 read back live; LYC ($FF45) is plain R/W through the IO file
             0xFF0F => self.io[0x0F] = val & 0x1F, // IF ($FF0F): only bits 0-4 writable (task C01_32)
             0xFF04 => self.timer.write_div(val), // DIV ($FF04): any value resets the counter (note 01b)
             0xFF05 => self.timer.write_tima(val), // TIMA ($FF05, note 01b)
@@ -211,6 +218,18 @@ impl Bus {
         self.io[0x0F] &= !(mask & 0x1F);
     }
 
+    /// STAT ($FF41) readback (E03_08): bit 7 reads as 1; bits 6..3 are the interrupt select
+    /// bits as written; bit 2 is the coincidence flag, set while LY == LYC and updated
+    /// continuously (note 04a "LYC"); bits 1..0 report the current PPU mode. The stored byte
+    /// holds only the writable select bits, so the readback composes them with the live state.
+    pub fn stat_read(&self) -> u8 {
+        let mut v = 0x80 | (self.io[0x41] & 0x78); // bit 7 fixed at 1; select bits as written
+        if self.ly == self.io[0x45] {
+            v |= 0x04; // coincidence flag: LY ($FF44) equals LYC ($FF45) (note 04a "LYC")
+        }
+        v | (self.ppu_mode & 0x03) // bits 1..0: current PPU mode, mirrored by Machine::tick
+    }
+
     /// Drain up to `out.len()` captured serial bytes, oldest first (C01_03); returns the
     /// number of bytes drained. The buffer is a fixed ring: no allocation.
     pub fn take_serial(&mut self, out: &mut [u8]) -> usize {
@@ -237,11 +256,12 @@ impl Bus {
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize],
             0xFEA0..=0xFEFF => 0x00, // unusable range: $00 on DMG outside OAM block (note 03a)
             0xFF44 => self.ly_override.unwrap_or(self.ly), // LY ($FF44): PPU-owned scanline, read-only (C01_15); debug override wins (C01_49)
+            0xFF41 => self.stat_read(), // STAT ($FF41): composed readback, side-effect-free (E03_08 spec)
             0xFF0F => 0xE0 | (self.io[0x0F] & 0x1F), // IF ($FF0F): bits 5-7 read as 1 (task C01_32)
-            0xFF04 => self.timer.div(),              // DIV ($FF04, note 01b)
-            0xFF05 => self.timer.tima(),             // TIMA ($FF05, note 01b)
-            0xFF06 => self.timer.tma(),              // TMA ($FF06, note 01b)
-            0xFF07 => self.timer.tac(),              // TAC ($FF07, note 01b)
+            0xFF04 => self.timer.div(), // DIV ($FF04, note 01b)
+            0xFF05 => self.timer.tima(), // TIMA ($FF05, note 01b)
+            0xFF06 => self.timer.tma(), // TMA ($FF06, note 01b)
+            0xFF07 => self.timer.tac(), // TAC ($FF07, note 01b)
             0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.io[IO_SIZE - 1], // IE (decision A_02)
@@ -667,5 +687,63 @@ mod tests {
             "second dispatch to vblank: PC {:#06x}",
             dmg.cpu.pc
         );
+    }
+
+    #[test]
+    fn e03_08_stat_readback_composes_bit7_flag_and_mode() {
+        let mut bus = Bus::new(vec![0xA5; 0x150]); // ROM-only cart, header present (decision A_06)
+        bus.reset(); // post-boot STAT value $85 (note 08)
+        assert_eq!(bus.io[0x41], 0x85); // raw post-boot value stored in the IO file, not masked by the write path
+                                        // Bit 7 reads as 1; select bits 6..3 from $85 & 0x78 = 0; bit 2 = coincidence flag (LY=0 == LYC=0); mode bits from the mirror.
+        assert_eq!(bus.read(0xFF41), 0x80 | 0x04 | 0b10); // $8C: bit7 + no select bits + LYC flag + mode 2 at line start
+        bus.write(0xFF41, 0x3F); // only bits 6..3 are writable (E03_08 spec)
+        assert_eq!(bus.io[0x41], 0x38); // stored select bits: b5+b4+b3 set, bit7 and bit2 not stored
+        bus.ly = 0x90; // LY no longer equals LYC ($00): the flag clears continuously (note 04a "LYC")
+        assert_eq!(bus.read(0xFF41), 0x80 | 0x38 | 0b10); // bit7 + select bits as written, flag clear
+    }
+
+    #[test]
+    fn e03_08_stat_write_masks_bits_2_1_and_0() {
+        let mut bus = Bus::new(vec![0xA5; 0x150]);
+        bus.reset();
+        for val in [0xFFu8, 0x7F, 0x43, 0x0C] {
+            bus.write(0xFF41, val);
+            assert_eq!(bus.io[0x41], val & 0x78); // bits 2..0 and bit 7 are not stored (E03_08 spec)
+        }
+        // The readback still reports the live state: bit 7 = 1, flag from LY/LYC, mode from the mirror.
+        bus.ly = 0x90;
+        assert_eq!(bus.read(0xFF41), 0x80 | (bus.io[0x41] & 0x78) | 0b10); // select bits as written, flag clear
+    }
+
+    #[test]
+    fn e03_08_lyc_is_plain_rw_at_ff45() {
+        let mut bus = Bus::new(vec![0xA5; 0x150]);
+        bus.reset(); // LYC post-boot value $00 (note 08)
+        assert_eq!(bus.read(0xFF45), 0x00);
+        bus.write(0xFF45, 0xC3); // R/W: the full byte is stored (E03_08 spec)
+        assert_eq!(bus.io[0x45], 0xC3);
+        assert_eq!(bus.read(0xFF45), 0xC3);
+    }
+
+    #[test]
+    fn e03_08_coincidence_flag_set_and_cleared_when_ly_equals_lyc() {
+        let mut bus = Bus::new(vec![0xA5; 0x150]);
+        bus.reset(); // LY = 0, LYC = 0: coincidence at power-up (note 04a "LYC")
+        assert_eq!(bus.read(0xFF41) & 0x04, 0x04); // flag set while LY == LYC
+        bus.ly = 5; // the PPU advances past the compare value: the flag clears continuously
+        assert_eq!(bus.read(0xFF41) & 0x04, 0x00);
+        bus.write(0xFF45, 5); // writing LYC to the current line sets it again (note 04a "LYC")
+        assert_eq!(bus.read(0xFF41) & 0x04, 0x04);
+    }
+
+    #[test]
+    fn e03_08_stat_readback_reports_mode_bits() {
+        let mut bus = Bus::new(vec![0xA5; 0x150]);
+        bus.reset(); // mode mirror starts at OAM scan (E03_01)
+        assert_eq!(bus.read(0xFF41) & 0x03, 0b10); // mode 2 at the start of line 0
+        for (mode, expected) in [(0u8, 0b00), (1, 0b01), (2, 0b10), (3, 0b11)] {
+            bus.ppu_mode = mode; // Machine::tick keeps the mirror current (decision A_02)
+            assert_eq!(bus.read(0xFF41) & 0x03, expected); // bits 1..0 report the PPU mode (E03_08 spec)
+        }
     }
 }
