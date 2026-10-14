@@ -228,6 +228,20 @@ impl Ppu {
     pub fn vblank(&self) -> bool {
         self.ly >= VBLANK_FIRST_LINE
     }
+
+    /// True while the CPU may access VRAM ($8000-$9FFF) (E03_10 spec): every mode except 3;
+    /// when the LCD is off the PPU mode reads as 0, so access is free. The PPU's own reads are
+    /// never blocked: they go through the raw bus arrays, not Bus::read (decision A_01).
+    pub(crate) fn vram_accessible(&self) -> bool {
+        self.mode != 3 // LCD off forces mode 0, so this covers it too (E03_10 spec)
+    }
+
+    /// True while the CPU may access OAM ($FE00-$FE9F) (E03_10 spec): modes 0 and 1 only;
+    /// when the LCD is off the PPU mode reads as 0, so access is free. The PPU's own reads are
+    /// never blocked: they go through the raw bus arrays, not Bus::read (decision A_01).
+    pub(crate) fn oam_accessible(&self) -> bool {
+        self.mode < 2 // LCD off forces mode 0, so this covers it too (E03_10 spec)
+    }
 }
 
 #[cfg(test)]
@@ -552,5 +566,50 @@ mod tests {
         for (i, &s) in sprites.iter().enumerate() {
             assert_eq!(s, i as u8); // entries 0-9 win; entry 10 is dropped
         }
+    }
+
+    /// Drive a PPU to an absolute dot position of the frame: line `ly`, dot `dot` (E03_10).
+    fn ppu_at(ly: u8, dot: u32) -> Ppu {
+        let mut p = Ppu::default();
+        for _ in 0..(u32::from(ly) * LINE_DOTS + dot) {
+            p.tick();
+        }
+        p
+    }
+
+    #[test]
+    fn e03_10_vram_accessible_in_modes_0_1_and_2() {
+        assert!(ppu_at(5, 400).vram_accessible()); // mode 0: HBlank (E03_10 spec)
+        assert!(ppu_at(150, 100).vram_accessible()); // mode 1: VBlank (E03_10 spec)
+        assert!(ppu_at(5, 40).vram_accessible()); // mode 2: OAM scan (E03_10 spec)
+    }
+
+    #[test]
+    fn e03_10_vram_blocked_in_mode_3() {
+        assert!(!ppu_at(5, 200).vram_accessible()); // mode 3: pixels (E03_10 spec)
+    }
+
+    #[test]
+    fn e03_10_oam_accessible_in_modes_0_and_1() {
+        assert!(ppu_at(5, 400).oam_accessible()); // mode 0: HBlank (E03_10 spec)
+        assert!(ppu_at(150, 100).oam_accessible()); // mode 1: VBlank (E03_10 spec)
+    }
+
+    #[test]
+    fn e03_10_oam_blocked_in_modes_2_and_3() {
+        assert!(!ppu_at(5, 40).oam_accessible()); // mode 2: OAM scan (E03_10 spec)
+        assert!(!ppu_at(5, 200).oam_accessible()); // mode 3: pixels (E03_10 spec)
+    }
+
+    #[test]
+    fn e03_10_vram_and_oam_free_when_lcd_off() {
+        let mut p = Ppu::default();
+        for _ in 0..(LINE_DOTS * 5 + 200) {
+            p.tick(); // mid mode 3 of line 5
+        }
+        assert!(!p.vram_accessible()); // blocked while the LCD is on and in mode 3
+        p.set_lcd_enabled(0x11); // LCDC bit 7 -> 0: LCD off (E03_09 spec)
+        assert!(p.vram_accessible()); // free access when the LCD is off (E03_10 spec)
+        assert!(p.oam_accessible()); // free access when the LCD is off (E03_10 spec)
     }
 }

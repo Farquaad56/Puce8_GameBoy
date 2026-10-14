@@ -35,6 +35,10 @@ pub struct Bus {
     /// Current PPU mode 0-3, mirrored from the PPU for the STAT ($FF41) readback so reads stay
     /// side-effect-free (decision A_02, E03_08); updated by Machine::tick.
     pub ppu_mode: u8,
+    /// CPU access to VRAM ($8000-$9FFF) allowed (E03_10): mirrored from the PPU by Machine::tick.
+    vram_open: bool,
+    /// CPU access to OAM ($FE00-$FE9F) allowed (E03_10): mirrored from the PPU by Machine::tick.
+    oam_open: bool,
     /// Debug tool for trace comparison, task C01_49: when Some(v), every read of $FF44
     /// returns v instead of the PPU scanline; None (default) keeps normal behaviour.
     ly_override: Option<u8>,
@@ -56,6 +60,8 @@ impl Bus {
             serial_len: 0,
             ly: 0,                   // LY ($FF44) post-boot value (note 08, C01_15)
             ppu_mode: 2, // PPU mode at the start of line 0 is OAM scan (E03_01); Machine::tick keeps it current
+            vram_open: true, // VRAM access allowed until Machine::tick mirrors the PPU state (E03_10)
+            oam_open: true, // OAM access allowed until Machine::tick mirrors the PPU state (E03_10)
             ly_override: None, // no debug override by default (C01_49)
             timer: Timer::default(), // DIV/TIMA/TMA/TAC are set in reset() (note 08)
         }
@@ -71,6 +77,8 @@ impl Bus {
         self.serial_len = 0; // no captured serial bytes at power-up (C01_03)
         self.ly = 0; // LY ($FF44) post-boot value (note 08, C01_15)
         self.ppu_mode = 2; // PPU mode restarts at the start of line 0: OAM scan (E03_01)
+        self.vram_open = true; // VRAM access allowed until Machine::tick mirrors the PPU state (E03_10)
+        self.oam_open = true; // OAM access allowed until Machine::tick mirrors the PPU state (E03_10)
         self.timer.reset(); // DIV/TIMA/TMA/TAC post-boot values (note 08, note 01b)
 
         // Unassigned IO reads $FF by default (decision A_02), then the documented
@@ -130,7 +138,13 @@ impl Bus {
     pub fn read(&self, addr: u16) -> u8 {
         match addr {
             0x0000..=0x7FFF => self.rom.get(addr as usize).copied().unwrap_or(0xFF), // ROM-only cart (decision A_06): past the image is open bus
-            0x8000..=0x9FFF => self.vram[(addr - 0x8000) as usize],
+            0x8000..=0x9FFF => {
+                if self.vram_open {
+                    self.vram[(addr - 0x8000) as usize]
+                } else {
+                    0xFF // blocked by the PPU mode: reads $FF (E03_10 spec)
+                }
+            }
             0xA000..=0xBFFF => 0xFF, // cartridge SRAM: unmapped on a ROM-only cart (decision A_06)
             0xC000..=0xDFFF => {
                 // WRAM: lower 14 bits of the address index into the 8 KiB array.
@@ -141,7 +155,13 @@ impl Bus {
                 // the current WRAM bank (C000-C7FF on DMG) exactly like a read (note 03a "Echo RAM").
                 self.wram[(addr as usize) & 0x1FFF]
             }
-            0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize],
+            0xFE00..=0xFE9F => {
+                if self.oam_open {
+                    self.oam[(addr - 0xFE00) as usize]
+                } else {
+                    0xFF // blocked by the PPU mode: reads $FF (E03_10 spec)
+                }
+            }
             0xFEA0..=0xFEFF => 0x00, // unusable range: $00 on DMG outside OAM block (note 03a)
             0xFF44 => self.ly_override.unwrap_or(self.ly), // LY ($FF44): PPU-owned scanline, read-only (C01_15); debug override wins (C01_49)
             0xFF41 => self.stat_read(), // STAT ($FF41): composed readback, side-effect-free (E03_08 spec)
@@ -163,12 +183,23 @@ impl Bus {
         self.ly_override = v;
     }
 
+    /// Mirror the PPU's CPU access state for VRAM and OAM (E03_10): called by Machine::tick
+    /// after every PPU step, and at power-up. The PPU's own reads use the raw arrays directly.
+    pub(crate) fn set_video_access(&mut self, vram_open: bool, oam_open: bool) {
+        self.vram_open = vram_open;
+        self.oam_open = oam_open;
+    }
+
     /// Write a byte to the bus (decision A_02). ROM and unmapped/unusable ranges are
     /// ignored; PPU-mode blocking and OAM DMA gating arrive with E03.
     pub fn write(&mut self, addr: u16, val: u8) {
         match addr {
             0x0000..=0x7FFF => {} // ROM is read-only (note 03a "Adresse bus")
-            0x8000..=0x9FFF => self.vram[(addr - 0x8000) as usize] = val,
+            0x8000..=0x9FFF => {
+                if self.vram_open {
+                    self.vram[(addr - 0x8000) as usize] = val;
+                } // blocked by the PPU mode: writes are ignored (E03_10 spec)
+            }
             0xA000..=0xBFFF => {} // cartridge SRAM: unmapped on a ROM-only cart (decision A_06)
             0xC000..=0xDFFF => self.wram[(addr - 0xC000) as usize] = val,
             0xE000..=0xFDFF => {
@@ -176,7 +207,11 @@ impl Bus {
                 // the current WRAM bank (C000-C7FF on DMG) exactly like a read (note 03a "Echo RAM").
                 self.wram[(addr as usize) & 0x1FFF] = val;
             }
-            0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize] = val,
+            0xFE00..=0xFE9F => {
+                if self.oam_open {
+                    self.oam[(addr - 0xFE00) as usize] = val;
+                } // blocked by the PPU mode: writes are ignored (E03_10 spec)
+            }
             0xFEA0..=0xFEFF => {} // unusable range: writes are ignored (note 03a)
             0xFF44 => {} // LY ($FF44) is read-only; writes are ignored (C01_15, note 04a "LY")
             0xFF41 => self.io[0x41] = val & 0x78, // STAT ($FF41): only the select bits 6..3 are writable (E03_08 spec); bit 2 and bits 1..0 read back live; LYC ($FF45) is plain R/W through the IO file

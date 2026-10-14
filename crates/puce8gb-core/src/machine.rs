@@ -142,6 +142,10 @@ impl Machine for Dmg {
         self.dot_phase = 0;
         // The STAT interrupt line is low at power-up: no pending request (E03_08).
         self.stat_line_prev = false;
+        // Mirror the PPU's CPU access state for VRAM/OAM at power-up and reset (E03_10);
+        // Dmg::new ends by calling this, so both paths are covered.
+        self.bus
+            .set_video_access(self.ppu.vram_accessible(), self.ppu.oam_accessible());
     }
 
     fn tick(&mut self) {
@@ -177,6 +181,8 @@ impl Machine for Dmg {
         }
         self.bus.ly = self.ppu.ly(); // LY ($FF44) mirror (E03_01); the coincidence flag reads it too (E03_08)
         self.bus.ppu_mode = self.ppu.mode(); // PPU mode mirror for the STAT readback (E03_08 spec, decision A_02)
+        self.bus
+            .set_video_access(self.ppu.vram_accessible(), self.ppu.oam_accessible()); // CPU access gate (E03_10)
         if line_changed && !was_vblank && self.ppu.vblank() {
             self.bus.io[0x0F] |= 0x01; // IF bit 0: vblank request (note 02b)
         }
@@ -731,5 +737,88 @@ mod tests {
             dmg.tick();
         }
         assert_eq!(dmg.ppu.line_sprites(), &[0]); // the new OAM value is selected (E03_02 spec)
+    }
+
+    #[test]
+    fn e03_10_vram_and_oam_blocked_in_mode_3() {
+        use crate::video::{LINE_DOTS, MODE2_DOTS, MODE3_LEN};
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        // Line 5, dot in mode 3 (pixels): 80 <= dot < 80+172.
+        for _ in 0..(LINE_DOTS * 5 + MODE2_DOTS + MODE3_LEN / 2) {
+            dmg.tick();
+        }
+        assert_eq!(dmg.ppu.mode(), 3); // sanity: we are in mode 3 (E03_10 spec)
+                                       // VRAM blocked: reads $FF, writes ignored.
+        dmg.bus.write(0x8000, 0xA5);
+        assert_eq!(dmg.bus.read(0x8000), 0xFF); // blocked read (E03_10 spec)
+        assert_eq!(dmg.bus.vram[0], 0x00); // write ignored: underlying array unchanged (E03_10 spec)
+                                           // OAM blocked too (mode >= 2): reads $FF, writes ignored.
+        dmg.bus.write(0xFE00, 0x90);
+        assert_eq!(dmg.bus.read(0xFE00), 0xFF); // blocked read (E03_10 spec)
+        assert_eq!(dmg.bus.oam[0], 0x00); // write ignored: underlying array unchanged (E03_10 spec)
+    }
+
+    #[test]
+    fn e03_10_oam_blocked_vram_free_in_mode_2() {
+        use crate::video::{LINE_DOTS, MODE2_DOTS};
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        // Line 5, dot in mode 2 (OAM scan): dot < 80.
+        for _ in 0..(LINE_DOTS * 5 + MODE2_DOTS / 2) {
+            dmg.tick();
+        }
+        assert_eq!(dmg.ppu.mode(), 2); // sanity: we are in mode 2 (E03_10 spec)
+                                       // VRAM still accessible in mode 2.
+        dmg.bus.write(0x8000, 0xA5);
+        assert_eq!(dmg.bus.read(0x8000), 0xA5); // free access (E03_10 spec)
+                                                // OAM blocked: reads $FF, writes ignored.
+        dmg.bus.write(0xFE00, 0x90);
+        assert_eq!(dmg.bus.read(0xFE00), 0xFF); // blocked read (E03_10 spec)
+        assert_eq!(dmg.bus.oam[0], 0x00); // write ignored: underlying array unchanged (E03_10 spec)
+    }
+
+    #[test]
+    fn e03_10_vram_and_oam_free_in_modes_0_and_1() {
+        use crate::video::{LINE_DOTS, MODE2_DOTS, MODE3_LEN};
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        // Mode 0 (HBlank): line 5, dot >= 80+172.
+        let target0 = LINE_DOTS * 5 + MODE2_DOTS + MODE3_LEN;
+        for _ in 0..target0 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.ppu.mode(), 0); // sanity: mode 0 (E03_10 spec)
+        dmg.bus.write(0x8000, 0xA5);
+        assert_eq!(dmg.bus.read(0x8000), 0xA5); // VRAM free (E03_10 spec)
+        dmg.bus.write(0xFE00, 0x90);
+        assert_eq!(dmg.bus.read(0xFE00), 0x90); // OAM free (E03_10 spec)
+                                                // Mode 1 (VBlank): line 150.
+        let target1 = LINE_DOTS * 150 + MODE2_DOTS;
+        for _ in 0..(target1 - target0) {
+            dmg.tick();
+        }
+        assert_eq!(dmg.ppu.mode(), 1); // sanity: mode 1 (E03_10 spec)
+        dmg.bus.write(0x8000, 0x3C);
+        assert_eq!(dmg.bus.read(0x8000), 0x3C); // VRAM free (E03_10 spec)
+        dmg.bus.write(0xFE00, 0x88);
+        assert_eq!(dmg.bus.read(0xFE00), 0x88); // OAM free (E03_10 spec)
+    }
+
+    #[test]
+    fn e03_10_vram_and_oam_free_when_lcd_off() {
+        use crate::video::{LINE_DOTS, MODE2_DOTS, MODE3_LEN};
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        // First get into mode 3 (pixels) with the LCD on.
+        for _ in 0..(LINE_DOTS * 5 + MODE2_DOTS + MODE3_LEN / 2) {
+            dmg.tick();
+        }
+        assert_eq!(dmg.ppu.mode(), 3); // sanity: mode 3, LCD on (E03_10 spec)
+        assert_eq!(dmg.bus.read(0x8000), 0xFF); // blocked while in mode 3 (E03_10 spec)
+                                                // Turn the LCD off via LCDC ($FF40): bit 7 -> 0. The PPU mode reads as 0, so access is free.
+        dmg.bus.write(0xFF40, 0x11); // clear bit 7 (E03_09 spec)
+        dmg.tick(); // apply the LCDC change: LCD off, mode reads 0 (E03_09 spec)
+        assert_eq!(dmg.ppu.mode(), 0); // LCD off: mode reads 0 (note 04a "STAT")
+        dmg.bus.write(0x8000, 0xA5);
+        assert_eq!(dmg.bus.read(0x8000), 0xA5); // VRAM free when the LCD is off (E03_10 spec)
+        dmg.bus.write(0xFE00, 0x90);
+        assert_eq!(dmg.bus.read(0xFE00), 0x90); // OAM free when the LCD is off (E03_10 spec)
     }
 }
