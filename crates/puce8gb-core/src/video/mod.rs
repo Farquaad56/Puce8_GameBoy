@@ -52,6 +52,18 @@ pub struct Ppu {
     mode: u8,
     /// LCD and PPU enable = LCDC ($FF40) bit 7 (E03_09 spec): false stops the dot counter.
     lcd_on: bool,
+    /// Mirror of LCDC ($FF40) as written by the CPU (E03_09 spec); bit 2 selects the sprite
+    /// size for the OAM scan (E03_02).
+    lcdc: u8,
+    /// OAM indexes of the sprites selected for the current line by the mode 2 scan, in OAM
+    /// order, at most 10 (E03_02 spec).
+    line_sprites: [u8; 10],
+    /// Number of valid entries in `line_sprites` (E03_02).
+    line_sprite_count: u8,
+    /// Set while the mode 2 OAM scan for the current line is due and not yet performed
+    /// (E03_02): at power-up, on entry to mode 2 of a visible line, and after an LCD
+    /// off -> on restart; cleared by `scan_oam`.
+    oam_scan_pending: bool,
 }
 
 impl Default for Ppu {
@@ -62,6 +74,10 @@ impl Default for Ppu {
             ly: 0,
             mode: 0,
             lcd_on: true, // post-boot LCDC ($FF40) is $91: bit 7 set (note 08)
+            lcdc: 0x91,   // post-boot LCDC value (E03_09 spec); the machine keeps it current
+            line_sprites: [0x00; 10],
+            line_sprite_count: 0,
+            oam_scan_pending: true, // line 0 starts in mode 2 at power-up (E03_01): the scan is due
         };
         p.mode = Self::mode_for(p.ly, p.dot_in_line); // start of line 0 is OAM scan (mode 2)
         p
@@ -76,6 +92,10 @@ impl Ppu {
         self.ly = 0;
         self.mode = Self::mode_for(self.ly, self.dot_in_line); // mode 2 at start of line 0
         self.lcd_on = true; // post-boot LCDC ($FF40) is $91: bit 7 set (note 08)
+        self.lcdc = 0x91; // post-boot LCDC value (E03_09 spec); the machine keeps it current
+        self.line_sprites = [0x00; 10];
+        self.line_sprite_count = 0;
+        self.oam_scan_pending = true; // line 0 starts in mode 2 at power-up (E03_01): the scan is due
     }
 
     /// LCD and PPU enable state (LCDC ($FF40) bit 7, E03_09 spec).
@@ -89,6 +109,7 @@ impl Ppu {
     ///   what is displayed on that first line is UNKNOWN - to confirm (note 04b).
     pub fn set_lcd_enabled(&mut self, lcdc: u8) {
         let on = lcdc & LCDC_ENABLE != 0;
+        self.lcdc = lcdc; // keep the mirror current for the OAM scan (E03_02 spec)
         if on == self.lcd_on {
             return; // no transition: the PPU keeps running or stays stopped
         }
@@ -97,10 +118,12 @@ impl Ppu {
             self.dot_in_line = 0;
             self.ly = 0;
             self.mode = Self::mode_for(self.ly, self.dot_in_line); // normal line (E03_09 spec)
+            self.oam_scan_pending = true; // the restarted line 0 starts in mode 2: its scan is due (E03_02)
         } else {
             self.dot_in_line = 0;
             self.ly = 0;
             self.mode = 0; // STAT mode bits read 0 while the PPU is disabled (note 04a "STAT")
+            self.oam_scan_pending = false; // the line whose scan was due no longer exists (E03_02)
         }
     }
 
@@ -125,8 +148,55 @@ impl Ppu {
         } else {
             self.dot_in_line = next_dot;
         }
+        let prev_mode = self.mode;
         self.mode = Self::mode_for(self.ly, self.dot_in_line);
+        if self.mode == 2 && prev_mode != 2 {
+            // Entry to the OAM scan of a visible line (E03_01): its sprite selection is due.
+            self.oam_scan_pending = true;
+        }
         next_dot == LINE_DOTS
+    }
+
+    /// True while the mode 2 OAM scan of the current line is due and not yet performed
+    /// (E03_02).
+    pub(crate) fn oam_scan_due(&self) -> bool {
+        self.oam_scan_pending
+    }
+
+    /// Perform the mode 2 OAM scan of the current line (E03_02): read the 40 OAM entries
+    /// directly from the bus and keep, in OAM order, at most 10 sprites whose Y coordinate
+    /// covers LY. Only the Y coordinate is tested: a sprite off-screen by X still counts
+    /// toward the limit (E03_02 spec). The scan reads OAM directly; CPU access blocking
+    /// arrives with E03_10.
+    pub(crate) fn scan_oam(&mut self, oam: &[u8]) {
+        let ly = u32::from(self.ly);
+        let height = if self.lcdc & LCDC_OBJ_SIZE != 0 {
+            16
+        } else {
+            8
+        }; // LCDC bit 2 (E03_09 spec)
+        let mut count = 0u8;
+        let (entries, _rest) = oam.as_chunks::<4>(); // OAM is exactly 40 entries of 4 bytes (E03_02 spec)
+        for (i, entry) in entries.iter().enumerate() {
+            let y = u32::from(entry[0]);
+            if ly + 16 >= y && ly + 16 < y + height {
+                // E03_02 spec: (LY+16) >= Y and (LY+16) < Y+height
+                self.line_sprites[count as usize] = i as u8;
+                count += 1;
+                if count == 10 {
+                    break; // at most 10 sprites per line, in OAM order (E03_02 spec)
+                }
+            }
+        }
+        self.line_sprite_count = count;
+        self.oam_scan_pending = false;
+    }
+
+    /// OAM indexes of the sprites selected for the current line by the mode 2 scan, in OAM
+    /// order (E03_02). Consumed by the sprite pixel renderer from E03_04 on.
+    #[allow(dead_code)] // used by the sprite renderer from E03_04 on; tests use it now
+    pub(crate) fn line_sprites(&self) -> &[u8] {
+        &self.line_sprites[..self.line_sprite_count as usize]
     }
 
     /// PPU mode for a given scanline and dot position (E03_01): lines 144..=153 are VBlank
@@ -369,5 +439,118 @@ mod tests {
         assert_eq!(LCDC_OBJ_SIZE, 0x04);
         assert_eq!(LCDC_OBJ_ENABLE, 0x02);
         assert_eq!(LCDC_BG_ENABLE, 0x01);
+    }
+
+    /// OAM image of 40 entries (E03_02 spec): every entry gets the given Y and X coordinates.
+    fn oam_with(y: u8, x: u8) -> [u8; 160] {
+        let mut oam = [0x00u8; 160];
+        for i in 0..40 {
+            oam[i * 4] = y; // byte 0: Y (E03_02 spec)
+            oam[i * 4 + 1] = x; // byte 1: X (E03_02 spec)
+        }
+        oam
+    }
+
+    #[test]
+    fn e03_02_eleven_sprites_on_one_line_give_the_first_ten_in_oam_order() {
+        let mut p = Ppu {
+            ly: 4,
+            ..Ppu::default()
+        }; // LY + 16 = 20 falls in [Y, Y+8) for Y = 20 (E03_02 spec)
+        let mut oam = [0x00u8; 160];
+        for i in 0..11 {
+            // eleven sprites on the line at OAM entries 0-10
+            oam[i * 4] = 20; // Y = 20: shown on LY = 20 (E03_02 spec)
+        }
+        p.scan_oam(&oam);
+        let sprites = p.line_sprites();
+        assert_eq!(sprites.len(), 10); // at most 10 per line, in OAM order (E03_02 spec)
+        for (i, &s) in sprites.iter().enumerate() {
+            assert_eq!(s, i as u8); // the first ten entries win; entry 10 is dropped
+        }
+    }
+
+    #[test]
+    fn e03_02_y16_shows_on_lines_0_through_7_for_8x8() {
+        let mut p = Ppu::default(); // 8x8 sprites: LCDC bit 2 clear (E03_09 spec)
+        let oam = oam_with(16, 40); // one sprite at Y = 16 in every entry (E03_02 spec)
+        for ly in 0..LINES_PER_FRAME {
+            p.ly = ly;
+            p.scan_oam(&oam);
+            let shown = !p.line_sprites().is_empty();
+            assert_eq!(shown, ly < 8, "Y=16 (8x8) on line {ly}"); // lines 0..7 only (E03_02 spec)
+        }
+    }
+
+    #[test]
+    fn e03_02_y_zero_never_shows() {
+        let mut p = Ppu::default(); // 8x8 sprites (E03_09 spec)
+        let oam = oam_with(0, 40); // Y = 0 masks the object on every line (E03_02 spec)
+        for ly in 0..LINES_PER_FRAME {
+            p.ly = ly;
+            p.scan_oam(&oam);
+            assert!(
+                p.line_sprites().is_empty(),
+                "Y=0 must never show on line {ly}"
+            );
+        }
+    }
+
+    #[test]
+    fn e03_02_y16_shows_on_lines_0_through_15_for_8x16() {
+        let mut p = Ppu {
+            lcdc: 0x95,
+            ..Ppu::default()
+        }; // LCDC bit 2 set: 8x16 sprites (E03_02 spec)
+        let oam = oam_with(16, 40); // one sprite at Y = 16 in every entry (E03_02 spec)
+        for ly in 0..LINES_PER_FRAME {
+            p.ly = ly;
+            p.scan_oam(&oam);
+            let shown = !p.line_sprites().is_empty();
+            assert_eq!(shown, ly < 16, "Y=16 (8x16) on line {ly}"); // lines 0..15 only (E03_02 spec)
+        }
+    }
+
+    #[test]
+    fn e03_02_a_sprite_with_x_zero_counts_in_the_limit() {
+        let mut p = Ppu {
+            ly: 4, // LY + 16 = 20 falls in [Y, Y+8) for Y = 20 (E03_02 spec)
+            ..Ppu::default()
+        };
+        let mut oam = [0x00u8; 160];
+        oam[0] = 20; // entry 0: on the line but off-screen at X = 0 (E03_02 spec)
+        for i in 1..11 {
+            // entries 1-10: on the line, visible X
+            oam[i * 4] = 20;
+            oam[i * 4 + 1] = 80;
+        }
+        p.scan_oam(&oam);
+        let sprites = p.line_sprites();
+        assert_eq!(sprites.len(), 10); // the X=0 sprite counts toward the limit (E03_02 spec)
+        for (i, &s) in sprites.iter().enumerate() {
+            assert_eq!(s, i as u8); // entries 0-9 win; entry 10 is dropped
+        }
+    }
+
+    #[test]
+    fn e03_02_a_sprite_with_x_at_least_168_counts_in_the_limit() {
+        let mut p = Ppu {
+            ly: 4, // LY + 16 = 20 falls in [Y, Y+8) for Y = 20 (E03_02 spec)
+            ..Ppu::default()
+        };
+        let mut oam = [0x00u8; 160];
+        oam[0] = 20; // entry 0: on the line but off-screen at X = 170 (E03_02 spec)
+        oam[1] = 170;
+        for i in 1..11 {
+            // entries 1-10: on the line, visible X
+            oam[i * 4] = 20;
+            oam[i * 4 + 1] = 80;
+        }
+        p.scan_oam(&oam);
+        let sprites = p.line_sprites();
+        assert_eq!(sprites.len(), 10); // the X=170 sprite counts toward the limit (E03_02 spec)
+        for (i, &s) in sprites.iter().enumerate() {
+            assert_eq!(s, i as u8); // entries 0-9 win; entry 10 is dropped
+        }
     }
 }

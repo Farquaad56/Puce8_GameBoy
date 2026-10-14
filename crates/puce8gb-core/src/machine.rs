@@ -168,6 +168,13 @@ impl Machine for Dmg {
         // in this same dot takes effect immediately (decision A_01: CPU first; E03_09 spec).
         self.ppu.set_lcd_enabled(self.bus.io[0x40]);
         let line_changed = self.ppu.tick();
+        // Mode 2 OAM scan of the current line, performed once per visible line (E03_02): the
+        // PPU reads the 40 OAM entries directly from the bus; CPU access blocking arrives with
+        // E03_10. The result is identical whether the scan runs at dot 80 or all at once, so
+        // it is done here on entry to mode 2 (E03_02 spec).
+        if self.ppu.oam_scan_due() {
+            self.ppu.scan_oam(&self.bus.oam);
+        }
         self.bus.ly = self.ppu.ly(); // LY ($FF44) mirror (E03_01); the coincidence flag reads it too (E03_08)
         self.bus.ppu_mode = self.ppu.mode(); // PPU mode mirror for the STAT readback (E03_08 spec, decision A_02)
         if line_changed && !was_vblank && self.ppu.vblank() {
@@ -678,5 +685,51 @@ mod tests {
         assert_eq!(dmg.bus.read(0xFF44), 0x00); // restarted at line 0
         let stat = dmg.bus.read(0xFF41);
         assert_eq!(stat & 0x03, 0x02); // normal start-of-line mode: OAM scan (mode 2) (E03_09 spec)
+    }
+
+    #[test]
+    fn e03_02_scan_selects_the_sprites_of_each_line_during_mode_2() {
+        use crate::video::{LINE_DOTS, MODE2_DOTS};
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        // One sprite at Y = 16 in OAM entry 5: shown on lines 0..7 for 8x8 (E03_02 spec).
+        dmg.bus.oam[5 * 4] = 16;
+        dmg.bus.oam[5 * 4 + 1] = 40; // X = 40: visible on screen
+                                     // Advance to an absolute position per line (E03_02 spec): the list is correct at dot 80, right after the OAM scan ends.
+        let mut done = 0u32;
+        for ly in 0..16u8 {
+            let target = LINE_DOTS * u32::from(ly) + MODE2_DOTS; // start of mode 3 of this line
+            for _ in 0..(target - done) {
+                dmg.tick();
+            }
+            done = target;
+            assert_eq!(dmg.ppu.ly(), ly);
+            let sprites = dmg.ppu.line_sprites();
+            if ly < 8 {
+                assert_eq!(sprites, &[5], "line {ly} selects OAM entry 5"); // Y=16 (8x8): lines 0..7 only
+            } else {
+                assert!(sprites.is_empty(), "line {ly} selects no sprite");
+            }
+        }
+    }
+
+    #[test]
+    fn e03_02_scan_reads_oam_directly_from_the_bus() {
+        use crate::video::{LINE_DOTS, MODE2_DOTS};
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        // The scan reads OAM directly from the bus (E03_02 spec): a value written after the
+        // machine starts is picked up by the next line's mode 2 scan. Advance to absolute positions.
+        let done = LINE_DOTS * 2 + MODE2_DOTS;
+        for _ in 0..done {
+            dmg.tick(); // advance past line 1: its scan saw an empty OAM
+        }
+        assert!(dmg.ppu.line_sprites().is_empty()); // no sprite selected yet
+                                                    // Write a sprite at Y = 32 (shown on lines 16..23 for 8x8) after the fact.
+        dmg.bus.oam[0] = 32;
+        dmg.bus.oam[1] = 40;
+        let target = LINE_DOTS * 16 + MODE2_DOTS; // line 16, dot 80: its mode 2 scan has just run
+        for _ in 0..(target - done) {
+            dmg.tick();
+        }
+        assert_eq!(dmg.ppu.line_sprites(), &[0]); // the new OAM value is selected (E03_02 spec)
     }
 }
