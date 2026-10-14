@@ -115,8 +115,12 @@ impl Dmg {
     /// Value of the STAT interrupt line from the current PPU mode and registers (E03_08):
     /// each source contributes only when its select bit in STAT ($FF41) is set, OR'ed into one
     /// shared line (note 04a "Ligne d'interrupt STAT"). The exact dot of the LYC compare and
-    /// the STAT write quirk are UNKNOWN - to confirm: not implemented.
+    /// the STAT write quirk are UNKNOWN - to confirm: not implemented. While the LCD is off
+    /// no VBlank or STAT request exists, so the line stays low (E03_09 spec).
     fn stat_line(&self) -> bool {
+        if !self.ppu.lcd_on() {
+            return false; // LCD off: no PPU mode and no coincidence can be active (E03_09 spec)
+        }
         let stat = self.bus.io[0x41]; // STAT ($FF41): select bits 6..3 as written (E03_08 spec)
         let mode = self.ppu.mode();
         (stat & 0x40 != 0 && self.ppu.ly() == self.bus.io[0x45]) // bit 6: LYC == LY coincidence
@@ -160,6 +164,9 @@ impl Machine for Dmg {
         // into the bus so $FF44 reads are side-effect-free; entry into VBlank (LY 143 -> 144)
         // raises the IF vblank bit once per frame (note 02b "vblank", note 01_timing.md).
         let was_vblank = self.ppu.vblank();
+        // LCD enable from LCDC ($FF40) bit 7, applied before the PPU advances so a CPU write
+        // in this same dot takes effect immediately (decision A_01: CPU first; E03_09 spec).
+        self.ppu.set_lcd_enabled(self.bus.io[0x40]);
         let line_changed = self.ppu.tick();
         self.bus.ly = self.ppu.ly(); // LY ($FF44) mirror (E03_01); the coincidence flag reads it too (E03_08)
         self.bus.ppu_mode = self.ppu.mode(); // PPU mode mirror for the STAT readback (E03_08 spec, decision A_02)
@@ -584,5 +591,92 @@ mod tests {
             dmg.tick(); // ...until the next OAM scan starts: one new request (E03_08 spec)
         }
         assert_eq!(dmg.bus.io[0x0F] & 0x02, 0x02);
+    }
+
+    #[test]
+    fn e03_09_video_registers_power_up_values() {
+        let dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        assert_eq!(dmg.bus.read(0xFF40), 0x91); // LCDC (task spec)
+        assert_eq!(dmg.bus.read(0xFF42), 0x00); // SCY (task spec)
+        assert_eq!(dmg.bus.read(0xFF43), 0x00); // SCX (task spec)
+        assert_eq!(dmg.bus.read(0xFF47), 0xFC); // BGP (task spec)
+        assert_eq!(dmg.bus.read(0xFF48), 0xFF); // OBP0 (specs value; CONFLIT with pandocs, note 08)
+        assert_eq!(dmg.bus.read(0xFF49), 0xFF); // OBP1 (specs value; CONFLIT with pandocs, note 08)
+        assert_eq!(dmg.bus.read(0xFF4A), 0x00); // WY (task spec)
+        assert_eq!(dmg.bus.read(0xFF4B), 0x00); // WX (task spec)
+    }
+
+    #[test]
+    fn e03_09_video_registers_read_write_round_trip() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        // The plain video registers (task spec): each is read/write with no side effect in this
+        // task, so a written byte reads back unchanged. LCDC keeps bit 7 set to leave the LCD on.
+        let cases: [(u16, u8); 8] = [
+            (0xFF40, 0x91), // LCDC
+            (0xFF42, 0x5A), // SCY
+            (0xFF43, 0xA5), // SCX
+            (0xFF47, 0x3C), // BGP
+            (0xFF48, 0x78), // OBP0
+            (0xFF49, 0xC6), // OBP1
+            (0xFF4A, 0x92), // WY
+            (0xFF4B, 0x4D), // WX
+        ];
+        for (addr, val) in cases {
+            dmg.bus.write(addr, val);
+            assert_eq!(
+                dmg.bus.read(addr),
+                val,
+                "register at {addr:04X} round-trips"
+            );
+        }
+    }
+
+    #[test]
+    fn e03_09_lcd_off_resets_ly_and_mode() {
+        use crate::video::LINE_DOTS;
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        // Advance to line 5 (inside a visible line) so LY and the mode are non-zero.
+        for _ in 0..(LINE_DOTS * 5 + 100) {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.read(0xFF44), 0x05); // LY = 5 before turning the LCD off
+        dmg.bus.write(0xFF40, 0x11); // LCDC bit 7 -> 0: LCD and PPU disabled (E03_09 spec)
+        dmg.tick(); // the transition is applied in Machine::tick (decision A_01: CPU first)
+        assert_eq!(dmg.bus.read(0xFF44), 0x00); // LY reset to line 0 (E03_09 spec)
+        let stat = dmg.bus.read(0xFF41);
+        assert_eq!(stat & 0x03, 0x00); // STAT mode bits read 0 while the PPU is disabled (note 04a "STAT")
+    }
+
+    #[test]
+    fn e03_09_no_interrupt_while_lcd_off() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        // Turn the LCD off first so the PPU is frozen at line 0 (not in VBlank).
+        dmg.bus.write(0xFF40, 0x11);
+        dmg.tick();
+        dmg.bus.io[0x0F] &= !0x03; // clear any pending vblank (bit 0) and STAT (bit 1) requests
+                                   // Enable all four STAT sources: the shared line is low while off anyway.
+        dmg.bus.write(0xFF41, 0x78);
+        let raises = count_stat_raises(&mut dmg, FRAME_DOTS); // a whole frame with the LCD off
+        assert_eq!(raises, 0); // no STAT request while the PPU is disabled (E03_09 spec)
+        assert_eq!(dmg.bus.io[0x0F] & 0x01, 0x00); // and no VBlank request: the frozen line never enters VBlank
+    }
+
+    #[test]
+    fn e03_09_lcd_on_restarts_at_line_zero() {
+        use crate::video::LINE_DOTS;
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        // Advance to line 5 so the PPU is mid-frame.
+        for _ in 0..(LINE_DOTS * 5 + 100) {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.read(0xFF44), 0x05); // LY = 5 before the off/on cycle
+        dmg.bus.write(0xFF40, 0x11); // LCD off (E03_09 spec)
+        dmg.tick();
+        dmg.bus.write(0xFF40, 0x91); // LCDC bit 7 -> 1: the PPU restarts at line 0, dot 0 (E03_09 spec)
+                                     // What is displayed on that first line is UNKNOWN - to confirm (note 04b).
+        dmg.tick(); // the transition is applied in Machine::tick
+        assert_eq!(dmg.bus.read(0xFF44), 0x00); // restarted at line 0
+        let stat = dmg.bus.read(0xFF41);
+        assert_eq!(stat & 0x03, 0x02); // normal start-of-line mode: OAM scan (mode 2) (E03_09 spec)
     }
 }

@@ -21,6 +21,24 @@ pub const MODE2_DOTS: u32 = 80;
 /// (SCX fine scroll, window and OBJ penalties) in tasks E03_03, E03_11 and E03_13.
 pub const MODE3_LEN: u32 = 172;
 
+// LCDC ($FF40) bit masks (E03_09 spec, note 04a "LCDC bits"); later tasks use them.
+/// Bit 7: LCD and PPU enable (0 = off).
+pub const LCDC_ENABLE: u8 = 0x80;
+/// Bit 6: window tile map area (0 = $9800, 1 = $9C00).
+pub const LCDC_WIN_MAP: u8 = 0x40;
+/// Bit 5: window enable.
+pub const LCDC_WIN_ENABLE: u8 = 0x20;
+/// Bit 4: BG and window tile data area (1 = $8000 unsigned, 0 = base $9000 signed).
+pub const LCDC_TILE_DATA: u8 = 0x10;
+/// Bit 3: BG tile map area (0 = $9800, 1 = $9C00).
+pub const LCDC_BG_MAP: u8 = 0x08;
+/// Bit 2: sprite size (0 = 8x8, 1 = 8x16).
+pub const LCDC_OBJ_SIZE: u8 = 0x04;
+/// Bit 1: sprite enable.
+pub const LCDC_OBJ_ENABLE: u8 = 0x02;
+/// Bit 0: BG and window enable (DMG).
+pub const LCDC_BG_ENABLE: u8 = 0x01;
+
 /// PPU state: framebuffer of 2-bit pixel indices, 160 x 144 (decision A_04), plus the dot
 /// counter, LY position and current mode (E03_01).
 #[derive(Debug)]
@@ -30,8 +48,10 @@ pub struct Ppu {
     dot_in_line: u32,
     /// Current scanline index = LY ($FF44), 0..=153 (note 04a "LY").
     ly: u8,
-    /// Current PPU mode, 0-3 (note 04a "STAT bits").
+    /// Current PPU mode, 0-3 (note 04a "STAT bits"); reads as 0 while the LCD is off.
     mode: u8,
+    /// LCD and PPU enable = LCDC ($FF40) bit 7 (E03_09 spec): false stops the dot counter.
+    lcd_on: bool,
 }
 
 impl Default for Ppu {
@@ -41,6 +61,7 @@ impl Default for Ppu {
             dot_in_line: 0,
             ly: 0,
             mode: 0,
+            lcd_on: true, // post-boot LCDC ($FF40) is $91: bit 7 set (note 08)
         };
         p.mode = Self::mode_for(p.ly, p.dot_in_line); // start of line 0 is OAM scan (mode 2)
         p
@@ -48,18 +69,49 @@ impl Default for Ppu {
 }
 
 impl Ppu {
-    /// Post-boot state (note 08): LY = 0 at the start of line 0.
+    /// Post-boot state (note 08): LY = 0 at the start of line 0, LCD enabled.
     pub fn reset(&mut self) {
         self.frame.fill(0x00);
         self.dot_in_line = 0;
         self.ly = 0;
         self.mode = Self::mode_for(self.ly, self.dot_in_line); // mode 2 at start of line 0
+        self.lcd_on = true; // post-boot LCDC ($FF40) is $91: bit 7 set (note 08)
+    }
+
+    /// LCD and PPU enable state (LCDC ($FF40) bit 7, E03_09 spec).
+    pub fn lcd_on(&self) -> bool {
+        self.lcd_on
+    }
+
+    /// Set the LCD enable from a written LCDC value (E03_09 spec):
+    /// - 1 -> 0: dot = 0, LY = 0, mode = 0; no VBlank or STAT request while off.
+    /// - 0 -> 1: the PPU restarts at line 0, dot 0 with the normal start-of-line mode (2);
+    ///   what is displayed on that first line is UNKNOWN - to confirm (note 04b).
+    pub fn set_lcd_enabled(&mut self, lcdc: u8) {
+        let on = lcdc & LCDC_ENABLE != 0;
+        if on == self.lcd_on {
+            return; // no transition: the PPU keeps running or stays stopped
+        }
+        self.lcd_on = on;
+        if on {
+            self.dot_in_line = 0;
+            self.ly = 0;
+            self.mode = Self::mode_for(self.ly, self.dot_in_line); // normal line (E03_09 spec)
+        } else {
+            self.dot_in_line = 0;
+            self.ly = 0;
+            self.mode = 0; // STAT mode bits read 0 while the PPU is disabled (note 04a "STAT")
+        }
     }
 
     /// Advance one dot (decision A_01: Machine::tick() = one dot). Returns true when the
     /// scanline index changes, i.e. on the last dot of a line. The mode is recomputed from
-    /// the new (LY, dot) position after every tick (E03_01).
+    /// the new (LY, dot) position after every tick (E03_01). While the LCD is off the PPU
+    /// does not advance at all (E03_09 spec).
     pub fn tick(&mut self) -> bool {
+        if !self.lcd_on {
+            return false; // LCD off: the dot counter, LY and mode are frozen (E03_09 spec)
+        }
         let next_dot = self.dot_in_line.wrapping_add(1);
         if next_dot == LINE_DOTS {
             // End of line: wrap to dot 0 and advance LY; after the last line it wraps (note 04a "LY").
@@ -240,5 +292,82 @@ mod tests {
                 p.tick();
             }
         }
+    }
+
+    #[test]
+    fn e03_09_lcd_off_resets_ly_dot_and_mode() {
+        let mut p = Ppu::default();
+        // Advance to line 5, dot 100 (inside mode 3 of a visible line).
+        for _ in 0..(LINE_DOTS * 5 + 100) {
+            p.tick();
+        }
+        assert_eq!(p.ly(), 5);
+        assert!(p.lcd_on()); // post-boot LCDC is $91: the LCD starts on (note 08)
+                             // LCDC bit 7 going 1 -> 0: dot = 0, LY = 0, mode = 0 (E03_09 spec).
+        p.set_lcd_enabled(0x11);
+        assert!(!p.lcd_on());
+        assert_eq!(p.ly(), 0); // LY reset to 0
+                               // The STAT mode bits read 0 while the PPU is disabled (note 04a "STAT").
+        assert_eq!(p.mode(), 0);
+    }
+
+    #[test]
+    fn e03_09_lcd_off_freezes_the_dot_counter() {
+        let mut p = Ppu::default();
+        for _ in 0..(LINE_DOTS * 5 + 100) {
+            p.tick();
+        }
+        p.set_lcd_enabled(0x11); // LCD off: the dot counter, LY and mode are frozen (E03_09 spec)
+                                 // A whole frame of ticks changes nothing while the LCD is off.
+        for _ in 0..FRAME_DOTS {
+            assert!(!p.tick()); // no line change: no VBlank request can be raised either
+        }
+        assert_eq!(p.ly(), 0);
+        assert_eq!(p.mode(), 0);
+    }
+
+    #[test]
+    fn e03_09_lcd_on_restarts_at_line_zero_dot_zero() {
+        let mut p = Ppu::default();
+        for _ in 0..(LINE_DOTS * 5 + 100) {
+            p.tick();
+        }
+        p.set_lcd_enabled(0x11); // LCD off first (E03_09 spec)
+                                 // LCDC bit 7 going 0 -> 1: the PPU restarts at line 0, dot 0 with the
+                                 // normal start-of-line mode; what is displayed on that first line is
+                                 // UNKNOWN - to confirm (note 04b).
+        p.set_lcd_enabled(0x91);
+        assert!(p.lcd_on());
+        assert_eq!(p.ly(), 0); // restarted at line 0
+                               // The normal start-of-line mode is OAM scan, mode 2 (E03_09 spec).
+        assert_eq!(p.mode(), 2);
+    }
+
+    #[test]
+    fn e03_09_lcd_on_resumes_normal_line_progression() {
+        let mut p = Ppu::default();
+        for _ in 0..(LINE_DOTS * 5 + 100) {
+            p.tick();
+        }
+        p.set_lcd_enabled(0x11); // LCD off (E03_09 spec)
+                                 // After re-enabling, the dot counter advances normally from line 0.
+        p.set_lcd_enabled(0x91);
+        for _ in 0..LINE_DOTS {
+            p.tick(); // one full line: LY wraps from 0 to 1
+        }
+        assert_eq!(p.ly(), 1);
+    }
+
+    #[test]
+    fn e03_09_lcdc_masks_match_the_spec_bits() {
+        // The eight LCDC bit masks (E03_09 spec, note 04a "LCDC bits").
+        assert_eq!(LCDC_ENABLE, 0x80);
+        assert_eq!(LCDC_WIN_MAP, 0x40);
+        assert_eq!(LCDC_WIN_ENABLE, 0x20);
+        assert_eq!(LCDC_TILE_DATA, 0x10);
+        assert_eq!(LCDC_BG_MAP, 0x08);
+        assert_eq!(LCDC_OBJ_SIZE, 0x04);
+        assert_eq!(LCDC_OBJ_ENABLE, 0x02);
+        assert_eq!(LCDC_BG_ENABLE, 0x01);
     }
 }
