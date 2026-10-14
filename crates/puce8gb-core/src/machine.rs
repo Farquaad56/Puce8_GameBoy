@@ -179,6 +179,10 @@ impl Machine for Dmg {
         if self.ppu.oam_scan_due() {
             self.ppu.scan_oam(&self.bus.oam);
         }
+        // One dot of pixel fetching per dot (E03_03): the fetcher reads VRAM directly, so it is
+        // not affected by the CPU access blocking set below. SCX/SCY are $FF43/$FF42 (note 04a).
+        self.ppu
+            .fetch_pixels(&self.bus.vram, self.bus.io[0x43], self.bus.io[0x42]);
         self.bus.ly = self.ppu.ly(); // LY ($FF44) mirror (E03_01); the coincidence flag reads it too (E03_08)
         self.bus.ppu_mode = self.ppu.mode(); // PPU mode mirror for the STAT readback (E03_08 spec, decision A_02)
         self.bus
