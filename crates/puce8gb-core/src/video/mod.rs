@@ -49,15 +49,34 @@ pub const LCDC_OBJ_ENABLE: u8 = 0x02;
 /// Bit 0: BG and window enable (DMG).
 pub const LCDC_BG_ENABLE: u8 = 0x01;
 
+/// One output pixel of a visible line (E03_04 spec): color index 0..3, whether the pixel comes
+/// from a sprite and which object palette it uses (bit 4 of the OAM attributes: false = OBP0,
+/// true = OBP1). Background and window pixels have `obj` clear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PixelOut {
+    pub color: u8,
+    pub obj: bool,
+    pub pal1: bool,
+}
+
+/// A background or window pixel with no sprite on top (E03_04 spec).
+const PIXEL_BG_ZERO: PixelOut = PixelOut {
+    color: 0,
+    obj: false,
+    pal1: false,
+};
+
 /// PPU state: framebuffer of 2-bit pixel indices, 160 x 144 (decision A_04), plus the dot
-/// counter, LY position and current mode (E03_01), and the per-line pixel fetcher with its
-/// FIFO and line buffer (E03_03).
+/// counter, LY position and current mode (E03_01), the per-line pixel fetcher with its FIFO
+/// and line buffer (E03_03) and the sprite merge of the selected OAM entries into that line
+/// buffer (E03_04).
 #[derive(Debug)]
 pub struct Ppu {
     pub frame: [u8; FRAMEBUFFER_SIZE],
-    /// Color indices (0..3) of the current visible line, before any palette lookup
-    /// (E03_03 spec); filled by the pixel fetcher during mode 3.
-    pub line_buf: [u8; LINE_PIXELS as usize],
+    /// Output pixels of the current visible line: color index 0..3 plus whether the pixel comes
+    /// from a sprite and which object palette (E03_04 spec); filled by the pixel fetcher, the
+    /// window fetcher and the sprite renderer during mode 3.
+    pub line_buf: [PixelOut; LINE_PIXELS as usize],
     /// Dot within the current scanline, 0..=LINE_DOTS-1 (decision A_01).
     dot_in_line: u32,
     /// Current scanline index = LY ($FF44), 0..=153 (note 04a "LY").
@@ -102,13 +121,19 @@ pub struct Ppu {
     /// Set while a visible window pixel has been produced on the current line (E03_12 spec); cleared
     /// at the start of each visible line; when set at end of line it advances `win_line`.
     win_drawn: bool,
+    /// Set once the sprite pixels of the current line have been merged into `line_buf` (E03_04
+    /// spec); cleared at the start of each visible line and on an LCD off -> on restart.
+    sprites_rendered: bool,
+    /// Per-pixel marker for the sprite merge (E03_04 spec): set once a pixel has been resolved by
+    /// the best winner among the selected sprites; cleared at the start of each visible line.
+    line_resolved: [bool; LINE_PIXELS as usize],
 }
 
 impl Default for Ppu {
     fn default() -> Self {
         let mut p = Ppu {
             frame: [0x00; FRAMEBUFFER_SIZE],
-            line_buf: [0x00; LINE_PIXELS as usize],
+            line_buf: [PIXEL_BG_ZERO; LINE_PIXELS as usize], // background pixels, color index 0 (E03_04 spec)
             dot_in_line: 0,
             ly: 0,
             mode: 0,
@@ -128,6 +153,8 @@ impl Default for Ppu {
             tile_high: 0,
             win_line: 0,      // window internal line counter starts at 0 (E03_12 spec)
             win_drawn: false, // no window pixel produced on the current line yet (E03_12 spec)
+            sprites_rendered: false, // the sprite merge is due on line 0 (E03_04 spec)
+            line_resolved: [false; LINE_PIXELS as usize], // no pixel resolved by a sprite yet (E03_04 spec)
         };
         p.mode = Self::mode_for(p.ly, p.dot_in_line, p.pixels_output); // start of line 0 is OAM scan (mode 2)
         p
@@ -138,7 +165,7 @@ impl Ppu {
     /// Post-boot state (note 08): LY = 0 at the start of line 0, LCD enabled.
     pub fn reset(&mut self) {
         self.frame.fill(0x00);
-        self.line_buf.fill(0x00);
+        self.line_buf.fill(PIXEL_BG_ZERO); // background pixels, color index 0 (E03_04 spec)
         self.dot_in_line = 0;
         self.ly = 0;
         self.mode = Self::mode_for(self.ly, self.dot_in_line, self.pixels_output); // mode 2 at start of line 0
@@ -152,7 +179,8 @@ impl Ppu {
 
     /// Reset the pixel fetcher state for a new visible line (E03_03): no pixels produced or
     /// output yet, empty FIFO, fine scroll cleared until it is latched at dot 80 (E03_11), and
-    /// a tile load forced on the first production.
+    /// a tile load forced on the first production; the sprite merge of this line is due again
+    /// with every pixel unresolved (E03_04 spec).
     fn reset_pixel_state(&mut self) {
         self.pixels_output = 0;
         self.produce_count = 0;
@@ -161,6 +189,8 @@ impl Ppu {
         self.fifo_count = 0;
         self.fetcher_col = 0xFF; // sentinel: force a tile load on the first production (E03_03)
         self.win_drawn = false; // no window pixel produced on this line yet (E03_12 spec)
+        self.sprites_rendered = false; // the sprite merge is due again on this line (E03_04 spec)
+        self.line_resolved.fill(false); // no pixel resolved by a sprite yet on this line (E03_04 spec)
     }
 
     /// LCD and PPU enable state (LCDC ($FF40) bit 7, E03_09 spec).
@@ -270,8 +300,7 @@ impl Ppu {
     }
 
     /// OAM indexes of the sprites selected for the current line by the mode 2 scan, in OAM
-    /// order (E03_02). Consumed by the sprite pixel renderer from E03_04 on.
-    #[allow(dead_code)] // used by the sprite renderer from E03_04 on; tests use it now
+    /// order (E03_02); consumed by `render_sprites` (E03_04).
     pub(crate) fn line_sprites(&self) -> &[u8] {
         &self.line_sprites[..self.line_sprite_count as usize]
     }
@@ -309,7 +338,12 @@ impl Ppu {
             // One pixel leaves the FIFO per dot (E03_03 spec); the fine scroll pause delays the first
             // output by SCX mod 8 dots, so mode 3 lasts 172 + SCX mod 8 (E03_11 spec).
             let color = self.fifo_pop();
-            self.line_buf[self.pixels_output as usize] = color;
+            // Background pixel: no sprite on top yet (E03_04 spec); the sprite merge may replace it.
+            self.line_buf[self.pixels_output as usize] = PixelOut {
+                color,
+                obj: false,
+                pal1: false,
+            };
             self.pixels_output += 1;
         }
     }
@@ -347,11 +381,11 @@ impl Ppu {
         };
         let tile_index = vram[(map_base + tile_row * 32 + u32::from(col)) as usize];
         let data_base = if self.lcdc & LCDC_TILE_DATA != 0 {
-            // unsigned index from $8000 (E03_03 spec)
-            u32::from(tile_index)
+            // unsigned index from $8000, one tile is 16 bytes (E03_04 spec)
+            u32::from(tile_index) * 16
         } else {
-            // signed index from $9000: values 128-255 wrap below the base (E03_03 spec)
-            0x1000u32.wrapping_add((tile_index as i8) as u32)
+            // signed index from $9000: values 128-255 wrap below the base (E03_04 spec)
+            (0x1000i32 + i32::from(tile_index as i8) * 16) as u32
         };
         let row = data_base + line_in_tile * 2;
         self.tile_low = vram[row as usize]; // first byte: low bit plane (note 04a "Tile data format")
@@ -424,9 +458,9 @@ impl Ppu {
         let row = u32::from(self.win_line);
         let tile_index = vram[(map_base + ((row >> 3) * 32 + ((x_w / 8) & 31))) as usize];
         let data_base = if lcdc & LCDC_TILE_DATA != 0 {
-            u32::from(tile_index) // unsigned index from $8000 (E03_12 spec)
+            u32::from(tile_index) * 16 // unsigned index from $8000, one tile is 16 bytes (E03_12 spec)
         } else {
-            0x1000u32.wrapping_add((tile_index as i8) as u32) // signed index from $9000 (E03_12 spec)
+            (0x1000i32 + i32::from(tile_index as i8) * 16) as u32 // signed index from $9000 (E03_12 spec)
         };
         let bit = (7 - (x_w % 8)) as usize; // pixel position within the tile, MSB first (note 04a "Tile data format")
         let row_off = (data_base + (row % 8) * 2) as usize;
@@ -448,8 +482,129 @@ impl Ppu {
         let start = u32::from(wx).saturating_sub(7); // the window starts when the pixel position reaches WX - 7 (E03_12 spec)
         if pos > start {
             let x_w = pos - 1 - start; // window pixel X, from the left edge of the window (E03_12 spec)
-            self.line_buf[(pos - 1) as usize] = self.window_color(vram, self.lcdc, x_w);
+                                       // Window pixel: no sprite on top yet (E03_04 spec); the sprite merge may replace it.
+            self.line_buf[(pos - 1) as usize] = PixelOut {
+                color: self.window_color(vram, self.lcdc, x_w),
+                obj: false,
+                pal1: false,
+            };
             self.win_drawn = true; // a visible window pixel was produced on this line (E03_12 spec)
+        }
+    }
+
+    /// Merge the sprite pixels of the current line into `line_buf` (E03_04 spec): called once per dot
+    /// like the other fetchers, but the merge itself runs only once per visible line. The sprite with
+    /// the lowest X wins an overlap; on equal X the lowest OAM index wins (E03_04 spec), so sprites
+    /// are processed from best to worst winner and each pixel is resolved at most once: a losing or
+    /// hidden sprite never overwrites what already won its pixel. Sprite tile data is read directly
+    /// from VRAM, always with unsigned $8000 addressing (note 04a "les objets utilisent toujours
+    /// l'adressage $8000"); CPU access blocking does not apply (E03_10 spec). Mode 3 penalties arrive
+    /// with E03_13.
+    pub(crate) fn render_sprites(&mut self, oam: &[u8], vram: &[u8]) {
+        if !self.lcd_on
+            || u32::from(self.ly) >= u32::from(VBLANK_FIRST_LINE)
+            || self.sprites_rendered
+        {
+            return;
+        }
+        if u32::from(self.pixels_output) < u32::from(LINE_PIXELS) {
+            return;
+        }
+        self.sprites_rendered = true;
+        if self.lcdc & LCDC_OBJ_ENABLE == 0 {
+            return; // sprites disabled in LCDC bit 1 (E03_04 spec)
+        }
+        let height = if self.lcdc & LCDC_OBJ_SIZE != 0 {
+            16u8
+        } else {
+            8
+        }; // LCDC bit 2 (E03_09 spec)
+        let count = self.line_sprites().len();
+        // line_sprites is in OAM order (E03_02); the lowest X wins an overlap and on equal X the
+        // lowest OAM index wins (E03_04 spec), so process from best to worst winner: a stable sort by
+        // sprite X ascending keeps the OAM order for equal X.
+        let mut order = [0u8; 10];
+        for (i, slot) in order.iter_mut().enumerate().take(count) {
+            *slot = i as u8;
+        }
+        for i in 1..count {
+            let mut j = i;
+            while j > 0 && self.sprite_x(oam, order[j - 1]) > self.sprite_x(oam, order[j]) {
+                order.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+        for &pos in order.iter().take(count) {
+            self.render_sprite(oam, vram, usize::from(pos), height);
+        }
+    }
+
+    /// Sprite X coordinate of an OAM entry (E03_04 spec: the sprite covers screen pixels X-8..X-1).
+    fn sprite_x(&self, oam: &[u8], idx: u8) -> u8 {
+        oam[usize::from(idx) * 4 + 1]
+    }
+
+    /// Merge one selected sprite's non-transparent pixels into `line_buf` (E03_04 spec). A pixel is
+    /// resolved at most once per line: the first sprite to reach it in best-to-worst order wins, and
+    /// a sprite hidden behind background colors 1..3 by its BG priority bit leaves the background.
+    fn render_sprite(&mut self, oam: &[u8], vram: &[u8], idx: usize, height: u8) {
+        let base = idx * 4;
+        let left = i32::from(oam[base + 1]) - 8; // leftmost screen column (E03_04 spec: covers X-8..X-1)
+        if left + 7 < 0 || left >= i32::from(LINE_PIXELS) {
+            return; // fully off-screen by X (note 04a "OAM": X=0 or X>=168 is off-screen)
+        }
+        let row = u32::from(self.ly)
+            .wrapping_add(16)
+            .wrapping_sub(u32::from(oam[base])); // sprite row on this line (E03_02 selection: 0 <= row < height)
+        if row >= u32::from(height) {
+            return; // the OAM scan only selects sprites covering LY (E03_02 spec); guard a hand-set list
+        }
+        let tile_index = oam[base + 2];
+        let attrs = oam[base + 3];
+        let pal1 = attrs & 0x10 != 0; // bit 4: OBP1 (E03_04 spec)
+        let flip_y = attrs & 0x40 != 0; // bit 6 (E03_04 spec)
+        let flip_x = attrs & 0x20 != 0; // bit 5 (E03_04 spec)
+        let bg_prio = attrs & 0x80 != 0; // bit 7: BG colors 1..3 are drawn over the sprite (E03_04 spec)
+        let sprite_row = if flip_y {
+            u32::from(height - 1).wrapping_sub(row)
+        } else {
+            row
+        }; // Y flip reverses rows, and for 8x16 swaps the two halves (E03_04 spec)
+        let tile_no = if height == 16 {
+            // top half is tile (index & 0xFE), bottom half is tile (index | 0x01); bit 0 ignored (E03_04 spec)
+            if sprite_row < 8 {
+                u32::from(tile_index & 0xFE)
+            } else {
+                u32::from(tile_index | 0x01)
+            }
+        } else {
+            u32::from(tile_index) // unsigned $8000 addressing, always (note 04a "les objets utilisent toujours l'adressage $8000")
+        };
+        let row_off = (tile_no * 16 + (sprite_row & 7) * 2) as usize; // tile N stores its rows at VRAM offset N*16, one tile is 16 bytes (E03_04 spec, note 04a "Tile data format")
+        for dx in 0..8u32 {
+            let sx = left + i32::from(dx as u8); // screen column (E03_04 spec)
+            if sx < 0 || sx >= i32::from(LINE_PIXELS) {
+                continue; // off-screen column: no pixel (E03_04 spec)
+            }
+            let col_in_tile = if flip_x { 7 - dx } else { dx }; // X flip reverses columns (E03_04 spec)
+            let bit = (7 - col_in_tile) as usize; // MSB first within the tile row (note 04a "Tile data format")
+            let color = ((vram[row_off + 1] >> bit) & 1) << 1 | (vram[row_off] >> bit) & 1; // note 04a "Tile data format"
+            if color == 0 {
+                continue; // sprite color index 0 is transparent (E03_04 spec)
+            }
+            let p = sx as usize;
+            if self.line_resolved[p] {
+                continue; // a better winner already resolved this pixel (E03_04 spec)
+            }
+            self.line_resolved[p] = true;
+            if bg_prio && self.line_buf[p].color != 0 {
+                continue; // BG colors 1..3 are drawn over the sprite: the background stays (E03_04 spec)
+            }
+            self.line_buf[p] = PixelOut {
+                color,
+                obj: true,
+                pal1,
+            };
         }
     }
 
@@ -472,6 +627,14 @@ impl Ppu {
 mod tests {
     use super::*;
     use crate::machine::FRAME_DOTS;
+
+    // Existing assertions compare line_buf cells to color-index integers (E03_03/E03_12 style);
+    // a cell equals the u8 of its color index (E03_04 spec).
+    impl PartialEq<u8> for PixelOut {
+        fn eq(&self, other: &u8) -> bool {
+            self.color == *other
+        }
+    }
 
     #[test]
     fn c01_15_line_is_456_dots() {
@@ -856,6 +1019,13 @@ mod tests {
                 vram[base + row * 2 + 1] = high;
             }
         }
+        for base in [0usize, 0x1000] {
+            // tile index 1 sits at VRAM offset N*16 = 0x10 (unsigned) / 0x1010 (signed), different bytes (E03_04 spec)
+            for row in 0..8 {
+                vram[base + 0x10 + row * 2] = 0xA5; // tile index 1, both bases (E03_04 spec)
+                vram[base + 0x10 + row * 2 + 1] = 0x3C;
+            }
+        }
         vram
     }
 
@@ -911,6 +1081,26 @@ mod tests {
     }
 
     #[test]
+    fn e03_03_tile_index_is_multiplied_by_16() {
+        let mut p = Ppu::default(); // SCX = 0, unsigned $8000 tile data (E03_03 spec)
+        let mut vram = vram_with_tile(0x55, 0xCC); // tile index 0 at offset 0, tile index 1 at offset 0x10 (E03_04 spec)
+        for i in 0..1024 {
+            vram[(0x9800 - 0x8000) + i] = 1; // $9800 map: tile index 1 everywhere (E03_04 spec)
+        }
+        for dot in 0..LINE_DOTS {
+            if dot > 0 {
+                p.tick();
+            }
+            p.fetch_pixels(&vram, 0, 0);
+        }
+        assert_eq!(p.pixels_output, LINE_PIXELS); // all 160 pixels of the line are output (E03_04 spec)
+        for x in 0..LINE_PIXELS as usize {
+            assert_eq!(p.line_buf[x], expected_color(0xA5, 0x3C, x), "pixel {x}");
+            // tile-1 colours at offset N*16 (E03_04 spec)
+        }
+    }
+
+    #[test]
     fn e03_03_first_pixel_leaves_the_fifo_after_twelve_dots() {
         let mut p = Ppu::default(); // SCX = 0 (E03_03 spec)
         let vram = [0x00u8; 0x2000];
@@ -951,7 +1141,7 @@ mod tests {
         for i in 0..1024 {
             vram[(0x9800 - 0x8000) + i] = 128; // tile index 128: signed, wraps below $9000 (E03_03 spec)
         }
-        let row = (0x9000 - 0x8000) - 128; // address $8F80 in VRAM indexing
+        let row = 0x1000usize - 128 * 16; // signed index 128 = -128 -> $9000 - 128*16 = $8800 (E03_04 spec)
         vram[row] = 0x55;
         vram[row + 1] = 0xAA;
         for dot in 0..LINE_DOTS {
@@ -1010,8 +1200,8 @@ mod tests {
         for i in 0..32 {
             vram[(0x9C00 - 0x8000) + i] = 1; // $9C00 map, row 0: distinct tile index 1 (E03_03 spec)
         }
-        vram[1] = 0x55; // tile index 1, line 0: low bit plane at the unsigned base $8000 (default LCDC bit 4 set)
-        vram[2] = 0xAA; // high bit plane
+        vram[0x10] = 0x55; // tile index 1, line 0: low bit plane at VRAM offset N*16 (E03_04 spec)
+        vram[0x11] = 0xAA; // high bit plane
         for dot in 0..LINE_DOTS {
             if dot > 0 {
                 p.tick();
@@ -1064,8 +1254,16 @@ mod tests {
         for i in 0..1024 {
             vram[(0x9800 - 0x8000) + i] = (i % 32) as u8; // $9800 map: column c -> tile index c (E03_03 spec)
         }
-        for (c, byte) in vram.iter_mut().enumerate().take(31) {
-            *byte = if (c % 4) < 2 { 0xFFu8 } else { 0x00 }; // uniform row bytes per column (note 04a "Tile data format")
+        for c in 0..32usize {
+            // tile index c stores its row bytes at VRAM offset N*16 (E03_04 spec)
+            let (low, high) = match c % 4 {
+                0 => (0xFFu8, 0xFF), // both bit planes set: color index 3
+                1 => (0xFF, 0x00),   // low bit plane only: color index 1
+                2 => (0x00, 0x00),   // no bit plane set: color index 0
+                _ => (0x00, 0xFF),   // high bit plane only: color index 2
+            };
+            vram[c * 16] = low;
+            vram[c * 16 + 1] = high;
         }
         for dot in 0..LINE_DOTS {
             if dot > 0 {
@@ -1119,10 +1317,218 @@ mod tests {
         }
     }
 
+    /// Run one full line with sprites merged (E03_04 spec): OAM scan, then per dot a tick plus the
+    /// pixel and sprite fetches.
+    fn run_line_with_sprites(p: &mut Ppu, vram: &[u8], oam: &[u8]) {
+        p.scan_oam(oam);
+        for dot in 0..LINE_DOTS {
+            if dot > 0 {
+                p.tick();
+            }
+            p.fetch_pixels(vram, 0, 0);
+            p.render_sprites(oam, vram);
+        }
+    }
+
+    #[test]
+    fn e03_04_single_sprite() {
+        let vram = vram_with_tile(0x00, 0x00); // background tile 0 is colour 0; tile 1 at offset 0x10 (E03_04 spec)
+        let mut oam = [0u8; 160];
+        oam[0] = 16; // Y=16: screen line 0 with LY=0 (E03_02 spec)
+        oam[1] = 8; // X=8: screen columns 0..7 (E03_04 spec)
+        oam[2] = 1; // tile index 1 (E03_04 spec)
+        let mut p = Ppu {
+            lcdc: 0x93, // bits 7,4,1,0: LCD on, unsigned tile data, sprites on, BG on (E03_04 spec)
+            ..Ppu::default()
+        };
+        run_line_with_sprites(&mut p, &vram, &oam);
+        let expected = [1u8, 0, 3, 2, 2, 3, 0, 1]; // tile-1 row 0 colours (E03_04 spec)
+        for x in [0usize, 2, 3, 4, 5, 7] {
+            assert_eq!(p.line_buf[x].color, expected[x], "pixel {x}");
+            assert!(
+                p.line_buf[x].obj,
+                "pixel {x} is a sprite pixel (E03_04 spec)"
+            );
+            assert!(
+                !p.line_buf[x].pal1,
+                "palette 1 not selected: attrs bit 3 clear (E03_04 spec)"
+            );
+        }
+        for x in [1usize, 6] {
+            // colour index 0 is transparent: background shows through (E03_04 spec)
+            assert!(!p.line_buf[x].obj);
+            assert_eq!(p.line_buf[x].color, 0);
+        }
+        assert!(!p.line_buf[8].obj); // column 8 is background again (E03_04 spec)
+        assert_eq!(p.line_buf[8].color, 0);
+    }
+
+    #[test]
+    fn e03_04_x_flip() {
+        let mut vram = vram_with_tile(0x00, 0x00); // background tile 0 is colour 0 (E03_04 spec)
+        vram[0x20] = 0xF0; // tile 2 row 0 low byte: columns 0..3 are colour 1 (E03_04 spec)
+        vram[0x21] = 0x00; // tile 2 row 0 high byte: all clear (E03_04 spec)
+        let mut oam = [0u8; 160];
+        oam[0] = 16; // Y=16: screen line 0 with LY=0 (E03_02 spec)
+        oam[1] = 8; // X=8: screen columns 0..7 (E03_04 spec)
+        oam[2] = 2; // tile index 2 at VRAM offset 0x20 (E03_04 spec)
+        oam[3] = 0x20; // attrs bit 5: flip X (E03_04 spec)
+        let mut p = Ppu {
+            lcdc: 0x93, // bits 7,4,1,0: LCD on, unsigned tile data, sprites on, BG on (E03_04 spec)
+            ..Ppu::default()
+        };
+        run_line_with_sprites(&mut p, &vram, &oam);
+        for x in 0..4usize {
+            // flipped row: transparent half now at columns 0..3 (E03_04 spec)
+            assert!(!p.line_buf[x].obj, "pixel {x}");
+            assert_eq!(p.line_buf[x].color, 0);
+        }
+        for x in 4..8usize {
+            // flipped row: colour-1 half now at columns 4..7 (E03_04 spec)
+            assert!(p.line_buf[x].obj, "pixel {x}");
+            assert_eq!(p.line_buf[x].color, 1);
+        }
+    }
+
+    #[test]
+    fn e03_04_y_flip() {
+        let mut vram = vram_with_tile(0x00, 0x00); // background tile 0 is colour 0 (E03_04 spec)
+        vram[0x20] = 0xFF; // tile 2 row 0: colour 1 (E03_04 spec)
+        vram[0x21] = 0x00;
+        vram[0x2E] = 0x00; // tile 2 row 7: colour 2 (E03_04 spec)
+        vram[0x2F] = 0xFF;
+        let mut oam = [0u8; 160];
+        oam[0] = 16; // Y=16: screen line 0 with LY=0 (E03_02 spec)
+        oam[1] = 8; // X=8: screen columns 0..7 (E03_04 spec)
+        oam[2] = 2; // tile index 2 at VRAM offset 0x20 (E03_04 spec)
+        oam[3] = 0x40; // attrs bit 6: flip Y, screen line 0 reads tile row 7 (E03_04 spec)
+        let mut p = Ppu {
+            lcdc: 0x93, // bits 7,4,1,0: LCD on, unsigned tile data, sprites on, BG on (E03_04 spec)
+            ..Ppu::default()
+        };
+        run_line_with_sprites(&mut p, &vram, &oam);
+        for x in 0..8usize {
+            // flipped sprite: row 7 colour 2 across all columns (E03_04 spec)
+            assert!(p.line_buf[x].obj, "pixel {x}");
+            assert_eq!(p.line_buf[x].color, 2);
+        }
+    }
+
+    #[test]
+    fn e03_04_overlap_lower_x_wins() {
+        let mut vram = vram_with_tile(0x00, 0x00); // background tile 0 is colour 0 (E03_04 spec)
+        vram[0x20] = 0xFF; // tile 2 uniform: colour 1 (E03_04 spec)
+        vram[0x21] = 0x00;
+        vram[0x30] = 0x00; // tile 3 uniform: colour 2 (E03_04 spec)
+        vram[0x31] = 0xFF;
+        let mut oam = [0u8; 160];
+        oam[0] = 16; // Y=16: screen line 0 with LY=0 (E03_02 spec)
+        oam[1] = 12; // X=12: screen columns 4..11, tile 2 colour 1 (E03_04 spec)
+        oam[2] = 2;
+        oam[4] = 16;
+        oam[5] = 8; // X=8: screen columns 0..7, tile 3 colour 2 (E03_04 spec)
+        oam[6] = 3;
+        let mut p = Ppu {
+            lcdc: 0x93, // bits 7,4,1,0: LCD on, unsigned tile data, sprites on, BG on (E03_04 spec)
+            ..Ppu::default()
+        };
+        run_line_with_sprites(&mut p, &vram, &oam);
+        for x in 0..8usize {
+            // lowest X wins the overlap despite the higher OAM index (E03_04 spec)
+            assert!(p.line_buf[x].obj, "pixel {x}");
+            assert_eq!(p.line_buf[x].color, 2);
+        }
+        for x in 8..12usize {
+            // only sprite 0 remains: colour 1 (E03_04 spec)
+            assert!(p.line_buf[x].obj, "pixel {x}");
+            assert_eq!(p.line_buf[x].color, 1);
+        }
+        assert!(!p.line_buf[12].obj); // column 12 is background again (E03_04 spec)
+    }
+
+    #[test]
+    fn e03_04_equal_x_lowest_oam_index_wins() {
+        let mut vram = vram_with_tile(0x00, 0x00); // background tile 0 is colour 0 (E03_04 spec)
+        vram[0x20] = 0xFF; // tile 2 uniform: colour 1 (E03_04 spec)
+        vram[0x21] = 0x00;
+        vram[0x30] = 0x00; // tile 3 uniform: colour 2 (E03_04 spec)
+        vram[0x31] = 0xFF;
+        let mut oam = [0u8; 160];
+        oam[0] = 16; // Y=16: screen line 0 with LY=0 (E03_02 spec)
+        oam[1] = 8; // X=8: screen columns 0..7, tile 2 colour 1 (E03_04 spec)
+        oam[2] = 2;
+        oam[4] = 16;
+        oam[5] = 8; // same X as OAM 0: the lowest OAM index wins (E03_04 spec)
+        oam[6] = 3;
+        let mut p = Ppu {
+            lcdc: 0x93, // bits 7,4,1,0: LCD on, unsigned tile data, sprites on, BG on (E03_04 spec)
+            ..Ppu::default()
+        };
+        run_line_with_sprites(&mut p, &vram, &oam);
+        for x in 0..8usize {
+            // equal X: OAM index 0 wins over index 1 (E03_04 spec)
+            assert!(p.line_buf[x].obj, "pixel {x}");
+            assert_eq!(p.line_buf[x].color, 1);
+        }
+    }
+
+    #[test]
+    fn e03_04_bg_priority_flag() {
+        let mut vram = vram_with_tile(0xF0, 0x00); // background row 0: [1,1,1,1,0,0,0,0] (E03_04 spec)
+        vram[0x20] = 0xFF; // tile 2 uniform: colour 3 (E03_04 spec)
+        vram[0x21] = 0xFF;
+        let mut oam = [0u8; 160];
+        oam[0] = 16; // Y=16: screen line 0 with LY=0 (E03_02 spec)
+        oam[1] = 8; // X=8: screen columns 0..7, tile 2 uniform colour 3 (E03_04 spec)
+        oam[2] = 2;
+        oam[3] = 0x80; // attrs bit 7: BG priority (E03_04 spec)
+        let mut p = Ppu {
+            lcdc: 0x93, // bits 7,4,1,0: LCD on, unsigned tile data, sprites on, BG on (E03_04 spec)
+            ..Ppu::default()
+        };
+        run_line_with_sprites(&mut p, &vram, &oam);
+        for x in 0..4usize {
+            // BG colour 1 stays over the sprite: background wins (E03_04 spec)
+            assert!(!p.line_buf[x].obj, "pixel {x}");
+            assert_eq!(p.line_buf[x].color, 1);
+        }
+        for x in 4..8usize {
+            // BG colour 0 is transparent: the sprite shows through (E03_04 spec)
+            assert!(p.line_buf[x].obj, "pixel {x}");
+            assert_eq!(p.line_buf[x].color, 3);
+        }
+    }
+
+    #[test]
+    fn e03_04_8x16_with_y_flip() {
+        let mut vram = vram_with_tile(0x00, 0x00); // background tile 0 is colour 0 (E03_04 spec)
+        for i in 0..16usize {
+            // tile 4 uniform: colour 1 on every row (E03_04 spec)
+            vram[0x40 + i] = if i % 2 == 0 { 0xFF } else { 0x00 };
+        }
+        vram[0x5E] = 0xFF; // tile 5: only row 7 is colour 3 (E03_04 spec)
+        vram[0x5F] = 0xFF;
+        let mut oam = [0u8; 160];
+        oam[0] = 16; // Y=16: screen line 0 with LY=0 (E03_02 spec)
+        oam[1] = 8; // X=8: screen columns 0..7 (E03_04 spec)
+        oam[2] = 5; // tile index 5, bit 0 ignored: top half tile 4, bottom half tile 5 (E03_04 spec)
+        oam[3] = 0x40; // attrs bit 6: flip Y swaps the two halves (E03_04 spec)
+        let mut p = Ppu {
+            lcdc: 0x97, // bits 7,4,2,1,0: LCD on, unsigned tile data, 8x16 sprites, BG on (E03_04 spec)
+            ..Ppu::default()
+        };
+        run_line_with_sprites(&mut p, &vram, &oam);
+        for x in 0..8usize {
+            // flipped: screen line 0 reads tile-5 row 7, colour 3 (E03_04 spec)
+            assert!(p.line_buf[x].obj, "pixel {x}");
+            assert_eq!(p.line_buf[x].color, 3);
+        }
+    }
+
     /// VRAM with the BG map at $9800 pointing to tile 0 (row 0 = color index 2) and the window map
-    /// at $9C00 pointing to tile 1 (row 0 = color index 3), from the unsigned base $8000. In this
-    /// model a tile of index N stores its row bytes starting at VRAM offset N, so tile 0 and tile 1
-    /// share offset 1; setting it to 0xFF makes both rows uniform (E03_12 spec).
+    /// at $9C00 pointing to tile 1 (row 0 = color index 3), from the unsigned base $8000. A tile of
+    /// index N stores its row bytes starting at VRAM offset N*16, so tile 0 sits at 0x00 and tile 1
+    /// at 0x10 (E03_04 spec).
     fn win_vram() -> [u8; 0x2000] {
         let mut vram = [0x00u8; 0x2000];
         for i in 0..1024 {
@@ -1131,9 +1537,10 @@ mod tests {
         for i in 0..1024 {
             vram[(0x9C00 - 0x8000) + i] = 1; // window map $9C00 -> tile 1 (E03_12 spec)
         }
-        vram[0] = 0x00; // tile 0 row 0 low bit plane: background pixels are color index 2 (E03_12 spec)
-        vram[1] = 0xFF; // shared byte: tile 0 row 0 high AND tile 1 row 0 low (E03_12 spec)
-        vram[2] = 0xFF; // tile 1 row 0 high bit plane: window pixels are color index 3 (E03_12 spec)
+        vram[0x00] = 0x00; // tile 0 row 0 low bit plane (E03_12 spec)
+        vram[0x01] = 0xFF; // tile 0 row 0 high bit plane: background colour 2 (E03_12 spec)
+        vram[0x10] = 0xFF; // tile 1 row 0 low bit plane, offset 1*16 (E03_04 spec)
+        vram[0x11] = 0xFF; // tile 1 row 0 high bit plane: window colour 3 (E03_12 spec)
         vram
     }
 
@@ -1211,12 +1618,12 @@ mod tests {
         for i in 0..1024 {
             vram[(0x9C00 - 0x8000) + i] = 48; // $9C00 map -> tile 48 (E03_12 spec)
         }
-        // Tile data from the unsigned base $8000: in this model a tile of index N stores its row
-        // bytes starting at VRAM offset N, so tile 16 and tile 48 do not overlap (E03_12 spec).
-        vram[16] = 0x00; // tile 16 row 0 low bit plane: color index 2 (E03_12 spec)
-        vram[17] = 0xFF; // tile 16 row 0 high bit plane: color index 2 (E03_12 spec)
-        vram[48] = 0xFF; // tile 48 row 0 low bit plane: color index 3 (E03_12 spec)
-        vram[49] = 0xFF; // tile 48 row 0 high bit plane: color index 3 (E03_12 spec)
+        // Tile data from the unsigned base $8000: a tile of index N stores its row bytes at VRAM
+        // offset N*16, so tile 16 sits at 0x100 and tile 48 at 0x300 (E03_04 spec).
+        vram[16 * 16] = 0x00; // tile 16 row 0 low bit plane: color index 2 (E03_12 spec)
+        vram[16 * 16 + 1] = 0xFF; // tile 16 row 0 high bit plane: color index 2 (E03_12 spec)
+        vram[48 * 16] = 0xFF; // tile 48 row 0 low bit plane: color index 3 (E03_12 spec)
+        vram[48 * 16 + 1] = 0xFF; // tile 48 row 0 high bit plane: color index 3 (E03_12 spec)
 
         let mut p = Ppu {
             lcdc: 0xB9, // bits 7,5,4,3,0 set: window map $9800 (bit 6 clear), BG map $9C00 (E03_12 spec)

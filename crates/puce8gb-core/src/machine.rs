@@ -188,6 +188,7 @@ impl Machine for Dmg {
         // window tile map row win_line. WY/WX are $FF4A/$FF4B (note 04a).
         self.ppu
             .fetch_window(&self.bus.vram, self.bus.io[0x4B], self.bus.io[0x4A]);
+        self.ppu.render_sprites(&self.bus.oam, &self.bus.vram);
         self.bus.ly = self.ppu.ly(); // LY ($FF44) mirror (E03_01); the coincidence flag reads it too (E03_08)
         self.bus.ppu_mode = self.ppu.mode(); // PPU mode mirror for the STAT readback (E03_08 spec, decision A_02)
         self.bus
