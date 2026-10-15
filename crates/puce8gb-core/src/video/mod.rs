@@ -96,6 +96,12 @@ pub struct Ppu {
     /// Cached low and high bit-plane bytes of the current tile row (note 04a "Tile data format").
     tile_low: u8,
     tile_high: u8,
+    /// Window internal line counter (E03_12 spec): advances only on lines where a window pixel is
+    /// produced; reset to 0 at the start of each frame and on an LCD off -> on restart.
+    win_line: u8,
+    /// Set while a visible window pixel has been produced on the current line (E03_12 spec); cleared
+    /// at the start of each visible line; when set at end of line it advances `win_line`.
+    win_drawn: bool,
 }
 
 impl Default for Ppu {
@@ -120,6 +126,8 @@ impl Default for Ppu {
             fetcher_col: 0xFF, // sentinel: force a tile load on the first production (E03_03)
             tile_low: 0,
             tile_high: 0,
+            win_line: 0,      // window internal line counter starts at 0 (E03_12 spec)
+            win_drawn: false, // no window pixel produced on the current line yet (E03_12 spec)
         };
         p.mode = Self::mode_for(p.ly, p.dot_in_line, p.pixels_output); // start of line 0 is OAM scan (mode 2)
         p
@@ -152,6 +160,7 @@ impl Ppu {
         self.fifo_head = 0;
         self.fifo_count = 0;
         self.fetcher_col = 0xFF; // sentinel: force a tile load on the first production (E03_03)
+        self.win_drawn = false; // no window pixel produced on this line yet (E03_12 spec)
     }
 
     /// LCD and PPU enable state (LCDC ($FF40) bit 7, E03_09 spec).
@@ -176,6 +185,7 @@ impl Ppu {
             self.mode = Self::mode_for(self.ly, self.dot_in_line, self.pixels_output); // normal line (E03_09 spec)
             self.oam_scan_pending = true; // the restarted line 0 starts in mode 2: its scan is due (E03_02)
             self.reset_pixel_state(); // the restarted line 0 fetches fresh pixels (E03_03)
+            self.win_line = 0; // window internal counter restarts with the frame (E03_12 spec)
         } else {
             self.dot_in_line = 0;
             self.ly = 0;
@@ -196,12 +206,18 @@ impl Ppu {
         if next_dot == LINE_DOTS {
             // End of line: wrap to dot 0 and advance LY; after the last line it wraps (note 04a "LY").
             self.dot_in_line = 0;
+            let visible_line_ended = u32::from(self.ly) < u32::from(VBLANK_FIRST_LINE);
             let next_ly = u32::from(self.ly).wrapping_add(1);
             self.ly = if next_ly >= u32::from(LINES_PER_FRAME) {
                 0
             } else {
                 next_ly as u8
             };
+            if self.ly == 0 {
+                self.win_line = 0; // new frame: the window internal counter restarts (E03_12 spec)
+            } else if visible_line_ended && self.win_drawn {
+                self.win_line = self.win_line.wrapping_add(1); // advances only where a window pixel was produced (E03_12 spec)
+            }
         } else {
             self.dot_in_line = next_dot;
         }
@@ -390,6 +406,51 @@ impl Ppu {
     /// True while in VBlank: LY = 144..=153 (note 01_timing.md).
     pub fn vblank(&self) -> bool {
         self.ly >= VBLANK_FIRST_LINE
+    }
+
+    /// Window line condition (E03_12 spec): window enabled in LCDC bits 5 and 0 (DMG), and LY >= WY.
+    fn window_line_ok(&self, wy: u8) -> bool {
+        self.lcdc & LCDC_WIN_ENABLE != 0 && self.lcdc & LCDC_BG_ENABLE != 0 && self.ly >= wy
+    }
+
+    /// Color index of window pixel x_w (E03_12 spec): from the window tile map row `win_line`
+    /// with no SCX/SCY offset; tile data addressing and 2bpp decoding as for the background.
+    fn window_color(&self, vram: &[u8], lcdc: u8, x_w: u32) -> u8 {
+        let map_base = if lcdc & LCDC_WIN_MAP != 0 {
+            0x9C00 - 0x8000 // window tile map area $9C00 (E03_12 spec, note 04a "Selection des tile maps")
+        } else {
+            0x9800 - 0x8000 // default window tile map area $9800 (E03_12 spec)
+        };
+        let row = u32::from(self.win_line);
+        let tile_index = vram[(map_base + ((row >> 3) * 32 + ((x_w / 8) & 31))) as usize];
+        let data_base = if lcdc & LCDC_TILE_DATA != 0 {
+            u32::from(tile_index) // unsigned index from $8000 (E03_12 spec)
+        } else {
+            0x1000u32.wrapping_add((tile_index as i8) as u32) // signed index from $9000 (E03_12 spec)
+        };
+        let bit = (7 - (x_w % 8)) as usize; // pixel position within the tile, MSB first (note 04a "Tile data format")
+        let row_off = (data_base + (row % 8) * 2) as usize;
+        ((vram[row_off + 1] >> bit) & 1) << 1 | (vram[row_off] >> bit) & 1
+    }
+
+    /// One dot of window fetching (E03_12 spec): when the window is displayed on this line
+    /// (`window_line_ok`) and the pixel position has reached WX - 7, every output pixel from
+    /// that position on comes from the window tile data at row `win_line`. A visible window
+    /// pixel sets `win_drawn` so the internal line counter advances at the end of the line.
+    pub(crate) fn fetch_window(&mut self, vram: &[u8], wx: u8, wy: u8) {
+        if !self.lcd_on || self.mode != 3 {
+            return; // only the pixel phase of a visible line (E03_12 spec); LCD off forces mode 0
+        }
+        if !self.window_line_ok(wy) {
+            return; // window not displayed on this line: disabled in LCDC or LY < WY (E03_12 spec)
+        }
+        let pos = u32::from(self.pixels_output); // pixels output so far on this line
+        let start = u32::from(wx).saturating_sub(7); // the window starts when the pixel position reaches WX - 7 (E03_12 spec)
+        if pos > start {
+            let x_w = pos - 1 - start; // window pixel X, from the left edge of the window (E03_12 spec)
+            self.line_buf[(pos - 1) as usize] = self.window_color(vram, self.lcdc, x_w);
+            self.win_drawn = true; // a visible window pixel was produced on this line (E03_12 spec)
+        }
     }
 
     /// True while the CPU may access VRAM ($8000-$9FFF) (E03_10 spec): every mode except 3;
@@ -1046,6 +1107,136 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Run `dots` dots of PPU advancement exactly as Machine::tick does (E03_12 spec): one tick,
+    /// then one dot of pixel fetching and window fetching per dot.
+    fn run_dots(p: &mut Ppu, vram: &[u8], scx: u8, scy: u8, wx: u8, wy: u8, dots: u32) {
+        for _ in 0..dots {
+            p.tick();
+            p.fetch_pixels(vram, scx, scy);
+            p.fetch_window(vram, wx, wy);
+        }
+    }
+
+    /// VRAM with the BG map at $9800 pointing to tile 0 (row 0 = color index 2) and the window map
+    /// at $9C00 pointing to tile 1 (row 0 = color index 3), from the unsigned base $8000. In this
+    /// model a tile of index N stores its row bytes starting at VRAM offset N, so tile 0 and tile 1
+    /// share offset 1; setting it to 0xFF makes both rows uniform (E03_12 spec).
+    fn win_vram() -> [u8; 0x2000] {
+        let mut vram = [0x00u8; 0x2000];
+        for i in 0..1024 {
+            vram[(0x9800 - 0x8000) + i] = 0; // BG map $9800 -> tile 0 (E03_12 spec)
+        }
+        for i in 0..1024 {
+            vram[(0x9C00 - 0x8000) + i] = 1; // window map $9C00 -> tile 1 (E03_12 spec)
+        }
+        vram[0] = 0x00; // tile 0 row 0 low bit plane: background pixels are color index 2 (E03_12 spec)
+        vram[1] = 0xFF; // shared byte: tile 0 row 0 high AND tile 1 row 0 low (E03_12 spec)
+        vram[2] = 0xFF; // tile 1 row 0 high bit plane: window pixels are color index 3 (E03_12 spec)
+        vram
+    }
+
+    #[test]
+    fn e03_12_window_starts_at_the_right_pixel_for_wx() {
+        let vram = win_vram(); // background color 2, window color 3 on row 0 (E03_12 spec)
+        for (wx, first_win_x) in [(7u8, 0usize), (20, 13), (166, 159)] {
+            let mut p = Ppu {
+                lcdc: 0xF1,
+                ..Ppu::default()
+            }; // window enabled, map $9C00 (E03_12 spec)
+            run_dots(&mut p, &vram, 0, 0, wx, 0, LINE_DOTS); // line 0, WY = 0 (E03_12 spec)
+            for x in 0..LINE_PIXELS as usize {
+                let expected = if x >= first_win_x { 3 } else { 2 }; // window starts at screen X = WX - 7 (E03_12 spec)
+                assert_eq!(p.line_buf[x], expected, "wx {wx}, pixel {x}");
+            }
+        }
+    }
+
+    #[test]
+    fn e03_12_window_starts_on_the_wy_line() {
+        let vram = win_vram(); // line 4 background is color 0 (tile 0 row 4); window color 3 (E03_12 spec)
+        const WY: u8 = 5;
+        let mut p = Ppu {
+            lcdc: 0xF1,
+            ..Ppu::default()
+        }; // window enabled (E03_12 spec)
+        run_dots(&mut p, &vram, 0, 0, 7, WY, 5 * LINE_DOTS); // lines 0..4: LY < WY, no window (E03_12 spec)
+        assert!(
+            p.line_buf.iter().all(|&c| c == 0),
+            "line 4 (LY=4) is all background (E03_12 spec)"
+        );
+        run_dots(&mut p, &vram, 0, 0, 7, WY, LINE_DOTS); // line 5: LY = WY, the window starts (E03_12 spec)
+        assert!(
+            p.line_buf.iter().all(|&c| c == 3),
+            "line 5 (LY=5) is all window (E03_12 spec)"
+        );
+    }
+
+    #[test]
+    fn e03_12_win_line_advances_only_on_window_lines() {
+        let vram = win_vram();
+        const WY: u8 = 2; // no window on lines 0 and 1 (LY < WY); the window starts at line 2 (E03_12 spec)
+        let mut p = Ppu {
+            lcdc: 0xF1,
+            ..Ppu::default()
+        }; // window enabled (E03_12 spec)
+        run_dots(&mut p, &vram, 0, 0, 7, WY, 3 * LINE_DOTS); // lines 0..2 (E03_12 spec)
+        assert_eq!(
+            p.win_line, 1,
+            "only line 2 drew a window pixel: the counter advances once (E03_12 spec)"
+        );
+    }
+
+    #[test]
+    fn e03_12_win_line_stays_zero_when_window_disabled() {
+        let vram = win_vram();
+        let mut p = Ppu {
+            lcdc: 0x81,
+            ..Ppu::default()
+        }; // bit 5 clear: window disabled (E03_12 spec)
+        run_dots(&mut p, &vram, 0, 0, 7, 0, 3 * LINE_DOTS); // WX = 7, WY = 0 but the window is off (E03_12 spec)
+        assert_eq!(
+            p.win_line, 0,
+            "no window pixel drawn: the counter does not advance (E03_12 spec)"
+        );
+    }
+
+    #[test]
+    fn e03_12_window_map_selects_by_lcdc_bit6() {
+        let mut vram = [0x00u8; 0x2000];
+        for i in 0..1024 {
+            vram[(0x9800 - 0x8000) + i] = 16; // $9800 map -> tile 16 (E03_12 spec)
+        }
+        for i in 0..1024 {
+            vram[(0x9C00 - 0x8000) + i] = 48; // $9C00 map -> tile 48 (E03_12 spec)
+        }
+        // Tile data from the unsigned base $8000: in this model a tile of index N stores its row
+        // bytes starting at VRAM offset N, so tile 16 and tile 48 do not overlap (E03_12 spec).
+        vram[16] = 0x00; // tile 16 row 0 low bit plane: color index 2 (E03_12 spec)
+        vram[17] = 0xFF; // tile 16 row 0 high bit plane: color index 2 (E03_12 spec)
+        vram[48] = 0xFF; // tile 48 row 0 low bit plane: color index 3 (E03_12 spec)
+        vram[49] = 0xFF; // tile 48 row 0 high bit plane: color index 3 (E03_12 spec)
+
+        let mut p = Ppu {
+            lcdc: 0xB9, // bits 7,5,4,3,0 set: window map $9800 (bit 6 clear), BG map $9C00 (E03_12 spec)
+            ..Ppu::default()
+        };
+        run_dots(&mut p, &vram, 0, 0, 7, 0, LINE_DOTS); // WX = 7: the window covers the whole line (E03_12 spec)
+        assert!(
+            p.line_buf.iter().all(|&c| c == 2),
+            "bit 6 clear: window pixels from the $9800 map, not the BG's $9C00 map (E03_12 spec)"
+        );
+
+        let mut p = Ppu {
+            lcdc: 0xF1, // bits 7,6,5,4,0 set: window map $9C00 (bit 6 set), BG map $9800 (E03_12 spec)
+            ..Ppu::default()
+        };
+        run_dots(&mut p, &vram, 0, 0, 7, 0, LINE_DOTS); // WX = 7: the window covers the whole line (E03_12 spec)
+        assert!(
+            p.line_buf.iter().all(|&c| c == 3),
+            "bit 6 set: window pixels from the $9C00 map, not the BG's $9800 map (E03_12 spec)"
+        );
     }
 
     #[test]

@@ -183,6 +183,11 @@ impl Machine for Dmg {
         // not affected by the CPU access blocking set below. SCX/SCY are $FF43/$FF42 (note 04a).
         self.ppu
             .fetch_pixels(&self.bus.vram, self.bus.io[0x43], self.bus.io[0x42]);
+        // One dot of window fetching per dot (E03_12): when the pixel position has reached WX - 7
+        // with the window line condition met, the pixels from that position on come from the
+        // window tile map row win_line. WY/WX are $FF4A/$FF4B (note 04a).
+        self.ppu
+            .fetch_window(&self.bus.vram, self.bus.io[0x4B], self.bus.io[0x4A]);
         self.bus.ly = self.ppu.ly(); // LY ($FF44) mirror (E03_01); the coincidence flag reads it too (E03_08)
         self.bus.ppu_mode = self.ppu.mode(); // PPU mode mirror for the STAT readback (E03_08 spec, decision A_02)
         self.bus
