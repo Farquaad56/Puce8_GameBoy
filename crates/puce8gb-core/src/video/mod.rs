@@ -127,6 +127,10 @@ pub struct Ppu {
     /// Per-pixel marker for the sprite merge (E03_04 spec): set once a pixel has been resolved by
     /// the best winner among the selected sprites; cleared at the start of each visible line.
     line_resolved: [bool; LINE_PIXELS as usize],
+    /// Dots of mode 3 penalty incurred this line by sprite fetches (E03_13 spec): the fetcher is
+    /// paused for that many dots, so mode 3 lasts longer and mode 0 shorter. Computed once per
+    /// visible line from the selected sprites; cleared at the start of each visible line.
+    obj_penalty: u32,
 }
 
 impl Default for Ppu {
@@ -155,10 +159,39 @@ impl Default for Ppu {
             win_drawn: false, // no window pixel produced on the current line yet (E03_12 spec)
             sprites_rendered: false, // the sprite merge is due on line 0 (E03_04 spec)
             line_resolved: [false; LINE_PIXELS as usize], // no pixel resolved by a sprite yet (E03_04 spec)
+            obj_penalty: 0, // no sprite penalty incurred before the first OAM scan (E03_13 spec)
         };
-        p.mode = Self::mode_for(p.ly, p.dot_in_line, p.pixels_output); // start of line 0 is OAM scan (mode 2)
+        p.mode = Self::mode_for(p.ly, p.dot_in_line, p.pixels_output); // start of line 0 is OAM scan (E03_01)
         p
     }
+}
+
+/// Mode 3 extension caused by the sprites of one line (E03_13, note 04b "OBJ penalty").
+fn line_obj_penalty(xs: &[u8], scx: u8) -> u32 {
+    let n = xs.len().min(10);
+    let mut sorted = [0u8; 10];
+    sorted[..n].copy_from_slice(&xs[..n]);
+    sorted[..n].sort_unstable();
+    let mut seen = [u16::MAX; 10];
+    let mut total = 0u32;
+    for (i, &x) in sorted[..n].iter().enumerate() {
+        if x >= 168 {
+            continue;
+        }
+        if x == 0 {
+            total += 11;
+            continue;
+        }
+        let sum = u16::from(x) + u16::from(scx);
+        let tile = sum / 8;
+        let mut cost = 6u32;
+        if !seen[..i].contains(&tile) {
+            cost += 5u32.saturating_sub(u32::from(sum % 8));
+            seen[i] = tile;
+        }
+        total += cost;
+    }
+    total
 }
 
 impl Ppu {
@@ -191,6 +224,7 @@ impl Ppu {
         self.win_drawn = false; // no window pixel produced on this line yet (E03_12 spec)
         self.sprites_rendered = false; // the sprite merge is due again on this line (E03_04 spec)
         self.line_resolved.fill(false); // no pixel resolved by a sprite yet on this line (E03_04 spec)
+        self.obj_penalty = 0; // the sprite penalty of this line is recomputed at its OAM scan (E03_13 spec)
     }
 
     /// LCD and PPU enable state (LCDC ($FF40) bit 7, E03_09 spec).
@@ -299,6 +333,15 @@ impl Ppu {
         self.oam_scan_pending = false;
     }
 
+    /// Mode 3 extension of the current line from its sprites (E03_13 spec); call right after scan_oam.
+    pub(crate) fn set_obj_penalty(&mut self, oam: &[u8], scx: u8) {
+        let mut xs = [0u8; 10];
+        for (i, &idx) in self.line_sprites().iter().enumerate() {
+            xs[i] = oam[usize::from(idx) * 4 + 1];
+        }
+        self.obj_penalty = line_obj_penalty(&xs[..usize::from(self.line_sprite_count)], scx);
+    }
+
     /// OAM indexes of the sprites selected for the current line by the mode 2 scan, in OAM
     /// order (E03_02); consumed by `render_sprites` (E03_04).
     pub(crate) fn line_sprites(&self) -> &[u8] {
@@ -310,9 +353,11 @@ impl Ppu {
     /// leaves the FIFO per dot into `line_buf`. The low 3 bits of SCX are latched at the first
     /// dot of mode 3; the first SCX mod 8 produced pixels are discarded from the leftmost tile
     /// and delay the first output by that many dots, so mode 3 lasts 172 + SCX mod 8 (E03_11
-    /// spec, note 04a "SCY / SCX"). The tile map and tile data are read directly from VRAM,
-    /// bypassing CPU access blocking (E03_10 spec). Windows arrive with E03_12; OBJ penalties
-    /// with E03_13.
+    /// spec, note 04a "SCY / SCX"). The fetcher is also paused for `obj_penalty` dots this line:
+    /// each selected sprite costs a penalty of 6 to 11 dots from its tile fetch, so mode 3 lasts
+    /// longer and mode 0 shorter by the same amount (E03_13 spec, note 04b "Duree variable du
+    /// mode 3"). The tile map and tile data are read directly from VRAM, bypassing CPU access
+    /// blocking (E03_10 spec). Windows arrive with E03_12.
     pub(crate) fn fetch_pixels(&mut self, vram: &[u8], scx: u8, scy: u8) {
         if !self.lcd_on || self.mode != 3 {
             return; // only the pixel phase of a visible line (E03_03 spec); LCD off forces mode 0
@@ -323,7 +368,9 @@ impl Ppu {
             // a mid-line write changes only the high bits, which keep being re-read per tile fetch.
             self.fine_scroll = scx & 7;
         }
-        if u32::from(self.produce_count) < u32::from(LINE_PIXELS) + u32::from(self.fine_scroll) {
+        if u32::from(self.produce_count) < u32::from(LINE_PIXELS) + u32::from(self.fine_scroll)
+            && self.fifo_count < FIFO_CAP
+        {
             // The fetcher produces one pixel per dot until the line is done (note 04b); the first
             // SCX mod 8 pixels are discarded from the leftmost tile (E03_11 spec).
             let color = self.next_color(vram, scx, scy);
@@ -333,10 +380,12 @@ impl Ppu {
             }
             self.produce_count += 1;
         }
-        if dots_in_mode3 >= FETCH_INITIAL_DOTS + u32::from(self.fine_scroll) && self.fifo_count > 0
+        if dots_in_mode3 >= FETCH_INITIAL_DOTS + u32::from(self.fine_scroll) + self.obj_penalty
+            && self.fifo_count > 0
         {
             // One pixel leaves the FIFO per dot (E03_03 spec); the fine scroll pause delays the first
-            // output by SCX mod 8 dots, so mode 3 lasts 172 + SCX mod 8 (E03_11 spec).
+            // output by SCX mod 8 dots, so mode 3 lasts 172 + SCX mod 8 (E03_11 spec), and the sprite
+            // fetch penalty of this line delays it further by `obj_penalty` dots (E03_13 spec).
             let color = self.fifo_pop();
             // Background pixel: no sprite on top yet (E03_04 spec); the sprite merge may replace it.
             self.line_buf[self.pixels_output as usize] = PixelOut {
@@ -1724,5 +1773,102 @@ mod tests {
         }
         // mode 3 still lasts 172 + 3 dots: it ends on dot 254 (E03_11 spec)
         assert_eq!(last_mode3_dot, MODE2_DOTS + MODE3_LEN + 3 - 1);
+    }
+
+    #[test]
+    fn e03_13_line_obj_penalty_values() {
+        // (sprite X positions, SCX) -> mode 3 extension in dots (E03_13 spec)
+        assert_eq!(line_obj_penalty(&[], 0), 0);
+        assert_eq!(line_obj_penalty(&[8], 0), 11);
+        assert_eq!(line_obj_penalty(&[13], 0), 6);
+        assert_eq!(line_obj_penalty(&[0], 0), 11);
+        assert_eq!(line_obj_penalty(&[160], 0), 11);
+        assert_eq!(line_obj_penalty(&[168], 0), 0);
+        assert_eq!(line_obj_penalty(&[8, 9], 0), 17);
+        assert_eq!(line_obj_penalty(&[16, 8], 0), 22);
+        assert_eq!(line_obj_penalty(&[8], 3), 8);
+        assert_eq!(line_obj_penalty(&[8; 10], 0), 65);
+    }
+
+    /// Run one visible line through the pixel pipeline with sprites at `xs` (all on screen line 0,
+    /// i.e. OAM Y = 16) and SCX = scx; return the last dot of mode 3 (E03_13 spec). The sprite
+    /// fetch penalty is computed from the selected sprites via scan_oam + set_obj_penalty, so this
+    /// measures how far the penalty pushes the end of mode 3 through the real pipeline.
+    fn mode3_last_dot_with_sprites(xs: &[u8], scx: u8) -> u32 {
+        let vram = [0x00u8; 0x2000]; // background tile 0 is colour 0 (E03_13 spec)
+        let mut oam = [0u8; 160];
+        for (i, &x) in xs.iter().enumerate() {
+            oam[i * 4] = 16; // Y=16: screen line 0 with LY=0 (E03_02 spec)
+            oam[i * 4 + 1] = x; // sprite X position (E03_13 spec)
+        }
+        let mut p = Ppu {
+            lcdc: 0x93, // bits 7,4,1,0: LCD on, unsigned tile data, sprites on, BG on (E03_13 spec)
+            ..Ppu::default()
+        };
+        p.scan_oam(&oam);
+        p.set_obj_penalty(&oam, scx); // the sprite penalty of this line (E03_13 spec)
+        let mut last_mode3_dot = 0u32;
+        for dot in 0..LINE_DOTS {
+            if dot > 0 {
+                p.tick();
+            }
+            p.fetch_pixels(&vram, scx, 0);
+            if p.mode() == 3 {
+                last_mode3_dot = dot;
+            }
+        }
+        assert_eq!(p.pixels_output, LINE_PIXELS); // all 160 pixels of the line are output (E03_13 spec)
+        last_mode3_dot
+    }
+
+    #[test]
+    fn e03_13_mode3_length_with_zero_sprites() {
+        // No sprites: mode 3 lasts exactly MODE3_LEN = 172 dots, ending on dot 251 (E03_13 spec).
+        assert_eq!(
+            mode3_last_dot_with_sprites(&[], 0),
+            MODE2_DOTS + MODE3_LEN - 1
+        );
+    }
+
+    #[test]
+    fn e03_13_mode3_length_with_one_sprite() {
+        // One sprite at X=8 (leftmost pixel column 0, the left edge of tile 0): penalty = 6 + 5 = 11
+        // dots (E03_13 spec), so mode 3 lasts 172 + 11 = 183 dots, ending on dot 262.
+        assert_eq!(
+            mode3_last_dot_with_sprites(&[8], 0),
+            MODE2_DOTS + MODE3_LEN - 1 + 11
+        );
+    }
+
+    #[test]
+    fn e03_13_mode3_length_with_ten_sprites() {
+        // Ten sprites all at X=8: the first costs 6 + 5 = 11 dots (its tile not yet considered), each
+        // of the other nine shares that tile and costs only the fixed 6-dot OBJ fetch, so the penalty
+        // is 11 + 9 * 6 = 65 dots (E03_13 spec); mode 3 lasts 172 + 65 = 237 dots, ending on dot 316.
+        assert_eq!(
+            mode3_last_dot_with_sprites(&[8; 10], 0),
+            MODE2_DOTS + MODE3_LEN - 1 + 65
+        );
+    }
+
+    #[test]
+    fn e03_13_sprite_at_x_zero_costs_eleven_dots_regardless_of_scx() {
+        // A sprite at X=0 is completely off-screen to the left: it always costs 11 dots, whatever SCX
+        // (E03_13 spec). With SCX=3 the fine scroll adds 3 more dots, so mode 3 lasts 172 + 11 + 3 =
+        // 186 dots, ending on dot 265.
+        assert_eq!(
+            mode3_last_dot_with_sprites(&[0], 3),
+            MODE2_DOTS + MODE3_LEN - 1 + 11 + 3
+        );
+    }
+
+    #[test]
+    fn e03_13_sprite_at_x_160_costs_eleven_dots() {
+        // A sprite at X=160 has its leftmost pixel on column 152, the left edge of tile 19: penalty =
+        // 6 + 5 = 11 dots (E03_13 spec); mode 3 lasts 172 + 11 = 183 dots, ending on dot 262.
+        assert_eq!(
+            mode3_last_dot_with_sprites(&[160], 0),
+            MODE2_DOTS + MODE3_LEN - 1 + 11
+        );
     }
 }

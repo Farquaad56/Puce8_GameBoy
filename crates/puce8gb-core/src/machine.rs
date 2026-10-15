@@ -178,6 +178,7 @@ impl Machine for Dmg {
         // it is done here on entry to mode 2 (E03_02 spec).
         if self.ppu.oam_scan_due() {
             self.ppu.scan_oam(&self.bus.oam);
+            self.ppu.set_obj_penalty(&self.bus.oam, self.bus.io[0x43]);
         }
         // One dot of pixel fetching per dot (E03_03): the fetcher reads VRAM directly, so it is
         // not affected by the CPU access blocking set below. SCX/SCY are $FF43/$FF42 (note 04a).
