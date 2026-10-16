@@ -10,6 +10,12 @@ pub const IO_SIZE: usize = 0x100;
 /// Header checksum address in bank 0 (note 07a).
 pub const ROM_HEADER_CHECKSUM: usize = 0x14D;
 
+/// Read masks of $FF10-$FF26: a read returns the stored value OR the mask (unused and write-only bits read 1; consistent with the post-boot table of note 05a). Which value a write-only register returns: UNKNOWN - to confirm.
+const APU_READ_MASK: [u8; 23] = [
+    0x80, 0x3F, 0x00, 0xFF, 0xBF, 0xFF, 0x3F, 0x00, 0xFF, 0xBF, 0x7F, 0xFF, 0x9F, 0xFF, 0xBF, 0xFF,
+    0xFF, 0x00, 0x00, 0xBF, 0x00, 0x00, 0x70,
+]; // index = address - 0xFF10: NR10..NR52 with the unused $FF15 and $FF1F slots (E04_01 spec)
+
 /// Every memory region of the DMG bus (decision A_02, note 03a "Adresse bus").
 #[derive(Debug)]
 pub struct Bus {
@@ -109,15 +115,15 @@ impl Bus {
         io[0x12] = 0xF3; // NR12
         io[0x13] = 0xFF; // NR13
         io[0x14] = 0xBF; // NR14
-        io[0x15] = 0x3F; // NR21
-        io[0x16] = 0x00; // NR22
-        io[0x17] = 0xFF; // NR23
-        io[0x18] = 0xBF; // NR24
-        io[0x19] = 0x7F; // NR30
-        io[0x1A] = 0xFF; // NR31
-        io[0x1B] = 0x9F; // NR32
-        io[0x1C] = 0xFF; // NR33
-        io[0x1D] = 0xBF; // NR34
+        io[0x16] = 0x3F; // NR21
+        io[0x17] = 0x00; // NR22
+        io[0x18] = 0xFF; // NR23
+        io[0x19] = 0xBF; // NR24
+        io[0x1A] = 0x7F; // NR30
+        io[0x1B] = 0xFF; // NR31
+        io[0x1C] = 0x9F; // NR32
+        io[0x1D] = 0xFF; // NR33
+        io[0x1E] = 0xBF; // NR34
         io[0x20] = 0xFF; // NR41
         io[0x21] = 0x00; // NR42
         io[0x22] = 0x00; // NR43
@@ -183,6 +189,9 @@ impl Bus {
             0xFF05 => self.timer.tima(), // TIMA ($FF05, note 01b)
             0xFF06 => self.timer.tma(), // TMA ($FF06, note 01b)
             0xFF07 => self.timer.tac(), // TAC ($FF07, note 01b)
+            0xFF10..=0xFF26 => {
+                self.io[(addr - 0xFF00) as usize] | APU_READ_MASK[(addr - 0xFF10) as usize]
+            } // APU registers with read masks (E04_01 spec)
             0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.io[IO_SIZE - 1], // IE (decision A_02)
@@ -241,6 +250,23 @@ impl Bus {
                 self.dma_src = u16::from(val) << 8; // source = V * 0x100; sources above 0xDF: UNKNOWN - to confirm (note 03a)
                 self.dma_index = 0; // a write during a transfer restarts it: UNKNOWN - to confirm (A_02 is silent)
                 self.dma_active = true;
+            }
+            0xFF26 => {
+                // NR52: bit 7 = APU power; bits 3-0 are read-only channel status, a write never changes them (E04_01 spec, note 05a/05b)
+                let old = self.io[0x26];
+                if val & 0x80 != 0 {
+                    self.io[0x26] = 0x80 | (old & 0x0F);
+                } else {
+                    if old & 0x80 != 0 {
+                        self.io[0x10..=0x25].fill(0x00); // power off clears every APU register; wave RAM FF30-FF3F and the DIV-APU counter are not affected (E04_01 spec, note 05b)
+                    }
+                    self.io[0x26] = 0x00; // power off: status bits 3-0 are 0 too
+                }
+            }
+            0xFF10..=0xFF25 => {
+                if self.io[0x26] & 0x80 != 0 {
+                    self.io[(addr - 0xFF00) as usize] = val; // APU registers are read-only while the APU is off (E04_01 spec, note 05b)
+                }
             }
             0xFF00..=0xFF7F => {
                 self.io[(addr - 0xFF00) as usize] = val;
@@ -904,5 +930,115 @@ mod tests {
         assert_eq!(bus.read(0xC000), 0xFF); // restricted on the last M-cycle of the transfer
         bus.dma_step(); // the 160th and final step ends the transfer (E03_06 spec)
         assert_eq!(bus.read(0xC000), 0x42); // the restriction is gone exactly with it
+    }
+
+    #[test]
+    fn e04_01_post_boot_apu_registers_read_as_in_note() {
+        let mut bus = Bus::new(vec![0u8; 0x8000]);
+        bus.reset();
+        for (address, expected) in [
+            (0xFF10, 0x80), // NR10
+            (0xFF11, 0xBF), // NR11
+            (0xFF12, 0xF3), // NR12
+            (0xFF13, 0xFF), // NR13
+            (0xFF14, 0xBF), // NR14
+            (0xFF15, 0xFF), // unused $FF15
+            (0xFF16, 0x3F), // NR21
+            (0xFF17, 0x00), // NR22
+            (0xFF18, 0xFF), // NR23
+            (0xFF19, 0xBF), // NR24
+            (0xFF1A, 0x7F), // NR30
+            (0xFF1B, 0xFF), // NR31
+            (0xFF1C, 0x9F), // NR32
+            (0xFF1D, 0xFF), // NR33
+            (0xFF1E, 0xBF), // NR34
+            (0xFF1F, 0xFF), // unused $FF1F
+            (0xFF20, 0xFF), // NR41
+            (0xFF21, 0x00), // NR42
+            (0xFF22, 0x00), // NR43
+            (0xFF23, 0xBF), // NR44
+            (0xFF24, 0x77), // NR50
+            (0xFF25, 0xF3), // NR51
+            (0xFF26, 0xF1), // NR52
+        ] {
+            assert_eq!(bus.read(address), expected, "address {:#06X}", address);
+        }
+    }
+
+    #[test]
+    fn e04_01_unused_apu_addresses_read_ff() {
+        let mut bus = Bus::new(vec![0u8; 0x8000]);
+        bus.reset();
+        assert_eq!(bus.read(0xFF15), 0xFF); // unused $FF15: open-bus default (E04_01 spec)
+        assert_eq!(bus.read(0xFF1F), 0xFF); // unused $FF1F: open-bus default (E04_01 spec)
+        assert_eq!(bus.read(0xFF27), 0xFF); // past NR52, before wave RAM: open bus (E04_01 spec)
+        assert_eq!(bus.read(0xFF2F), 0xFF); // unused $FF2F: open-bus default (E04_01 spec)
+    }
+
+    #[test]
+    fn e04_01_power_off_clears_registers_and_keeps_wave_ram() {
+        let mut bus = Bus::new(vec![0u8; 0x8000]);
+        bus.reset();
+        bus.write(0xFF30, 0x5A); // wave RAM byte before the power-off (E04_01 spec)
+        bus.write(0xFF26, 0x00); // APU power off: every APU register is cleared (note 05b)
+        assert_eq!(bus.read(0xFF10), 0x80); // NR10: stored $00 OR mask $80
+        assert_eq!(bus.read(0xFF11), 0x3F); // NR11
+        assert_eq!(bus.read(0xFF12), 0x00); // NR12
+        assert_eq!(bus.read(0xFF13), 0xFF); // NR13
+        assert_eq!(bus.read(0xFF14), 0xBF); // NR14
+        assert_eq!(bus.read(0xFF16), 0x3F); // NR21
+        assert_eq!(bus.read(0xFF17), 0x00); // NR22
+        assert_eq!(bus.read(0xFF19), 0xBF); // NR24
+        assert_eq!(bus.read(0xFF1A), 0x7F); // NR30
+        assert_eq!(bus.read(0xFF1C), 0x9F); // NR32
+        assert_eq!(bus.read(0xFF21), 0x00); // NR42
+        assert_eq!(bus.read(0xFF22), 0x00); // NR43
+        assert_eq!(bus.read(0xFF23), 0xBF); // NR44
+        assert_eq!(bus.read(0xFF24), 0x00); // NR50: cleared, and its read mask is $00 (E04_01 spec)
+        assert_eq!(bus.read(0xFF25), 0x00); // NR51
+        assert_eq!(bus.read(0xFF26), 0x70); // NR52: power off, status bits 3-0 are 0 too (E04_01 spec)
+        assert_eq!(bus.read(0xFF30), 0x5A); // wave RAM is not affected by the power-off (note 05b)
+    }
+
+    #[test]
+    fn e04_01_writes_are_ignored_while_off_except_nr52_and_wave_ram() {
+        let mut bus = Bus::new(vec![0u8; 0x8000]);
+        bus.reset();
+        bus.write(0xFF26, 0x00); // APU power off (E04_01 spec)
+        bus.write(0xFF12, 0x77); // ignored while the APU is off (note 05b)
+        bus.write(0xFF24, 0x55); // ignored while the APU is off (note 05b)
+        bus.write(0xFF30, 0x12); // wave RAM stays writable (E04_01 spec)
+        assert_eq!(bus.read(0xFF12), 0x00);
+        assert_eq!(bus.read(0xFF24), 0x00);
+        assert_eq!(bus.read(0xFF30), 0x12);
+        bus.write(0xFF26, 0x80); // APU power on again (E04_01 spec)
+        assert_eq!(bus.read(0xFF26), 0xF0); // NR52: bit 7 set, status bits read back as $F0 here (E04_01 spec)
+    }
+
+    #[test]
+    fn e04_01_registers_are_writable_again_after_power_on() {
+        let mut bus = Bus::new(vec![0u8; 0x8000]);
+        bus.reset();
+        bus.write(0xFF26, 0x00); // APU power off (E04_01 spec)
+        bus.write(0xFF26, 0x80); // APU power on again (E04_01 spec)
+        bus.write(0xFF12, 0x77); // writable while the APU is on (note 05b)
+        bus.write(0xFF24, 0x55);
+        bus.write(0xFF25, 0xAA);
+        bus.write(0xFF11, 0x40);
+        assert_eq!(bus.read(0xFF12), 0x77);
+        assert_eq!(bus.read(0xFF24), 0x55);
+        assert_eq!(bus.read(0xFF25), 0xAA);
+        assert_eq!(bus.read(0xFF11), 0x7F); // stored $40 OR mask $3F (E04_01 spec)
+    }
+
+    #[test]
+    fn e04_01_nr52_status_bits_are_read_only() {
+        let mut bus = Bus::new(vec![0u8; 0x8000]);
+        bus.reset();
+        assert_eq!(bus.read(0xFF26), 0xF1); // post-boot NR52 (note 08)
+        bus.write(0xFF26, 0x80); // a write never changes the status bits 3-0 (E04_01 spec)
+        assert_eq!(bus.read(0xFF26), 0xF1);
+        bus.write(0xFF26, 0x8F); // even writing the status bits themselves has no effect (E04_01 spec)
+        assert_eq!(bus.read(0xFF26), 0xF1);
     }
 }

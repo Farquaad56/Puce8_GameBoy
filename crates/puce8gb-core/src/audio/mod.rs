@@ -1,5 +1,6 @@
-//! APU / audio (decisions A_04/A_05): sample ring for now; channel state and mixing arrive
-//! with later tasks.
+//! APU / audio (decisions A_04/A_05): sample ring and frame sequencer; channel state and mixing arrive
+
+pub mod apu;
 
 use crate::machine::AUDIO_RING_SAMPLES;
 
@@ -11,6 +12,8 @@ pub struct Audio {
     pub ring: [i16; AUDIO_RING_SAMPLES],
     pub head: u32,
     pub tail: u32,
+    /// APU frame sequencer state (E04_01).
+    pub apu: crate::audio::apu::Apu,
 }
 
 impl Default for Audio {
@@ -19,6 +22,7 @@ impl Default for Audio {
             ring: [0x00; AUDIO_RING_SAMPLES],
             head: 0,
             tail: 0,
+            apu: crate::audio::apu::Apu::default(),
         }
     }
 }

@@ -144,6 +144,7 @@ impl Machine for Dmg {
         let checksum = self.bus.rom[ROM_HEADER_CHECKSUM];
         self.cpu = Cpu::reset(checksum);
         self.bus.reset();
+        self.audio.apu.reset(self.bus.timer.div());
         self.ppu.reset(); // LY, dot counter and mode restart at the start of line 0 (E03_01)
         self.audio.head = 0;
         self.audio.tail = 0;
@@ -174,6 +175,8 @@ impl Machine for Dmg {
             }
             // OAM DMA advances one byte per M-cycle, after the CPU and the timer (decision A_01 order, E03_06 spec).
             self.bus.dma_step();
+            // APU frame sequencer: one step per falling edge of DIV bit 4, read after the timer ticked (E04_01 spec, note 05b); no dependency on the PPU, so it lives in the M-cycle block. The returned EV_* events are consumed by later tasks.
+            self.audio.apu.tick(self.bus.timer.div());
         }
         // PPU advances one dot per Machine::tick() (decision A_01, E03_01). LY is mirrored
         // into the bus so $FF44 reads are side-effect-free; entry into VBlank (LY 143 -> 144)
@@ -288,15 +291,15 @@ mod tests {
         (0x12, 0xF3), // NR12
         (0x13, 0xFF), // NR13
         (0x14, 0xBF), // NR14
-        (0x15, 0x3F), // NR21
-        (0x16, 0x00), // NR22
-        (0x17, 0xFF), // NR23
-        (0x18, 0xBF), // NR24
-        (0x19, 0x7F), // NR30
-        (0x1A, 0xFF), // NR31
-        (0x1B, 0x9F), // NR32
-        (0x1C, 0xFF), // NR33
-        (0x1D, 0xBF), // NR34
+        (0x16, 0x3F), // NR21
+        (0x17, 0x00), // NR22
+        (0x18, 0xFF), // NR23
+        (0x19, 0xBF), // NR24
+        (0x1A, 0x7F), // NR30
+        (0x1B, 0xFF), // NR31
+        (0x1C, 0x9F), // NR32
+        (0x1D, 0xFF), // NR33
+        (0x1E, 0xBF), // NR34
         (0x20, 0xFF), // NR41
         (0x21, 0x00), // NR42
         (0x22, 0x00), // NR43
@@ -509,6 +512,35 @@ mod tests {
             }
         }
         assert_eq!(raises, 1); // exactly one vblank request per frame (note 02b)
+    }
+
+    #[test]
+    fn e04_01_machine_clocks_the_frame_sequencer_from_div() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        dmg.bus.write(0xFF04, 0x00);
+        assert_eq!(dmg.audio.apu.step, 0);
+        for _ in 0..8191 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.audio.apu.step, 0);
+        dmg.tick();
+        assert_eq!(dmg.audio.apu.step, 1);
+        for _ in 0..57344 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.audio.apu.step, 0);
+    }
+
+    #[test]
+    fn e04_01_reset_restarts_the_sequencer_at_step_0() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        dmg.bus.write(0xFF04, 0x00);
+        for _ in 0..8192 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.audio.apu.step, 1);
+        dmg.reset();
+        assert_eq!(dmg.audio.apu.step, 0);
     }
 
     #[test]
