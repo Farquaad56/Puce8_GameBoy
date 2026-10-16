@@ -334,9 +334,9 @@ impl Bus {
         self.dma_active
     }
 
-    /// Mirror the channel 1, 2 and 3 enabled flags into NR52 bits 0-2 (channel 4 arrives later).
+    /// Mirror the channel 1 to 4 enabled flags into NR52 bits 0-3.
     pub fn set_apu_status(&mut self, bits: u8) {
-        self.io[0x26] = (self.io[0x26] & !0x07) | (bits & 0x07);
+        self.io[0x26] = (self.io[0x26] & !0x0F) | (bits & 0x0F);
     }
 
     /// Copy of wave RAM ($FF30-$FF3F) for the wave channel. Access rules while channel 3 plays: UNKNOWN - to confirm.
@@ -1107,5 +1107,15 @@ mod tests {
         assert_eq!(bus.read(0xFF26) & 0x07, 0x07);
         bus.set_apu_status(0x00);
         assert_eq!(bus.read(0xFF26) & 0x07, 0x00);
+    }
+
+    #[test]
+    fn e04_04_bus_status_bit_3_follows_set_apu_status() {
+        let mut bus = Bus::new(vec![0u8; 0x8000]);
+        bus.reset();
+        bus.set_apu_status(0x0F);
+        assert_eq!(bus.read(0xFF26) & 0x0F, 0x0F);
+        bus.set_apu_status(0x00);
+        assert_eq!(bus.read(0xFF26) & 0x0F, 0x00);
     }
 }

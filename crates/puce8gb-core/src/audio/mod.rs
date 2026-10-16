@@ -1,6 +1,7 @@
 //! APU / audio (decisions A_04/A_05): sample ring and frame sequencer; channel state and mixing arrive
 
 pub mod apu;
+pub mod noise;
 pub mod pulse;
 pub mod wave;
 

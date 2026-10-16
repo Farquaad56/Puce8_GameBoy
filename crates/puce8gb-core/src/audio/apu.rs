@@ -1,6 +1,7 @@
 //! APU frame sequencer (E04_01): clocked by the falling edge of DIV bit 4 at 512 Hz,
 //! running one step per edge over an 8-step cycle (note 05b).
 
+use crate::audio::noise::Noise;
 use crate::audio::pulse::Pulse;
 use crate::audio::wave::Wave;
 
@@ -27,6 +28,7 @@ pub struct Apu {
     pub pulse1: Pulse,
     pub pulse2: Pulse,
     pub wave: Wave,
+    pub noise: Noise,
 }
 
 impl Apu {
@@ -37,6 +39,7 @@ impl Apu {
         self.pulse1 = Pulse::post_boot();
         self.pulse2 = Pulse::default();
         self.wave = Wave::default();
+        self.noise = Noise::default();
     }
 
     /// Call once per M-cycle, after the timer, with the current DIV value; returns the EV_* bits of the step that just ran, or 0.
@@ -63,6 +66,7 @@ impl Apu {
             self.pulse1.clock_length();
             self.pulse2.clock_length();
             self.wave.clock_length();
+            self.noise.clock_length();
         }
         if events & EV_SWEEP != 0 {
             self.pulse1.clock_sweep();
@@ -70,20 +74,25 @@ impl Apu {
         if events & EV_ENVELOPE != 0 {
             self.pulse1.clock_envelope();
             self.pulse2.clock_envelope();
+            self.noise.clock_envelope();
         }
         self.pulse1.tick();
         self.pulse2.tick();
         if self.wave.enabled {
             self.wave.tick();
         }
+        if self.noise.enabled {
+            self.noise.tick();
+        }
         events
     }
 
-    /// Bits 0-2 of NR52: channel 1, 2 and 3 enabled flags.
+    /// Bits 0-3 of NR52: channel 1, 2, 3 and 4 enabled flags.
     pub fn status(&self) -> u8 {
         u8::from(self.pulse1.enabled)
             | (u8::from(self.pulse2.enabled) << 1)
             | (u8::from(self.wave.enabled) << 2)
+            | (u8::from(self.noise.enabled) << 3)
     }
 
     fn write_nrx3(p: &mut Pulse, v: u8) {
@@ -129,10 +138,20 @@ impl Apu {
                     self.wave.trigger();
                 }
             }
+            0xFF20 => self.noise.write_nr41(v),
+            0xFF21 => self.noise.write_nr42(v),
+            0xFF22 => self.noise.write_nr43(v),
+            0xFF23 => {
+                self.noise.length_enable = v & 0x40 != 0;
+                if v & 0x80 != 0 {
+                    self.noise.trigger();
+                }
+            }
             0xFF26 if v & 0x80 == 0 => {
                 self.pulse1 = Pulse::default();
                 self.pulse2 = Pulse::default();
                 self.wave = Wave::default();
+                self.noise = Noise::default();
             }
             _ => {}
         }
@@ -343,5 +362,65 @@ mod tests {
         apu.tick(0x00);
         assert_eq!(apu.wave.pos, 2);
         assert_eq!(apu.wave.sample, 3);
+    }
+
+    #[test]
+    fn e04_04_write_reg_trigger_enables_channel_4() {
+        let mut apu = Apu::default();
+        apu.write_reg(0xFF21, 0xF0);
+        apu.write_reg(0xFF22, 0x00);
+        apu.write_reg(0xFF23, 0x80);
+        assert!(apu.noise.enabled);
+        assert_eq!(apu.status(), 0x08);
+    }
+
+    #[test]
+    fn e04_04_sequencer_length_event_expires_channel_4() {
+        let mut apu = Apu::default();
+        apu.write_reg(0xFF21, 0xF0);
+        apu.write_reg(0xFF20, 0x3F);
+        apu.write_reg(0xFF23, 0xC0);
+        assert_eq!(apu.status(), 0x08);
+        apu.tick(0x10);
+        apu.tick(0x00);
+        assert_eq!(apu.status(), 0x00);
+    }
+
+    #[test]
+    fn e04_04_power_off_clears_channel_4() {
+        let mut apu = Apu::default();
+        apu.write_reg(0xFF21, 0xF0);
+        apu.write_reg(0xFF23, 0x80);
+        assert_eq!(apu.status(), 0x08);
+        apu.write_reg(0xFF26, 0x00);
+        assert_eq!(apu.status(), 0x00);
+        assert!(!apu.noise.dac_on);
+    }
+
+    #[test]
+    fn e04_04_sequencer_step_7_clocks_the_noise_envelope() {
+        let mut apu = Apu::default();
+        apu.write_reg(0xFF21, 0xF1);
+        apu.write_reg(0xFF23, 0x80);
+        for _ in 0..7 {
+            apu.tick(0x10);
+            apu.tick(0x00);
+        }
+        assert_eq!(apu.noise.volume, 15);
+        apu.tick(0x10);
+        apu.tick(0x00);
+        assert_eq!(apu.noise.volume, 14);
+    }
+
+    #[test]
+    fn e04_04_tick_steps_the_lfsr_every_period() {
+        let mut apu = Apu::default();
+        apu.write_reg(0xFF21, 0xF0);
+        apu.write_reg(0xFF22, 0x00);
+        apu.write_reg(0xFF23, 0x80);
+        apu.tick(0x00);
+        assert_eq!(apu.noise.lfsr, 0);
+        apu.tick(0x00);
+        assert_eq!(apu.noise.lfsr, 0x8000);
     }
 }

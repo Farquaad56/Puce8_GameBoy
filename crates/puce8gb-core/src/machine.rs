@@ -1111,4 +1111,40 @@ mod tests {
         assert_eq!(dmg.bus.read(0xFF30), 0x12);
         assert_eq!(dmg.audio.apu.wave.ram[0], 0x12);
     }
+
+    #[test]
+    fn e04_04_machine_relays_noise_registers() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        apu_write(&mut dmg, 0xFF21, 0xF0);
+        apu_write(&mut dmg, 0xFF22, 0x00);
+        apu_write(&mut dmg, 0xFF23, 0x80);
+        assert!(dmg.audio.apu.noise.enabled);
+        assert_eq!(dmg.bus.read(0xFF26) & 0x0F, 0x09);
+    }
+
+    #[test]
+    fn e04_04_length_expiry_clears_nr52_bit_3() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        dmg.bus.write(0xFF04, 0x00);
+        apu_write(&mut dmg, 0xFF20, 0x3F);
+        apu_write(&mut dmg, 0xFF21, 0xF0);
+        apu_write(&mut dmg, 0xFF22, 0x00);
+        apu_write(&mut dmg, 0xFF23, 0xC0);
+        assert_eq!(dmg.bus.read(0xFF26) & 0x08, 0x08);
+        for _ in 0..8192 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.read(0xFF26) & 0x0F, 0x01);
+    }
+
+    #[test]
+    fn e04_04_power_off_clears_channel_4() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        apu_write(&mut dmg, 0xFF21, 0xF0);
+        apu_write(&mut dmg, 0xFF23, 0x80);
+        assert!(dmg.audio.apu.noise.enabled);
+        apu_write(&mut dmg, 0xFF26, 0x00);
+        assert_eq!(dmg.bus.read(0xFF26), 0x70);
+        assert!(!dmg.audio.apu.noise.enabled);
+    }
 }
