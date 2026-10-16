@@ -80,6 +80,8 @@ pub struct Dmg {
     /// Previous value of the STAT interrupt line for rising-edge detection (E03_08): IF bit 1
     /// is set only on a 0 -> 1 transition; while the line stays high no new request is raised.
     stat_line_prev: bool,
+    /// Frames completed since reset, incremented at each frame boundary (E03_14 spec).
+    frame_count: u64,
 }
 
 impl Dmg {
@@ -100,6 +102,7 @@ impl Dmg {
             input: Input::default(),
             dot_phase: 0,
             stat_line_prev: false, // no STAT request pending at power-up (E03_08)
+            frame_count: 0,
         };
         dmg.reset();
         Ok(dmg)
@@ -128,6 +131,11 @@ impl Dmg {
             || (stat & 0x10 != 0 && mode == 1) // bit 4: VBlank
             || (stat & 0x08 != 0 && mode == 0) // bit 3: HBlank
     }
+
+    /// Frames completed since reset, incremented at each frame boundary (E03_14 spec).
+    pub fn frame_count(&self) -> u64 {
+        self.frame_count
+    }
 }
 
 impl Machine for Dmg {
@@ -142,6 +150,7 @@ impl Machine for Dmg {
         self.dot_phase = 0;
         // The STAT interrupt line is low at power-up: no pending request (E03_08).
         self.stat_line_prev = false;
+        self.frame_count = 0;
         // Mirror the PPU's CPU access state for VRAM/OAM at power-up and reset (E03_10);
         // Dmg::new ends by calling this, so both paths are covered.
         self.bus
@@ -172,6 +181,9 @@ impl Machine for Dmg {
         // in this same dot takes effect immediately (decision A_01: CPU first; E03_09 spec).
         self.ppu.set_lcd_enabled(self.bus.io[0x40]);
         let line_changed = self.ppu.tick();
+        if line_changed && self.ppu.ly() == 0 {
+            self.frame_count += 1; // line 153 -> 0: a frame boundary (E03_14 spec)
+        }
         // Mode 2 OAM scan of the current line, performed once per visible line (E03_02): the
         // PPU reads the 40 OAM entries directly from the bus; CPU access blocking arrives with
         // E03_10. The result is identical whether the scan runs at dot 80 or all at once, so
@@ -208,6 +220,12 @@ impl Machine for Dmg {
             self.bus.io[0x0F] |= 0x02; // IF bit 1: STAT request (note 04a)
         }
         self.stat_line_prev = line_now;
+    }
+
+    fn run_frame(&mut self) {
+        for _ in 0..FRAME_DOTS {
+            self.tick();
+        }
     }
 
     fn framebuffer(&self) -> &[u32] {
@@ -833,5 +851,71 @@ mod tests {
         assert_eq!(dmg.bus.read(0x8000), 0xA5); // VRAM free when the LCD is off (E03_10 spec)
         dmg.bus.write(0xFE00, 0x90);
         assert_eq!(dmg.bus.read(0xFE00), 0x90); // OAM free when the LCD is off (E03_10 spec)
+    }
+
+    #[test]
+    fn e03_14_frame_boundary_after_exactly_70224_ticks() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        for _ in 0..70223 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.frame_count(), 0); // no frame boundary yet (E03_14 spec)
+        assert_eq!(dmg.ppu.ly(), 153); // last line of the frame
+                                       // The next dot wraps LY to 0: exactly one frame has completed.
+        dmg.tick();
+        assert_eq!(dmg.frame_count(), 1);
+        assert_eq!(dmg.ppu.ly(), 0);
+    }
+
+    #[test]
+    fn e03_14_frame_count_increments_once_per_run_frame() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        dmg.run_frame();
+        assert_eq!(dmg.frame_count(), 1); // one frame boundary per run_frame (E03_14 spec)
+        dmg.run_frame();
+        assert_eq!(dmg.frame_count(), 2);
+        dmg.run_frame();
+        assert_eq!(dmg.frame_count(), 3);
+    }
+
+    #[test]
+    fn e03_14_two_machines_give_identical_framebuffers() {
+        let mut a = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        let mut b = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        a.bus.vram[0] = 0xFF; // identical starting state on both machines (E03_14 spec)
+        a.bus.vram[1] = 0xFF;
+        b.bus.vram[0] = 0xFF;
+        b.bus.vram[1] = 0xFF;
+        for _ in 0..3 {
+            a.run_frame();
+            b.run_frame();
+        }
+        assert_eq!(a.framebuffer(), b.framebuffer()); // deterministic: same image (E03_14 spec)
+        assert_eq!(a.frame_count(), 3);
+    }
+
+    #[test]
+    fn e03_14_machine_draws_a_tile_row() {
+        use crate::video::PALETTE;
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        // Tile 0 row 0 is colour 3 (both bit planes all set); its other rows are 0.
+        dmg.bus.vram[0] = 0xFF;
+        dmg.bus.vram[1] = 0xFF;
+        dmg.run_frame();
+        let fb = dmg.framebuffer();
+        // BGP post-boot 0xFC: index 3 -> shade 3, index 0 -> shade 0 (E03_14 spec).
+        assert!(
+            fb[0..160].iter().all(|&px| px == PALETTE[3]),
+            "row 0 must be all shade 3"
+        );
+        assert!(
+            fb[160..320].iter().all(|&px| px == PALETTE[0]),
+            "row 1 must be all shade 0"
+        );
+        // The tile map repeats tile 0 every 8 lines, so row 8 shows the same tile row 0.
+        assert!(
+            fb[8 * 160..9 * 160].iter().all(|&px| px == PALETTE[3]),
+            "row 8 must be all shade 3"
+        );
     }
 }
