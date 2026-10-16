@@ -1,6 +1,8 @@
 //! APU frame sequencer (E04_01): clocked by the falling edge of DIV bit 4 at 512 Hz,
 //! running one step per edge over an 8-step cycle (note 05b).
 
+use crate::audio::pulse::Pulse;
+
 /// Length counters clocked: steps 0, 2, 4, 6 (256 Hz).
 pub const EV_LENGTH: u8 = 0x01;
 /// CH1 sweep clocked: steps 2, 6 (128 Hz).
@@ -21,6 +23,8 @@ pub struct Apu {
     pub step: u8,
     /// Bit 4 of DIV as seen on the previous tick; a falling edge runs one step.
     prev_div_bit: bool,
+    pub pulse1: Pulse,
+    pub pulse2: Pulse,
 }
 
 impl Apu {
@@ -28,10 +32,12 @@ impl Apu {
     pub fn reset(&mut self, div: u8) {
         self.step = 0;
         self.prev_div_bit = div & DIV_APU_BIT != 0;
+        self.pulse1 = Pulse::post_boot();
+        self.pulse2 = Pulse::default();
     }
 
     /// Call once per M-cycle, after the timer, with the current DIV value; returns the EV_* bits of the step that just ran, or 0.
-    pub fn tick(&mut self, div: u8) -> u8 {
+    fn step_sequencer(&mut self, div: u8) -> u8 {
         let bit = div & DIV_APU_BIT != 0;
         let mut events: u8 = 0;
         if self.prev_div_bit && !bit {
@@ -45,6 +51,65 @@ impl Apu {
         }
         self.prev_div_bit = bit;
         events
+    }
+
+    /// One M-cycle: advance the frame sequencer, dispatch its events, clock the channel timers.
+    pub fn tick(&mut self, div: u8) -> u8 {
+        let events = self.step_sequencer(div);
+        if events & EV_LENGTH != 0 {
+            self.pulse1.clock_length();
+            self.pulse2.clock_length();
+        }
+        if events & EV_SWEEP != 0 {
+            self.pulse1.clock_sweep();
+        }
+        if events & EV_ENVELOPE != 0 {
+            self.pulse1.clock_envelope();
+            self.pulse2.clock_envelope();
+        }
+        self.pulse1.tick();
+        self.pulse2.tick();
+        events
+    }
+
+    /// Bits 0-1 of NR52: channel 1 and 2 enabled flags.
+    pub fn status(&self) -> u8 {
+        u8::from(self.pulse1.enabled) | (u8::from(self.pulse2.enabled) << 1)
+    }
+
+    fn write_nrx3(p: &mut Pulse, v: u8) {
+        let f = (p.freq & 0x0700) | u16::from(v);
+        p.set_freq(f);
+    }
+
+    fn write_nrx4(p: &mut Pulse, v: u8) {
+        let f = (p.freq & 0x00FF) | (u16::from(v & 0x07) << 8);
+        p.set_freq(f);
+        p.length_enable = v & 0x40 != 0;
+        if v & 0x80 != 0 {
+            p.trigger();
+        }
+    }
+
+    /// Accepted register write (NR10-NR25 only while powered; NR52 always). Behaviour of length
+    /// registers while powered off and of NRx2 writes while a channel plays: UNKNOWN - to confirm.
+    pub fn write_reg(&mut self, addr: u16, v: u8) {
+        match addr {
+            0xFF10 => self.pulse1.write_nr10(v),
+            0xFF11 => self.pulse1.write_nrx1(v),
+            0xFF12 => self.pulse1.write_nrx2(v),
+            0xFF13 => Self::write_nrx3(&mut self.pulse1, v),
+            0xFF14 => Self::write_nrx4(&mut self.pulse1, v),
+            0xFF16 => self.pulse2.write_nrx1(v),
+            0xFF17 => self.pulse2.write_nrx2(v),
+            0xFF18 => Self::write_nrx3(&mut self.pulse2, v),
+            0xFF19 => Self::write_nrx4(&mut self.pulse2, v),
+            0xFF26 if v & 0x80 == 0 => {
+                self.pulse1 = Pulse::default();
+                self.pulse2 = Pulse::default();
+            }
+            _ => {}
+        }
     }
 }
 
@@ -124,5 +189,82 @@ mod tests {
         t.write_div(0); // a write resets the counter: bit 4 falls on this M-cycle (note 01b)
         assert_eq!(apu.tick(t.div()), EV_LENGTH); // the falling edge runs step 0 (E04_01 spec)
         assert_eq!(apu.step, 1);
+    }
+
+    #[test]
+    fn e04_02_write_reg_trigger_enables_channel_2() {
+        let mut apu = Apu::default();
+        apu.write_reg(0xFF17, 0xF0);
+        apu.write_reg(0xFF18, 0xFF);
+        apu.write_reg(0xFF19, 0x87);
+        assert_eq!(apu.pulse2.freq, 2047);
+        assert!(apu.pulse2.enabled);
+        assert_eq!(apu.status(), 0x02);
+    }
+
+    #[test]
+    fn e04_02_write_reg_length_enable_and_expiry() {
+        let mut apu = Apu::default();
+        apu.write_reg(0xFF12, 0xF0);
+        apu.write_reg(0xFF11, 0x3F);
+        apu.write_reg(0xFF14, 0xC0);
+        assert_eq!(apu.status(), 0x01);
+        apu.pulse1.clock_length();
+        assert_eq!(apu.status(), 0x00);
+    }
+
+    #[test]
+    fn e04_02_power_off_clears_channels() {
+        let mut apu = Apu::default();
+        apu.write_reg(0xFF12, 0xF0);
+        apu.write_reg(0xFF14, 0x80);
+        assert_eq!(apu.status(), 0x01);
+        apu.write_reg(0xFF26, 0x00);
+        assert_eq!(apu.status(), 0x00);
+        assert!(!apu.pulse1.dac_on);
+    }
+
+    #[test]
+    fn e04_02_tick_advances_duty_position_every_period() {
+        let mut apu = Apu::default();
+        apu.write_reg(0xFF17, 0xF0);
+        apu.write_reg(0xFF18, 0xFF);
+        apu.write_reg(0xFF19, 0x87);
+        apu.tick(0x00);
+        assert_eq!(apu.pulse2.duty_pos, 1);
+        apu.tick(0x00);
+        assert_eq!(apu.pulse2.duty_pos, 2);
+    }
+
+    #[test]
+    fn e04_02_sequencer_step_7_clocks_the_envelope() {
+        let mut apu = Apu::default();
+        apu.write_reg(0xFF17, 0xF1);
+        apu.write_reg(0xFF19, 0x80);
+        for _ in 0..7 {
+            apu.tick(0x10);
+            apu.tick(0x00);
+        }
+        assert_eq!(apu.pulse2.volume, 15);
+        apu.tick(0x10);
+        apu.tick(0x00);
+        assert_eq!(apu.pulse2.volume, 14);
+    }
+
+    #[test]
+    fn e04_02_sequencer_step_2_clocks_the_sweep() {
+        let mut apu = Apu::default();
+        apu.write_reg(0xFF10, 0x11);
+        apu.write_reg(0xFF12, 0xF0);
+        apu.write_reg(0xFF13, 0x20);
+        apu.write_reg(0xFF14, 0x83);
+        for _ in 0..2 {
+            apu.tick(0x10);
+            apu.tick(0x00);
+        }
+        assert_eq!(apu.pulse1.freq, 800);
+        apu.tick(0x10);
+        apu.tick(0x00);
+        assert_eq!(apu.pulse1.freq, 1200);
     }
 }

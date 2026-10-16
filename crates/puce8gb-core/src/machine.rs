@@ -176,7 +176,11 @@ impl Machine for Dmg {
             // OAM DMA advances one byte per M-cycle, after the CPU and the timer (decision A_01 order, E03_06 spec).
             self.bus.dma_step();
             // APU frame sequencer: one step per falling edge of DIV bit 4, read after the timer ticked (E04_01 spec, note 05b); no dependency on the PPU, so it lives in the M-cycle block. The returned EV_* events are consumed by later tasks.
+            if let Some((addr, v)) = self.bus.apu_write.take() {
+                self.audio.apu.write_reg(addr, v);
+            }
             self.audio.apu.tick(self.bus.timer.div());
+            self.bus.set_apu_status(self.audio.apu.status());
         }
         // PPU advances one dot per Machine::tick() (decision A_01, E03_01). LY is mirrored
         // into the bus so $FF44 reads are side-effect-free; entry into VBlank (LY 143 -> 144)
@@ -1005,5 +1009,67 @@ mod tests {
         }
         assert_eq!(dmg.bus.hram[0x10], 0x5A); // $FF90 was written by the program (E03_15 spec)
         assert!(!dmg.bus.dma_active()); // the transfer ended within 1000 M-cycles
+    }
+
+    /// Write an APU register through the bus, then let one M-cycle pass so the machine relays it.
+    fn apu_write(dmg: &mut Dmg, addr: u16, v: u8) {
+        dmg.bus.write(addr, v);
+        for _ in 0..4 {
+            dmg.tick();
+        }
+    }
+
+    #[test]
+    fn e04_02_machine_relays_register_writes_to_channel_2() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        apu_write(&mut dmg, 0xFF17, 0xF0);
+        apu_write(&mut dmg, 0xFF18, 0xFF);
+        apu_write(&mut dmg, 0xFF19, 0x87);
+        assert!(dmg.audio.apu.pulse2.enabled);
+        assert_eq!(dmg.audio.apu.pulse2.freq, 2047);
+        assert_eq!(dmg.bus.read(0xFF26) & 0x03, 0x03);
+    }
+
+    #[test]
+    fn e04_02_channel_1_stays_on_after_boot_and_nr52_reads_f1() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        for _ in 0..65536 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.read(0xFF26), 0xF1);
+    }
+
+    #[test]
+    fn e04_02_length_expiry_clears_the_nr52_status_bit() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        dmg.bus.write(0xFF04, 0x00);
+        apu_write(&mut dmg, 0xFF16, 0x3F);
+        apu_write(&mut dmg, 0xFF17, 0xF0);
+        apu_write(&mut dmg, 0xFF18, 0x00);
+        apu_write(&mut dmg, 0xFF19, 0xC0);
+        assert_eq!(dmg.bus.read(0xFF26) & 0x03, 0x03);
+        for _ in 0..8192 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.read(0xFF26) & 0x03, 0x01);
+    }
+
+    #[test]
+    fn e04_02_power_off_clears_channels_and_ignores_register_writes() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        apu_write(&mut dmg, 0xFF26, 0x00);
+        assert_eq!(dmg.bus.read(0xFF26), 0x70);
+        apu_write(&mut dmg, 0xFF17, 0xF0);
+        assert!(!dmg.audio.apu.pulse2.dac_on);
+    }
+
+    #[test]
+    fn e04_02_reset_stops_channel_2() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        apu_write(&mut dmg, 0xFF17, 0xF0);
+        apu_write(&mut dmg, 0xFF19, 0x80);
+        assert!(dmg.audio.apu.pulse2.enabled);
+        dmg.reset();
+        assert!(!dmg.audio.apu.pulse2.enabled);
     }
 }

@@ -51,6 +51,8 @@ pub struct Bus {
     dma_src: u16,
     /// Next destination index of the running OAM DMA transfer, 0..=159 (E03_06 spec).
     dma_index: u8,
+    /// Last accepted APU register write (address, value), drained by the machine each M-cycle (E04_02).
+    pub apu_write: Option<(u16, u8)>,
     /// Debug tool for trace comparison, task C01_49: when Some(v), every read of $FF44
     /// returns v instead of the PPU scanline; None (default) keeps normal behaviour.
     ly_override: Option<u8>,
@@ -77,6 +79,7 @@ impl Bus {
             dma_active: false, // no OAM DMA transfer running at power-up (E03_06 spec)
             dma_src: 0,     // source base set by a write to $FF46 (E03_06 spec)
             dma_index: 0,   // next destination index of the running transfer (E03_06 spec)
+            apu_write: None, // no pending APU register write at power-up (E04_02)
             ly_override: None, // no debug override by default (C01_49)
             timer: Timer::default(), // DIV/TIMA/TMA/TAC are set in reset() (note 08)
         }
@@ -95,6 +98,7 @@ impl Bus {
         self.vram_open = true; // VRAM access allowed until Machine::tick mirrors the PPU state (E03_10)
         self.oam_open = true; // OAM access allowed until Machine::tick mirrors the PPU state (E03_10)
         self.dma_active = false; // no OAM DMA transfer running at power-up (E03_06 spec)
+        self.apu_write = None; // no pending APU register write at power-up (E04_02)
         self.dma_index = 0; // next destination index of the running transfer (E03_06 spec)
         self.timer.reset(); // DIV/TIMA/TMA/TAC post-boot values (note 08, note 01b)
 
@@ -262,10 +266,12 @@ impl Bus {
                     }
                     self.io[0x26] = 0x00; // power off: status bits 3-0 are 0 too
                 }
+                self.apu_write = Some((addr, val));
             }
             0xFF10..=0xFF25 => {
                 if self.io[0x26] & 0x80 != 0 {
                     self.io[(addr - 0xFF00) as usize] = val; // APU registers are read-only while the APU is off (E04_01 spec, note 05b)
+                    self.apu_write = Some((addr, val));
                 }
             }
             0xFF00..=0xFF7F => {
@@ -326,6 +332,11 @@ impl Bus {
     /// True while an OAM DMA transfer is running (E03_06 spec).
     pub fn dma_active(&self) -> bool {
         self.dma_active
+    }
+
+    /// Mirror the channel 1 and 2 enabled flags into NR52 bits 0-1 (channels 3 and 4 arrive later).
+    pub fn set_apu_status(&mut self, bits: u8) {
+        self.io[0x26] = (self.io[0x26] & !0x03) | (bits & 0x03);
     }
 
     /// One M-cycle of the OAM DMA (E03_06 spec): copy source byte `dma_index` into OAM, not blocked by
@@ -1040,5 +1051,33 @@ mod tests {
         assert_eq!(bus.read(0xFF26), 0xF1);
         bus.write(0xFF26, 0x8F); // even writing the status bits themselves has no effect (E04_01 spec)
         assert_eq!(bus.read(0xFF26), 0xF1);
+    }
+
+    #[test]
+    fn e04_02_bus_records_accepted_apu_write() {
+        let mut bus = Bus::new(vec![0u8; 0x8000]);
+        bus.reset();
+        bus.write(0xFF19, 0x80);
+        assert_eq!(bus.apu_write.take(), Some((0xFF19, 0x80)));
+    }
+
+    #[test]
+    fn e04_02_bus_records_nothing_while_apu_is_off() {
+        let mut bus = Bus::new(vec![0u8; 0x8000]);
+        bus.reset();
+        bus.write(0xFF26, 0x00);
+        bus.apu_write = None;
+        bus.write(0xFF19, 0x80);
+        assert_eq!(bus.apu_write, None);
+    }
+
+    #[test]
+    fn e04_02_bus_status_bits_follow_set_apu_status() {
+        let mut bus = Bus::new(vec![0u8; 0x8000]);
+        bus.reset();
+        bus.set_apu_status(0x03);
+        assert_eq!(bus.read(0xFF26) & 0x03, 0x03);
+        bus.set_apu_status(0x00);
+        assert_eq!(bus.read(0xFF26) & 0x03, 0x00);
     }
 }
