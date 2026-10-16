@@ -39,6 +39,12 @@ pub struct Bus {
     vram_open: bool,
     /// CPU access to OAM ($FE00-$FE9F) allowed (E03_10): mirrored from the PPU by Machine::tick.
     oam_open: bool,
+    /// OAM DMA transfer running (E03_06 spec): one byte copied per M-cycle via dma_step.
+    dma_active: bool,
+    /// OAM DMA source address base = V << 8 from the last write to $FF46 (E03_06 spec).
+    dma_src: u16,
+    /// Next destination index of the running OAM DMA transfer, 0..=159 (E03_06 spec).
+    dma_index: u8,
     /// Debug tool for trace comparison, task C01_49: when Some(v), every read of $FF44
     /// returns v instead of the PPU scanline; None (default) keeps normal behaviour.
     ly_override: Option<u8>,
@@ -62,6 +68,9 @@ impl Bus {
             ppu_mode: 2, // PPU mode at the start of line 0 is OAM scan (E03_01); Machine::tick keeps it current
             vram_open: true, // VRAM access allowed until Machine::tick mirrors the PPU state (E03_10)
             oam_open: true, // OAM access allowed until Machine::tick mirrors the PPU state (E03_10)
+            dma_active: false, // no OAM DMA transfer running at power-up (E03_06 spec)
+            dma_src: 0,     // source base set by a write to $FF46 (E03_06 spec)
+            dma_index: 0,   // next destination index of the running transfer (E03_06 spec)
             ly_override: None, // no debug override by default (C01_49)
             timer: Timer::default(), // DIV/TIMA/TMA/TAC are set in reset() (note 08)
         }
@@ -79,6 +88,8 @@ impl Bus {
         self.ppu_mode = 2; // PPU mode restarts at the start of line 0: OAM scan (E03_01)
         self.vram_open = true; // VRAM access allowed until Machine::tick mirrors the PPU state (E03_10)
         self.oam_open = true; // OAM access allowed until Machine::tick mirrors the PPU state (E03_10)
+        self.dma_active = false; // no OAM DMA transfer running at power-up (E03_06 spec)
+        self.dma_index = 0; // next destination index of the running transfer (E03_06 spec)
         self.timer.reset(); // DIV/TIMA/TMA/TAC post-boot values (note 08, note 01b)
 
         // Unassigned IO reads $FF by default (decision A_02), then the documented
@@ -220,6 +231,12 @@ impl Bus {
             0xFF05 => self.timer.write_tima(val), // TIMA ($FF05, note 01b)
             0xFF06 => self.timer.write_tma(val), // TMA ($FF06, note 01b)
             0xFF07 => self.timer.write_tac(val), // TAC ($FF07, note 01b)
+            0xFF46 => {
+                self.io[0x46] = val; // DMA reads back the last written value (E03_06 spec)
+                self.dma_src = u16::from(val) << 8; // source = V * 0x100; sources above 0xDF: UNKNOWN - to confirm (note 03a)
+                self.dma_index = 0; // a write during a transfer restarts it: UNKNOWN - to confirm (A_02 is silent)
+                self.dma_active = true;
+            }
             0xFF00..=0xFF7F => {
                 self.io[(addr - 0xFF00) as usize] = val;
                 // SC ($FF02): a transfer started with the internal clock (bit7 + bit0 set,
@@ -273,6 +290,25 @@ impl Bus {
         self.serial.copy_within(n..self.serial_len, 0);
         self.serial_len -= n;
         n
+    }
+
+    /// True while an OAM DMA transfer is running (E03_06 spec).
+    pub fn dma_active(&self) -> bool {
+        self.dma_active
+    }
+
+    /// One M-cycle of the OAM DMA (E03_06 spec): copy source byte `dma_index` into OAM, not blocked by
+    /// the PPU mode. 160 steps in total. Start delay: UNKNOWN - to confirm (A_02 gives none), so 0 here.
+    pub fn dma_step(&mut self) {
+        if !self.dma_active {
+            return;
+        }
+        let byte = self.peek(self.dma_src.wrapping_add(u16::from(self.dma_index)));
+        self.oam[usize::from(self.dma_index)] = byte;
+        self.dma_index += 1;
+        if self.dma_index == 160 {
+            self.dma_active = false;
+        }
     }
 
     /// Read the raw memory at `addr` with no side effect and no gate (decision A_02):
@@ -780,5 +816,42 @@ mod tests {
             bus.ppu_mode = mode; // Machine::tick keeps the mirror current (decision A_02)
             assert_eq!(bus.read(0xFF41) & 0x03, expected); // bits 1..0 report the PPU mode (E03_08 spec)
         }
+    }
+
+    #[test]
+    fn e03_06_ff46_reads_back_the_written_value() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFF46, 0xC1); // DMA register: the written value is stored (E03_06 spec)
+        assert_eq!(bus.read(0xFF46), 0xC1); // read-back returns the last written value
+    }
+
+    #[test]
+    fn e03_06_copy_from_wram() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        for i in 0..160u16 {
+            bus.write(0xC100 + i, (i as u8) ^ 0x5A); // source pattern in WRAM at $C100-$C19F
+        }
+        bus.write(0xFF46, 0xC1); // start the transfer from $C100 (E03_06 spec)
+        for _ in 0..160 {
+            bus.dma_step(); // one byte per M-cycle: 160 steps total
+        }
+        assert!(!bus.dma_active()); // the transfer is complete after exactly 160 steps
+        for i in 0..160usize {
+            assert_eq!(bus.oam[i], (i as u8) ^ 0x5A); // every OAM byte copied from WRAM
+        }
+        assert_eq!(bus.oam[160], 0); // the transfer stops at 160 bytes: OAM $FEA0 untouched
+    }
+
+    #[test]
+    fn e03_06_takes_exactly_160_steps() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFF46, 0xC0); // start the transfer from $C000 (E03_06 spec)
+        assert!(bus.dma_active()); // active immediately after the write: no start delay here
+        for _ in 0..159 {
+            bus.dma_step();
+        }
+        assert!(bus.dma_active()); // still running on step 159 of 160
+        bus.dma_step(); // the 160th and final step
+        assert!(!bus.dma_active()); // inactive after exactly 160 steps
     }
 }

@@ -172,6 +172,8 @@ impl Machine for Dmg {
             if self.bus.timer.mcycle() {
                 self.bus.io[0x0F] |= 0x04; // IF bit 2: timer interrupt request (note 01b)
             }
+            // OAM DMA advances one byte per M-cycle, after the CPU and the timer (decision A_01 order, E03_06 spec).
+            self.bus.dma_step();
         }
         // PPU advances one dot per Machine::tick() (decision A_01, E03_01). LY is mirrored
         // into the bus so $FF44 reads are side-effect-free; entry into VBlank (LY 143 -> 144)
@@ -917,5 +919,33 @@ mod tests {
             fb[8 * 160..9 * 160].iter().all(|&px| px == PALETTE[3]),
             "row 8 must be all shade 3"
         );
+    }
+
+    #[test]
+    fn e03_06_dma_runs_one_byte_per_m_cycle_and_ends_after_640_dots() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads"); // all-NOP ROM (task C01_35)
+        for i in 0..160u16 {
+            dmg.bus.write(0xC100 + i, (i as u8) ^ 0x5A); // source pattern in WRAM at $C100-$C19F
+        }
+        dmg.bus.write(0xFF46, 0xC1); // start the transfer from $C100 (E03_06 spec)
+        for _ in 0..4 {
+            dmg.tick(); // one M-cycle every 4 dots: after 4 dots exactly one byte is copied
+        }
+        assert_eq!(dmg.bus.oam[0], 0x5A); // first OAM byte copied on the first M-cycle
+        assert_eq!(dmg.bus.oam[1], 0); // second byte not copied yet: one byte per M-cycle (E03_06 spec)
+        assert!(dmg.bus.dma_active()); // transfer still running after 4 dots
+
+        for _ in 0..632 {
+            dmg.tick(); // 636 dots total = 159 M-cycles: the transfer is still running
+        }
+        assert!(dmg.bus.dma_active()); // 159 of 160 bytes copied: one step left
+
+        for _ in 0..4 {
+            dmg.tick(); // 640 dots total = 160 M-cycles: the final byte is copied
+        }
+        assert!(!dmg.bus.dma_active()); // transfer complete after exactly 160 M-cycles (E03_06 spec)
+        for i in 0..160usize {
+            assert_eq!(dmg.bus.oam[i], (i as u8) ^ 0x5A); // all 160 OAM bytes copied from WRAM
+        }
     }
 }
