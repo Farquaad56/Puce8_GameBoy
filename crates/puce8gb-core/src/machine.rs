@@ -42,8 +42,8 @@ pub trait Machine {
         }
     }
 
-    /// Framebuffer of 2-bit pixel indices, 160 x 144 (decision A_04).
-    fn framebuffer(&self) -> &[u8; FRAMEBUFFER_SIZE];
+    /// Framebuffer of 0xAARRGGBB pixels, 160 x 144 (E03_05 spec).
+    fn framebuffer(&self) -> &[u32];
 
     /// Drain up to `into.len()` interleaved stereo samples from the ring at 32768 Hz
     /// (decision A_04). Returns the number of samples drained.
@@ -190,6 +190,8 @@ impl Machine for Dmg {
         self.ppu
             .fetch_window(&self.bus.vram, self.bus.io[0x4B], self.bus.io[0x4A]);
         self.ppu.render_sprites(&self.bus.oam, &self.bus.vram);
+        self.ppu
+            .commit_line(self.bus.io[0x47], self.bus.io[0x48], self.bus.io[0x49]); // BGP, OBP0, OBP1 (E03_05 spec)
         self.bus.ly = self.ppu.ly(); // LY ($FF44) mirror (E03_01); the coincidence flag reads it too (E03_08)
         self.bus.ppu_mode = self.ppu.mode(); // PPU mode mirror for the STAT readback (E03_08 spec, decision A_02)
         self.bus
@@ -208,8 +210,8 @@ impl Machine for Dmg {
         self.stat_line_prev = line_now;
     }
 
-    fn framebuffer(&self) -> &[u8; FRAMEBUFFER_SIZE] {
-        &self.ppu.frame
+    fn framebuffer(&self) -> &[u32] {
+        self.ppu.framebuffer()
     }
 
     fn drain_audio(&mut self, into: &mut [i16]) -> usize {

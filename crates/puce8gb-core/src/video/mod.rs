@@ -49,6 +49,14 @@ pub const LCDC_OBJ_ENABLE: u8 = 0x02;
 /// Bit 0: BG and window enable (DMG).
 pub const LCDC_BG_ENABLE: u8 = 0x01;
 
+/// DMG output colors (E03_05 spec): u32 as 0xAARRGGBB with AA = 0xFF, neutral greys.
+pub const PALETTE: [u32; 4] = [0xFFFF_FFFF, 0xFFAA_AAAA, 0xFF55_5555, 0xFF00_0000];
+
+/// Output color of a color index through a palette byte (E03_05 spec): shade = (palette >> (index * 2)) & 3.
+pub fn shade_color(palette: u8, index: u8) -> u32 {
+    PALETTE[usize::from((palette >> ((index & 3) * 2)) & 3)]
+}
+
 /// One output pixel of a visible line (E03_04 spec): color index 0..3, whether the pixel comes
 /// from a sprite and which object palette it uses (bit 4 of the OAM attributes: false = OBP0,
 /// true = OBP1). Background and window pixels have `obj` clear.
@@ -66,13 +74,13 @@ const PIXEL_BG_ZERO: PixelOut = PixelOut {
     pal1: false,
 };
 
-/// PPU state: framebuffer of 2-bit pixel indices, 160 x 144 (decision A_04), plus the dot
+/// PPU state: framebuffer of 0xAARRGGBB pixels (E03_05), plus the dot
 /// counter, LY position and current mode (E03_01), the per-line pixel fetcher with its FIFO
 /// and line buffer (E03_03) and the sprite merge of the selected OAM entries into that line
 /// buffer (E03_04).
 #[derive(Debug)]
 pub struct Ppu {
-    pub frame: [u8; FRAMEBUFFER_SIZE],
+    pub frame: [u32; FRAMEBUFFER_SIZE],
     /// Output pixels of the current visible line: color index 0..3 plus whether the pixel comes
     /// from a sprite and which object palette (E03_04 spec); filled by the pixel fetcher, the
     /// window fetcher and the sprite renderer during mode 3.
@@ -131,12 +139,15 @@ pub struct Ppu {
     /// paused for that many dots, so mode 3 lasts longer and mode 0 shorter. Computed once per
     /// visible line from the selected sprites; cleared at the start of each visible line.
     obj_penalty: u32,
+    /// Set once the finished line has been written into the framebuffer (E03_05 spec); cleared
+    /// at the start of each visible line so every line is committed exactly once.
+    line_committed: bool,
 }
 
 impl Default for Ppu {
     fn default() -> Self {
         let mut p = Ppu {
-            frame: [0x00; FRAMEBUFFER_SIZE],
+            frame: [PALETTE[0]; FRAMEBUFFER_SIZE],
             line_buf: [PIXEL_BG_ZERO; LINE_PIXELS as usize], // background pixels, color index 0 (E03_04 spec)
             dot_in_line: 0,
             ly: 0,
@@ -160,6 +171,7 @@ impl Default for Ppu {
             sprites_rendered: false, // the sprite merge is due on line 0 (E03_04 spec)
             line_resolved: [false; LINE_PIXELS as usize], // no pixel resolved by a sprite yet (E03_04 spec)
             obj_penalty: 0, // no sprite penalty incurred before the first OAM scan (E03_13 spec)
+            line_committed: false, // no finished line written into the framebuffer yet (E03_05 spec)
         };
         p.mode = Self::mode_for(p.ly, p.dot_in_line, p.pixels_output); // start of line 0 is OAM scan (E03_01)
         p
@@ -197,7 +209,7 @@ fn line_obj_penalty(xs: &[u8], scx: u8) -> u32 {
 impl Ppu {
     /// Post-boot state (note 08): LY = 0 at the start of line 0, LCD enabled.
     pub fn reset(&mut self) {
-        self.frame.fill(0x00);
+        self.frame.fill(PALETTE[0]);
         self.line_buf.fill(PIXEL_BG_ZERO); // background pixels, color index 0 (E03_04 spec)
         self.dot_in_line = 0;
         self.ly = 0;
@@ -225,6 +237,12 @@ impl Ppu {
         self.sprites_rendered = false; // the sprite merge is due again on this line (E03_04 spec)
         self.line_resolved.fill(false); // no pixel resolved by a sprite yet on this line (E03_04 spec)
         self.obj_penalty = 0; // the sprite penalty of this line is recomputed at its OAM scan (E03_13 spec)
+        self.line_committed = false; // the finished line of this line has not been written yet (E03_05 spec)
+    }
+
+    /// Framebuffer of 0xAARRGGBB pixels, 160 x 144 (E03_05 spec).
+    pub fn framebuffer(&self) -> &[u32] {
+        &self.frame
     }
 
     /// LCD and PPU enable state (LCDC ($FF40) bit 7, E03_09 spec).
@@ -255,6 +273,7 @@ impl Ppu {
             self.ly = 0;
             self.mode = 0; // STAT mode bits read 0 while the PPU is disabled (note 04a "STAT")
             self.oam_scan_pending = false; // the line whose scan was due no longer exists (E03_02)
+            self.frame.fill(PALETTE[0]);
         }
     }
 
@@ -346,6 +365,31 @@ impl Ppu {
     /// order (E03_02); consumed by `render_sprites` (E03_04).
     pub(crate) fn line_sprites(&self) -> &[u8] {
         &self.line_sprites[..self.line_sprite_count as usize]
+    }
+
+    /// Write the finished line into framebuffer row LY (E03_05 spec): BGP for background pixels,
+    /// OBP0 or OBP1 for sprite pixels. Called every dot; acts once per visible line, when its
+    /// 160 pixels are all output (end of mode 3).
+    pub(crate) fn commit_line(&mut self, bgp: u8, obp0: u8, obp1: u8) {
+        if !self.lcd_on
+            || u32::from(self.ly) >= u32::from(VBLANK_FIRST_LINE)
+            || self.line_committed
+            || u32::from(self.pixels_output) < u32::from(LINE_PIXELS)
+        {
+            return;
+        }
+        let row = usize::from(self.ly) * usize::from(LINE_PIXELS);
+        for (x, px) in self.line_buf.iter().enumerate() {
+            let palette = if !px.obj {
+                bgp
+            } else if px.pal1 {
+                obp1
+            } else {
+                obp0
+            };
+            self.frame[row + x] = shade_color(palette, px.color);
+        }
+        self.line_committed = true;
     }
 
     /// One dot of pixel fetching (E03_03): during mode 3 the fetcher produces one color index
@@ -683,6 +727,115 @@ mod tests {
         fn eq(&self, other: &u8) -> bool {
             self.color == *other
         }
+    }
+
+    #[test]
+    fn e03_05_bgp_identity_and_reversed() {
+        // BGP 0xE4 is the identity mapping: index i maps to shade i (E03_05 spec).
+        assert_eq!(shade_color(0xE4, 0), PALETTE[0]);
+        assert_eq!(shade_color(0xE4, 1), PALETTE[1]);
+        assert_eq!(shade_color(0xE4, 2), PALETTE[2]);
+        assert_eq!(shade_color(0xE4, 3), PALETTE[3]);
+        // BGP 0x1B is the reversed mapping: index i maps to shade 3 - i (E03_05 spec).
+        assert_eq!(shade_color(0x1B, 0), PALETTE[3]);
+        assert_eq!(shade_color(0x1B, 1), PALETTE[2]);
+        assert_eq!(shade_color(0x1B, 2), PALETTE[1]);
+        assert_eq!(shade_color(0x1B, 3), PALETTE[0]);
+    }
+
+    #[test]
+    fn e03_05_lcd_off_gives_blank_buffer() {
+        let mut p = Ppu::default();
+        p.reset();
+        p.frame[5] = PALETTE[3]; // a non-blank pixel before the LCD is turned off (E03_05 spec)
+        p.set_lcd_enabled(0x11); // bit 7 clear: LCD off (E03_09 spec)
+        assert!(p.framebuffer().iter().all(|&c| c == PALETTE[0]));
+    }
+
+    #[test]
+    fn e03_05_commit_applies_bgp() {
+        let mut p = Ppu::default();
+        p.reset();
+        p.pixels_output = 160; // the line is finished: mode 3 has output all its pixels (E03_05 spec)
+        for (x, color) in [0u8, 1, 2, 3].into_iter().enumerate() {
+            p.line_buf[x] = PixelOut {
+                color,
+                obj: false,
+                pal1: false,
+            }; // background pixels with colors 0..3 (E03_05 spec)
+        }
+        p.commit_line(0xE4, 0, 0); // BGP identity mapping (E03_05 spec)
+        assert_eq!(
+            &p.frame[0..4],
+            &[PALETTE[0], PALETTE[1], PALETTE[2], PALETTE[3]]
+        );
+
+        let mut p = Ppu::default();
+        p.reset();
+        p.pixels_output = 160; // the line is finished (E03_05 spec)
+        for (x, color) in [0u8, 1, 2, 3].into_iter().enumerate() {
+            p.line_buf[x] = PixelOut {
+                color,
+                obj: false,
+                pal1: false,
+            }; // background pixels with colors 0..3 (E03_05 spec)
+        }
+        p.commit_line(0x1B, 0, 0); // BGP reversed mapping (E03_05 spec)
+        assert_eq!(
+            &p.frame[0..4],
+            &[PALETTE[3], PALETTE[2], PALETTE[1], PALETTE[0]]
+        );
+    }
+
+    #[test]
+    fn e03_05_commit_uses_obp0_obp1_for_sprites() {
+        let mut p = Ppu::default();
+        p.reset();
+        p.pixels_output = 160; // the line is finished (E03_05 spec)
+        p.line_buf[0] = PixelOut {
+            color: 2,
+            obj: true,
+            pal1: false,
+        }; // sprite pixel on OBP0 (E03_05 spec)
+        p.line_buf[1] = PixelOut {
+            color: 2,
+            obj: true,
+            pal1: true,
+        }; // sprite pixel on OBP1 (E03_05 spec)
+        p.line_buf[2] = PixelOut {
+            color: 2,
+            obj: false,
+            pal1: false,
+        }; // background pixel (E03_05 spec)
+        p.commit_line(0x00, 0xE4, 0x1B); // BGP all shade 0, OBP0 identity, OBP1 reversed (E03_05 spec)
+        assert_eq!(p.frame[0], PALETTE[2]);
+        assert_eq!(p.frame[1], PALETTE[1]);
+        assert_eq!(p.frame[2], PALETTE[0]);
+    }
+
+    #[test]
+    fn e03_05_line_lands_at_row_ly_once() {
+        let mut p = Ppu::default();
+        p.reset();
+        p.pixels_output = 160; // the line is finished (E03_05 spec)
+        p.ly = 5; // a visible line in the middle of the frame (E03_05 spec)
+        p.line_buf[0] = PixelOut {
+            color: 3,
+            obj: false,
+            pal1: false,
+        }; // background pixel, color 3 (E03_05 spec)
+        p.commit_line(0xE4, 0, 0); // BGP identity mapping (E03_05 spec)
+        assert_eq!(p.frame[5 * 160], PALETTE[3]); // the line lands at row LY (E03_05 spec)
+        assert_eq!(p.frame[4 * 160], PALETTE[0]); // other rows are untouched (E03_05 spec)
+        assert_eq!(p.frame[6 * 160], PALETTE[0]);
+
+        p.line_buf[0] = PixelOut {
+            color: 0,
+            obj: false,
+            pal1: false,
+        }; // a new background pixel (E03_05 spec)
+        p.commit_line(0xE4, 0, 0); // the line is already committed this line (E03_05 spec)
+        assert_eq!(p.frame[5 * 160], PALETTE[3]); // a line is committed once per line (E03_05 spec)
     }
 
     #[test]
@@ -1410,6 +1563,33 @@ mod tests {
         }
         assert!(!p.line_buf[8].obj); // column 8 is background again (E03_04 spec)
         assert_eq!(p.line_buf[8].color, 0);
+    }
+
+    #[test]
+    fn e03_05_sprite_index_0_shows_the_background() {
+        let vram = vram_with_tile(0xFF, 0xFF); // background tile 0 is colour 3 everywhere; tile 1 keeps its own bytes (E03_05 spec)
+        let mut oam = [0u8; 160];
+        oam[0] = 16; // Y=16: screen line 0 with LY=0 (E03_02 spec)
+        oam[1] = 8; // X=8: screen columns 0..7 (E03_04 spec)
+        oam[2] = 1; // tile index 1 (E03_04 spec)
+        let mut p = Ppu {
+            lcdc: 0x93, // bits 7,4,1,0: LCD on, unsigned tile data, sprites on, BG on (E03_04 spec)
+            ..Ppu::default()
+        };
+        run_line_with_sprites(&mut p, &vram, &oam);
+        p.commit_line(0xE4, 0x1B, 0x1B); // BGP identity; OBP0/OBP1 reversed (E03_05 spec)
+        let expected = [
+            PALETTE[2], // sprite colour 1 through OBP0 = 0x1B (E03_05 spec)
+            PALETTE[3], // transparent pixel: background colour 3 through BGP = 0xE4 (E03_05 spec)
+            PALETTE[0], // sprite colour 3 through OBP0 = 0x1B (E03_05 spec)
+            PALETTE[1], // sprite colour 2 through OBP0 = 0x1B (E03_05 spec)
+            PALETTE[1], // sprite colour 2 through OBP0 = 0x1B (E03_05 spec)
+            PALETTE[0], // sprite colour 3 through OBP0 = 0x1B (E03_05 spec)
+            PALETTE[3], // transparent pixel: background colour 3 through BGP = 0xE4 (E03_05 spec)
+            PALETTE[2], // sprite colour 1 through OBP0 = 0x1B (E03_05 spec)
+            PALETTE[3], // column 8 is background colour 3 through BGP = 0xE4 (E03_05 spec)
+        ];
+        assert_eq!(&p.frame[0..9], &expected);
     }
 
     #[test]
