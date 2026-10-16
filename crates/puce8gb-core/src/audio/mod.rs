@@ -2,6 +2,7 @@
 
 pub mod apu;
 pub mod pulse;
+pub mod wave;
 
 use crate::machine::AUDIO_RING_SAMPLES;
 

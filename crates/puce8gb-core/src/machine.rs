@@ -179,6 +179,7 @@ impl Machine for Dmg {
             if let Some((addr, v)) = self.bus.apu_write.take() {
                 self.audio.apu.write_reg(addr, v);
             }
+            self.audio.apu.wave.ram = self.bus.wave_ram();
             self.audio.apu.tick(self.bus.timer.div());
             self.bus.set_apu_status(self.audio.apu.status());
         }
@@ -1071,5 +1072,43 @@ mod tests {
         assert!(dmg.audio.apu.pulse2.enabled);
         dmg.reset();
         assert!(!dmg.audio.apu.pulse2.enabled);
+    }
+
+    #[test]
+    fn e04_03_machine_relays_wave_registers_and_wave_ram() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        dmg.bus.write(0xFF30, 0x12);
+        apu_write(&mut dmg, 0xFF1A, 0x80);
+        apu_write(&mut dmg, 0xFF1C, 0x20);
+        apu_write(&mut dmg, 0xFF1D, 0xFF);
+        apu_write(&mut dmg, 0xFF1E, 0x87);
+        assert_eq!(dmg.audio.apu.wave.ram[0], 0x12);
+        assert!(dmg.audio.apu.wave.enabled);
+        assert_eq!(dmg.bus.read(0xFF26) & 0x07, 0x05);
+    }
+
+    #[test]
+    fn e04_03_length_expiry_clears_nr52_bit_2() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        dmg.bus.write(0xFF04, 0x00);
+        apu_write(&mut dmg, 0xFF1A, 0x80);
+        apu_write(&mut dmg, 0xFF1B, 0xFF);
+        apu_write(&mut dmg, 0xFF1C, 0x20);
+        apu_write(&mut dmg, 0xFF1D, 0x00);
+        apu_write(&mut dmg, 0xFF1E, 0xC0);
+        assert_eq!(dmg.bus.read(0xFF26) & 0x04, 0x04);
+        for _ in 0..8192 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.read(0xFF26) & 0x07, 0x01);
+    }
+
+    #[test]
+    fn e04_03_wave_ram_survives_apu_power_off() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        dmg.bus.write(0xFF30, 0x12);
+        apu_write(&mut dmg, 0xFF26, 0x00);
+        assert_eq!(dmg.bus.read(0xFF30), 0x12);
+        assert_eq!(dmg.audio.apu.wave.ram[0], 0x12);
     }
 }

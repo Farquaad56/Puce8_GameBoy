@@ -334,9 +334,16 @@ impl Bus {
         self.dma_active
     }
 
-    /// Mirror the channel 1 and 2 enabled flags into NR52 bits 0-1 (channels 3 and 4 arrive later).
+    /// Mirror the channel 1, 2 and 3 enabled flags into NR52 bits 0-2 (channel 4 arrives later).
     pub fn set_apu_status(&mut self, bits: u8) {
-        self.io[0x26] = (self.io[0x26] & !0x03) | (bits & 0x03);
+        self.io[0x26] = (self.io[0x26] & !0x07) | (bits & 0x07);
+    }
+
+    /// Copy of wave RAM ($FF30-$FF3F) for the wave channel. Access rules while channel 3 plays: UNKNOWN - to confirm.
+    pub fn wave_ram(&self) -> [u8; 16] {
+        let mut ram = [0u8; 16];
+        ram.copy_from_slice(&self.io[0x30..0x40]);
+        ram
     }
 
     /// One M-cycle of the OAM DMA (E03_06 spec): copy source byte `dma_index` into OAM, not blocked by
@@ -1079,5 +1086,26 @@ mod tests {
         assert_eq!(bus.read(0xFF26) & 0x03, 0x03);
         bus.set_apu_status(0x00);
         assert_eq!(bus.read(0xFF26) & 0x03, 0x00);
+    }
+
+    #[test]
+    fn e04_03_bus_wave_ram_copy_matches_written_bytes() {
+        let mut bus = Bus::new(vec![0u8; 0x8000]);
+        bus.reset();
+        bus.write(0xFF30, 0xAB);
+        bus.write(0xFF3F, 0xCD);
+        let ram = bus.wave_ram();
+        assert_eq!(ram[0], 0xAB);
+        assert_eq!(ram[15], 0xCD);
+    }
+
+    #[test]
+    fn e04_03_bus_status_bit_2_follows_set_apu_status() {
+        let mut bus = Bus::new(vec![0u8; 0x8000]);
+        bus.reset();
+        bus.set_apu_status(0x07);
+        assert_eq!(bus.read(0xFF26) & 0x07, 0x07);
+        bus.set_apu_status(0x00);
+        assert_eq!(bus.read(0xFF26) & 0x07, 0x00);
     }
 }
