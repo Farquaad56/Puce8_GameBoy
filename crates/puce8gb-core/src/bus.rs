@@ -346,6 +346,11 @@ impl Bus {
         ram
     }
 
+    /// Raw NR50 (master volume) and NR51 (panning) for the mixer. Both read 0 while the APU is off.
+    pub fn audio_pan(&self) -> (u8, u8) {
+        (self.io[0x24], self.io[0x25])
+    }
+
     /// One M-cycle of the OAM DMA (E03_06 spec): copy source byte `dma_index` into OAM, not blocked by
     /// the PPU mode. 160 steps in total. Start delay: UNKNOWN - to confirm (A_02 gives none), so 0 here.
     pub fn dma_step(&mut self) {
@@ -1117,5 +1122,14 @@ mod tests {
         assert_eq!(bus.read(0xFF26) & 0x0F, 0x0F);
         bus.set_apu_status(0x00);
         assert_eq!(bus.read(0xFF26) & 0x0F, 0x00);
+    }
+
+    #[test]
+    fn e04_05_bus_audio_pan_returns_nr50_and_nr51() {
+        let mut bus = Bus::new(vec![0u8; 0x8000]);
+        bus.reset();
+        bus.write(0xFF24, 0x5A);
+        bus.write(0xFF25, 0xA5);
+        assert_eq!(bus.audio_pan(), (0x5A, 0xA5));
     }
 }

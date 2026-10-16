@@ -145,6 +145,7 @@ impl Machine for Dmg {
         self.cpu = Cpu::reset(checksum);
         self.bus.reset();
         self.audio.apu.reset(self.bus.timer.div());
+        self.audio.reset_mixer();
         self.ppu.reset(); // LY, dot counter and mode restart at the start of line 0 (E03_01)
         self.audio.head = 0;
         self.audio.tail = 0;
@@ -182,6 +183,8 @@ impl Machine for Dmg {
             self.audio.apu.wave.ram = self.bus.wave_ram();
             self.audio.apu.tick(self.bus.timer.div());
             self.bus.set_apu_status(self.audio.apu.status());
+            let (nr50, nr51) = self.bus.audio_pan();
+            self.audio.mix_tick(nr50, nr51);
         }
         // PPU advances one dot per Machine::tick() (decision A_01, E03_01). LY is mirrored
         // into the bus so $FF44 reads are side-effect-free; entry into VBlank (LY 143 -> 144)
@@ -1146,5 +1149,72 @@ mod tests {
         apu_write(&mut dmg, 0xFF26, 0x00);
         assert_eq!(dmg.bus.read(0xFF26), 0x70);
         assert!(!dmg.audio.apu.noise.enabled);
+    }
+
+    fn drain_all(dmg: &mut Dmg) -> Vec<i16> {
+        let mut buf = vec![0i16; 4096];
+        let n = dmg.drain_audio(&mut buf);
+        buf.truncate(n);
+        buf
+    }
+
+    #[test]
+    fn e04_05_one_frame_of_ticks_yields_548_stereo_frames() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        for _ in 0..70224 {
+            dmg.tick();
+        }
+        assert_eq!(drain_all(&mut dmg).len(), 1096);
+    }
+
+    #[test]
+    fn e04_05_apu_power_off_gives_silence() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        apu_write(&mut dmg, 0xFF26, 0x00);
+        for _ in 0..1280 {
+            dmg.tick();
+        }
+        let samples = drain_all(&mut dmg);
+        assert_eq!(samples.len(), 20);
+        assert!(samples.iter().all(|s| *s == 0));
+    }
+
+    #[test]
+    fn e04_05_panning_left_only_leaves_the_right_side_silent() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        apu_write(&mut dmg, 0xFF25, 0x10);
+        for _ in 0..2560 {
+            dmg.tick();
+        }
+        let samples = drain_all(&mut dmg);
+        assert_eq!(samples.len(), 40);
+        assert_ne!(samples[0], 0);
+        assert!(samples.chunks(2).all(|c| c[1] == 0));
+    }
+
+    #[test]
+    fn e04_05_panning_right_only_leaves_the_left_side_silent() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        apu_write(&mut dmg, 0xFF25, 0x01);
+        for _ in 0..2560 {
+            dmg.tick();
+        }
+        let samples = drain_all(&mut dmg);
+        assert_eq!(samples.len(), 40);
+        assert_ne!(samples[1], 0);
+        assert!(samples.chunks(2).all(|c| c[0] == 0));
+    }
+
+    #[test]
+    fn e04_05_reset_restarts_the_sampling_phase() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        for _ in 0..124 {
+            dmg.tick();
+        }
+        dmg.reset();
+        for _ in 0..8 {
+            dmg.tick();
+        }
+        assert_eq!(drain_all(&mut dmg).len(), 0);
     }
 }
