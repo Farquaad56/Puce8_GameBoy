@@ -3,6 +3,7 @@
 //! arguments (exit 64 when bad) but does not execute a ROM yet.
 
 mod info;
+mod ppm;
 mod run;
 mod run_args;
 mod serial_scan;
@@ -30,7 +31,8 @@ fn main() -> ExitCode {
         _ => {
             eprintln!(
                 "usage: puce8gb-cli [info <rom> | run <rom> [--max-cycles N] \
-                 [--expect-serial TEXT] [--trace N] [--ly-fixed HEX]]"
+                 [--expect-serial TEXT] [--trace N] [--ly-fixed HEX] \
+                 [--frames N] [--dump-ppm FILE]]"
             );
             ExitCode::from(2)
         }

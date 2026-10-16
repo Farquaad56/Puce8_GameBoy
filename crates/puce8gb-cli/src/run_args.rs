@@ -1,5 +1,6 @@
 //! Argument parsing for the `run` command (task C01_43):
-//! `run <rom> [--max-cycles N] [--expect-serial TEXT] [--trace N] [--ly-fixed HEX]`.
+//! `run <rom> [--max-cycles N] [--expect-serial TEXT] [--trace N] [--ly-fixed HEX]`
+//! `[--frames N] [--dump-ppm FILE]`.
 
 /// Default execution budget in T-cycles: 100_000_000.
 const DEFAULT_MAX_CYCLES: u64 = 100_000_000;
@@ -17,6 +18,10 @@ pub struct RunArgs {
     /// Fixed value returned by every $FF44 (LY) read; None keeps normal behaviour
     /// (`--ly-fixed HEX`, task C01_49). Debug tool for trace comparison.
     pub ly_fixed: Option<u8>,
+    /// Number of frames to run (`--frames N`, E03_16).
+    pub frames: Option<u64>,
+    /// PPM output path (`--dump-ppm FILE`, E03_16).
+    pub dump_ppm: Option<String>,
 }
 
 /// Parse the arguments that follow the word `run`. The first positional argument is the
@@ -28,6 +33,8 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
     let mut expect_serial: Option<String> = None;
     let mut trace: u64 = 0;
     let mut ly_fixed: Option<u8> = None;
+    let mut frames: Option<u64> = None;
+    let mut dump_ppm: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -36,6 +43,8 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
             "--trace" => trace = number(args, &mut i, "--trace")?,
             "--expect-serial" => expect_serial = Some(value(args, &mut i, "--expect-serial")?),
             "--ly-fixed" => ly_fixed = Some(hex_byte(args, &mut i, "--ly-fixed")?),
+            "--frames" => frames = Some(number(args, &mut i, "--frames")?),
+            "--dump-ppm" => dump_ppm = Some(value(args, &mut i, "--dump-ppm")?),
             other if other.starts_with("--") => return Err(format!("unknown flag: {other}")),
             positional => {
                 if rom.is_none() {
@@ -47,12 +56,17 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
     }
 
     let rom = rom.ok_or_else(|| "missing rom".to_string())?;
+    if dump_ppm.is_some() && frames.is_none() {
+        return Err("--dump-ppm requires --frames".to_string());
+    }
     Ok(RunArgs {
         rom,
         max_cycles,
         expect_serial,
         trace,
         ly_fixed,
+        frames,
+        dump_ppm,
     })
 }
 
@@ -185,5 +199,39 @@ mod tests {
         // A parse error routes to exit code 64 in main (EXIT_BAD_RUN_ARGS).
         let err = err_of(&[arg("game.gb"), arg("--ly-fixed"), arg("zz")]);
         assert_eq!(err, "--ly-fixed expects a hex byte");
+    }
+
+    #[test]
+    fn e03_16_frames_and_dump_ppm_parse() {
+        let a = parse_run_args(&[
+            arg("game.gb"),
+            arg("--frames"),
+            arg("3"),
+            arg("--dump-ppm"),
+            arg("out.ppm"),
+        ])
+        .expect("both flags parse");
+        assert_eq!(a.frames, Some(3));
+        assert_eq!(a.dump_ppm.as_deref(), Some("out.ppm"));
+    }
+
+    #[test]
+    fn e03_16_missing_values() {
+        let err = err_of(&[arg("game.gb"), arg("--frames")]);
+        assert_eq!(err, "--frames requires a value");
+        let err = err_of(&[arg("game.gb"), arg("--frames"), arg("1"), arg("--dump-ppm")]);
+        assert_eq!(err, "--dump-ppm requires a value");
+    }
+
+    #[test]
+    fn e03_16_frames_not_a_number() {
+        let err = err_of(&[arg("game.gb"), arg("--frames"), arg("abc")]);
+        assert_eq!(err, "--frames expects a number");
+    }
+
+    #[test]
+    fn e03_16_dump_ppm_requires_frames() {
+        let err = err_of(&[arg("game.gb"), arg("--dump-ppm"), arg("out.ppm")]);
+        assert_eq!(err, "--dump-ppm requires --frames");
     }
 }

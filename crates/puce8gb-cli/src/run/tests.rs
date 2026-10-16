@@ -27,6 +27,8 @@ fn args(max_cycles: u64, expect_serial: Option<&str>) -> RunArgs {
         expect_serial: expect_serial.map(String::from),
         trace: 0,
         ly_fixed: None,
+        frames: None,
+        dump_ppm: None,
     }
 }
 
@@ -190,4 +192,28 @@ fn c01_47_trace_line_sp_pc_max() {
         ),
         "A:FF F:80 B:FE C:FD D:FC E:FB H:FA L:F9 SP:FFFF PC:FFFF PCMEM:EF,EE,ED,EC"
     );
+}
+
+#[test]
+fn e03_16_run_frames_on_nop_rom_gives_a_blank_frame() {
+    let rom = test_rom(&[]);
+    let (outcome, frame) = run_frames(&rom, &args(0, None), 2);
+    assert_eq!(outcome, Outcome::FramesDone);
+    assert_eq!(frame.len(), 23040);
+    for &px in &frame {
+        assert_eq!(px, 0xFFFF_FFFF);
+    }
+}
+
+#[test]
+fn e03_16_run_frames_load_error() {
+    let (outcome, frame) = run_frames(&[0u8; 100], &args(0, None), 1);
+    assert_eq!(outcome, Outcome::LoadError);
+    assert!(frame.is_empty());
+}
+
+#[test]
+fn e03_16_frames_done_exit_code_is_zero() {
+    let a = args(0, Some("X"));
+    assert_eq!(exit_code(&Outcome::FramesDone, &a), 0);
 }

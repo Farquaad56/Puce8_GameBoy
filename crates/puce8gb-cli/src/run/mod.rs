@@ -31,6 +31,8 @@ pub enum Outcome {
     Failed(String),
     /// The CPU recorded an unimplemented opcode: `opcode` at address `pc` (C01_46).
     Unimplemented { opcode: u8, pc: u16 },
+    /// The requested number of frames ran to completion (E03_16).
+    FramesDone,
 }
 
 /// Message printed for an unimplemented opcode (task C01_46): uppercase hex, 2 digits
@@ -80,6 +82,22 @@ pub fn run_rom(rom: &[u8], args: &RunArgs) -> Outcome {
         dmg.debug_set_ly_override(Some(v)); // debug tool for trace comparison (C01_49)
     }
     run_machine(&mut dmg, args)
+}
+
+/// Run `frames` frames of a ROM image (E03_16 spec) and return the outcome with a copy of the
+/// final framebuffer (empty on a load error). No file access: the caller reads and writes files.
+pub fn run_frames(rom: &[u8], args: &RunArgs, frames: u64) -> (Outcome, Vec<u32>) {
+    let mut dmg = match Dmg::new(rom) {
+        Ok(dmg) => dmg,
+        Err(_) => return (Outcome::LoadError, Vec::new()),
+    };
+    if let Some(v) = args.ly_fixed {
+        dmg.debug_set_ly_override(Some(v));
+    }
+    for _ in 0..frames {
+        dmg.run_frame();
+    }
+    (Outcome::FramesDone, dmg.framebuffer().to_vec())
 }
 
 /// Run an already-built machine for at most `args.max_cycles` T-cycles (task C01_48): the
@@ -144,6 +162,7 @@ pub fn exit_code(o: &Outcome, args: &RunArgs) -> u8 {
         Outcome::Found(_) => 0,
         Outcome::Failed(_) => 1,
         Outcome::Unimplemented { .. } => 4,
+        Outcome::FramesDone => 0,
         Outcome::MaxCycles => {
             if args.expect_serial.is_some() {
                 2
@@ -164,6 +183,21 @@ pub fn execute(args: &RunArgs) -> ExitCode {
             return ExitCode::from(3);
         }
     };
+    if let Some(frames) = args.frames {
+        let (outcome, frame) = run_frames(&rom, args, frames);
+        if outcome == Outcome::LoadError {
+            return ExitCode::from(exit_code(&outcome, args));
+        }
+        if let Some(path) = &args.dump_ppm {
+            let written =
+                fs::File::create(path).and_then(|mut f| crate::ppm::write_ppm(&frame, &mut f));
+            if let Err(err) = written {
+                eprintln!("error: cannot write {path}: {err}");
+                return ExitCode::from(3);
+            }
+        }
+        return ExitCode::from(exit_code(&outcome, args));
+    }
     let outcome = run_rom(&rom, args);
     if let Outcome::Unimplemented { opcode, pc } = &outcome {
         println!("{}", unimplemented_message(*opcode, *pc));
