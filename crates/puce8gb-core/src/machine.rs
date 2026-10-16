@@ -948,4 +948,30 @@ mod tests {
             assert_eq!(dmg.bus.oam[i], (i as u8) ^ 0x5A); // all 160 OAM bytes copied from WRAM
         }
     }
+
+    #[test]
+    fn e03_15_program_in_hram_polls_until_the_dma_ends() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        // A program stored in HRAM: start the OAM DMA from $C100, poll until it ends,
+        // then mark an HRAM byte and loop forever (E03_15 spec).
+        let prog = [
+            0x3E, 0xC1, // LD A,$C1
+            0xE0, 0x46, // LDH ($FF46),A: start the OAM DMA from $C100 (E03_06 spec)
+            0x3E, 0x28, // LD A,$28
+            0x3D, // DEC A
+            0x20, 0xFD, // JR NZ,-3: poll until the counter reaches zero
+            0x3E, 0x5A, // LD A,$5A
+            0xE0, 0x90, // LDH ($FF90),A: write HRAM while the DMA may still run
+            0x18, 0xFE, // JR -2: loop forever in HRAM
+        ];
+        for (i, b) in prog.iter().enumerate() {
+            dmg.bus.write(0xFF80 + i as u16, *b);
+        }
+        dmg.cpu.pc = 0xFF80;
+        for _ in 0..1000 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.hram[0x10], 0x5A); // $FF90 was written by the program (E03_15 spec)
+        assert!(!dmg.bus.dma_active()); // the transfer ended within 1000 M-cycles
+    }
 }

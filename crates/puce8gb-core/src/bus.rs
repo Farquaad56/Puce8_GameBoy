@@ -144,9 +144,11 @@ impl Bus {
         io[0xFF] = 0x00; // IE
     }
 
-    /// Read a byte from the bus (decision A_02). PPU-mode blocking and OAM DMA gating
-    /// arrive with E03.
+    /// Read a byte from the bus (decision A_02). PPU-mode blocking and OAM DMA gating: E03_15.
     pub fn read(&self, addr: u16) -> u8 {
+        if self.dma_active && addr < 0xFF00 {
+            return 0xFF; // OAM DMA running: the CPU sees $FF outside HRAM, I/O and IE (E03_15 spec); I/O registers stay accessible: UNKNOWN - to confirm
+        }
         match addr {
             0x0000..=0x7FFF => self.rom.get(addr as usize).copied().unwrap_or(0xFF), // ROM-only cart (decision A_06): past the image is open bus
             0x8000..=0x9FFF => {
@@ -202,8 +204,11 @@ impl Bus {
     }
 
     /// Write a byte to the bus (decision A_02). ROM and unmapped/unusable ranges are
-    /// ignored; PPU-mode blocking and OAM DMA gating arrive with E03.
+    /// ignored; PPU-mode blocking and OAM DMA gating: E03_15.
     pub fn write(&mut self, addr: u16, val: u8) {
+        if self.dma_active && addr < 0xFF00 {
+            return; // OAM DMA running: writes outside HRAM, I/O and IE are ignored (E03_15 spec)
+        }
         match addr {
             0x0000..=0x7FFF => {} // ROM is read-only (note 03a "Adresse bus")
             0x8000..=0x9FFF => {
@@ -312,7 +317,7 @@ impl Bus {
     }
 
     /// Read the raw memory at `addr` with no side effect and no gate (decision A_02):
-    /// for debuggers and viewers. PPU-mode blocking and OAM DMA gating arrive with E03.
+    /// for debuggers and viewers. PPU-mode blocking and OAM DMA gating: E03_15.
     pub fn peek(&self, addr: u16) -> u8 {
         match addr {
             0x0000..=0x7FFF => self.rom.get(addr as usize).copied().unwrap_or(0xFF), // ROM-only cart (decision A_06): past the image is open bus
@@ -853,5 +858,51 @@ mod tests {
         assert!(bus.dma_active()); // still running on step 159 of 160
         bus.dma_step(); // the 160th and final step
         assert!(!bus.dma_active()); // inactive after exactly 160 steps
+    }
+
+    #[test]
+    fn e03_15_read_outside_hram_returns_ff_during_dma() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xC000, 0x42); // WRAM byte before the transfer starts
+        assert_eq!(bus.read(0xC000), 0x42); // normal read outside HRAM
+        bus.write(0xFF46, 0xC1); // start the OAM DMA (E03_06 spec)
+        assert_eq!(bus.read(0xC000), 0xFF); // during the transfer: reads $FF (E03_15 spec)
+    }
+
+    #[test]
+    fn e03_15_hram_and_ie_stay_usable_during_dma() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFF46, 0xC1); // start the OAM DMA (E03_06 spec)
+        bus.write(0xFF80, 0x77); // HRAM stays usable during the transfer (E03_15 spec)
+        assert_eq!(bus.read(0xFF80), 0x77);
+        bus.write(0xFFFF, 0x1F); // IE: UNKNOWN - to confirm; kept accessible here
+        assert_eq!(bus.read(0xFFFF), 0x1F);
+    }
+
+    #[test]
+    fn e03_15_write_outside_hram_is_ignored_during_dma() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xC000, 0x42); // WRAM byte before the transfer starts
+        bus.write(0xFF46, 0xC1); // start the OAM DMA (E03_06 spec)
+        bus.write(0xC000, 0x99); // ignored while the transfer runs (E03_15 spec)
+        for _ in 0..160 {
+            bus.dma_step(); // run the whole transfer to completion
+        }
+        assert_eq!(bus.read(0xC000), 0x42); // the ignored write left WRAM untouched
+        bus.write(0xC000, 0x99); // after the transfer: writes work again
+        assert_eq!(bus.read(0xC000), 0x99);
+    }
+
+    #[test]
+    fn e03_15_restriction_ends_exactly_with_the_transfer() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xC000, 0x42); // WRAM byte before the transfer starts
+        bus.write(0xFF46, 0xC0); // start the OAM DMA (E03_06 spec)
+        for _ in 0..159 {
+            bus.dma_step(); // all but the final step: still active
+        }
+        assert_eq!(bus.read(0xC000), 0xFF); // restricted on the last M-cycle of the transfer
+        bus.dma_step(); // the 160th and final step ends the transfer (E03_06 spec)
+        assert_eq!(bus.read(0xC000), 0x42); // the restriction is gone exactly with it
     }
 }
