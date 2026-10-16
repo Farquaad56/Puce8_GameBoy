@@ -2,6 +2,7 @@
 //! prints cartridge information and exits 3 on any load error; `run` parses its
 //! arguments (exit 64 when bad) but does not execute a ROM yet.
 
+mod hash;
 mod info;
 mod ppm;
 mod run;
@@ -32,7 +33,7 @@ fn main() -> ExitCode {
             eprintln!(
                 "usage: puce8gb-cli [info <rom> | run <rom> [--max-cycles N] \
                  [--expect-serial TEXT] [--trace N] [--ly-fixed HEX] \
-                 [--frames N] [--dump-ppm FILE]]"
+                 [--frames N] [--dump-ppm FILE] [--hash]]"
             );
             ExitCode::from(2)
         }

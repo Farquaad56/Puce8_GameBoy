@@ -29,6 +29,7 @@ fn args(max_cycles: u64, expect_serial: Option<&str>) -> RunArgs {
         ly_fixed: None,
         frames: None,
         dump_ppm: None,
+        hash: false,
     }
 }
 
@@ -216,4 +217,14 @@ fn e03_16_run_frames_load_error() {
 fn e03_16_frames_done_exit_code_is_zero() {
     let a = args(0, Some("X"));
     assert_eq!(exit_code(&Outcome::FramesDone, &a), 0);
+}
+
+#[test]
+fn e03_07_hash_is_deterministic_across_two_runs() {
+    // Two machines built from the same synthetic ROM run the same number of frames:
+    // the framebuffer hash line must be identical (E03_07).
+    let rom = test_rom(&[]);
+    let (_, f1) = run_frames(&rom, &args(0, None), 2);
+    let (_, f2) = run_frames(&rom, &args(0, None), 2);
+    assert_eq!(crate::hash::hash_line(&f1), crate::hash::hash_line(&f2));
 }

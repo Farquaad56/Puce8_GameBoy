@@ -22,6 +22,8 @@ pub struct RunArgs {
     pub frames: Option<u64>,
     /// PPM output path (`--dump-ppm FILE`, E03_16).
     pub dump_ppm: Option<String>,
+    /// Print the framebuffer hash after `frames` frames (`--hash`, E03_07).
+    pub hash: bool,
 }
 
 /// Parse the arguments that follow the word `run`. The first positional argument is the
@@ -35,6 +37,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
     let mut ly_fixed: Option<u8> = None;
     let mut frames: Option<u64> = None;
     let mut dump_ppm: Option<String> = None;
+    let mut hash = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -45,6 +48,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
             "--ly-fixed" => ly_fixed = Some(hex_byte(args, &mut i, "--ly-fixed")?),
             "--frames" => frames = Some(number(args, &mut i, "--frames")?),
             "--dump-ppm" => dump_ppm = Some(value(args, &mut i, "--dump-ppm")?),
+            "--hash" => hash = true,
             other if other.starts_with("--") => return Err(format!("unknown flag: {other}")),
             positional => {
                 if rom.is_none() {
@@ -59,6 +63,9 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
     if dump_ppm.is_some() && frames.is_none() {
         return Err("--dump-ppm requires --frames".to_string());
     }
+    if hash && frames.is_none() {
+        return Err("--hash requires --frames".to_string());
+    }
     Ok(RunArgs {
         rom,
         max_cycles,
@@ -67,6 +74,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
         ly_fixed,
         frames,
         dump_ppm,
+        hash,
     })
 }
 
@@ -233,5 +241,41 @@ mod tests {
     fn e03_16_dump_ppm_requires_frames() {
         let err = err_of(&[arg("game.gb"), arg("--dump-ppm"), arg("out.ppm")]);
         assert_eq!(err, "--dump-ppm requires --frames");
+    }
+
+    #[test]
+    fn e03_07_hash_flag_is_off_by_default() {
+        let a =
+            parse_run_args(&[arg("rom.gb"), arg("--frames"), arg("10")]).expect("frames parses");
+        assert!(!a.hash);
+    }
+
+    #[test]
+    fn e03_07_hash_flag_parses_with_frames() {
+        let a = parse_run_args(&[arg("rom.gb"), arg("--frames"), arg("10"), arg("--hash")])
+            .expect("hash with frames parses");
+        assert!(a.hash);
+        assert_eq!(a.frames, Some(10));
+    }
+
+    #[test]
+    fn e03_07_hash_requires_frames() {
+        let err = err_of(&[arg("rom.gb"), arg("--hash")]);
+        assert!(err.contains("--hash requires --frames"));
+    }
+
+    #[test]
+    fn e03_07_hash_combines_with_dump_ppm() {
+        let a = parse_run_args(&[
+            arg("rom.gb"),
+            arg("--frames"),
+            arg("10"),
+            arg("--hash"),
+            arg("--dump-ppm"),
+            arg("out.ppm"),
+        ])
+        .expect("hash with dump-ppm parses");
+        assert!(a.hash);
+        assert_eq!(a.dump_ppm, Some("out.ppm".to_string()));
     }
 }

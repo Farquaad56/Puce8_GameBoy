@@ -613,12 +613,11 @@ impl Ppu {
             8
         }; // LCDC bit 2 (E03_09 spec)
         let count = self.line_sprites().len();
-        // line_sprites is in OAM order (E03_02); the lowest X wins an overlap and on equal X the
-        // lowest OAM index wins (E03_04 spec), so process from best to worst winner: a stable sort by
-        // sprite X ascending keeps the OAM order for equal X.
+        // `order` holds OAM indexes in OAM order, sorted by X ascending (stable): the lowest X wins an
+        // overlap and on equal X the lowest OAM index wins (E03_04 spec), so process from best to worst winner.
         let mut order = [0u8; 10];
         for (i, slot) in order.iter_mut().enumerate().take(count) {
-            *slot = i as u8;
+            *slot = self.line_sprites[i];
         }
         for i in 1..count {
             let mut j = i;
@@ -1563,6 +1562,49 @@ mod tests {
         }
         assert!(!p.line_buf[8].obj); // column 8 is background again (E03_04 spec)
         assert_eq!(p.line_buf[8].color, 0);
+    }
+
+    #[test]
+    fn e03_07_sprite_at_oam_index_5_is_drawn() {
+        let vram = vram_with_tile(0x00, 0x00); // background tile 0 is colour 0; tile 1 at offset 0x10 (E03_04 spec)
+        let mut oam = [0u8; 160];
+        oam[20] = 16; // OAM entry 5, Y=16: screen line 0 with LY=0 (E03_02 spec)
+        oam[21] = 8; // X=8: screen columns 0..7 (E03_04 spec)
+        oam[22] = 1; // tile index 1 (E03_04 spec)
+        let mut p = Ppu {
+            lcdc: 0x93, // bits 7,4,1,0: LCD on, unsigned tile data, sprites on, BG on (E03_04 spec)
+            ..Ppu::default()
+        };
+        run_line_with_sprites(&mut p, &vram, &oam);
+        assert_eq!(p.line_buf[0].color, 1); // tile-1 row 0 colours [1,0,3,2,2,3,0,1] (E03_04 spec)
+        assert_eq!(p.line_buf[2].color, 3);
+        assert!(p.line_buf[0].obj);
+        assert!(p.line_buf[2].obj);
+    }
+
+    #[test]
+    fn e03_07_two_sprites_at_high_oam_indexes_are_both_drawn() {
+        let vram = vram_with_tile(0x00, 0x00); // background tile 0 is colour 0; tile 1 at offset 0x10 (E03_04 spec)
+        let mut oam = [0u8; 160];
+        oam[12] = 16; // OAM entry 3, Y=16: screen line 0 with LY=0 (E03_02 spec)
+        oam[13] = 16; // X=16: screen columns 8..15 (E03_04 spec)
+        oam[14] = 1; // tile index 1 (E03_04 spec)
+        oam[28] = 16; // OAM entry 7, Y=16: screen line 0 with LY=0 (E03_02 spec)
+        oam[29] = 8; // X=8: screen columns 0..7 (E03_04 spec)
+        oam[30] = 1; // tile index 1 (E03_04 spec)
+        let mut p = Ppu {
+            lcdc: 0x93, // bits 7,4,1,0: LCD on, unsigned tile data, sprites on, BG on (E03_04 spec)
+            ..Ppu::default()
+        };
+        run_line_with_sprites(&mut p, &vram, &oam);
+        assert_eq!(p.line_buf[0].color, 1); // entry 7: tile-1 row 0 colours [1,0,3,2,2,3,0,1] (E03_04 spec)
+        assert_eq!(p.line_buf[2].color, 3);
+        assert_eq!(p.line_buf[8].color, 1); // entry 3: same row at columns 8..15 (E03_04 spec)
+        assert_eq!(p.line_buf[10].color, 3);
+        assert!(p.line_buf[0].obj);
+        assert!(p.line_buf[2].obj);
+        assert!(p.line_buf[8].obj);
+        assert!(p.line_buf[10].obj);
     }
 
     #[test]

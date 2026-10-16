@@ -196,6 +196,9 @@ pub fn execute(args: &RunArgs) -> ExitCode {
                 return ExitCode::from(3);
             }
         }
+        if args.hash {
+            println!("{}", crate::hash::hash_line(&frame));
+        }
         return ExitCode::from(exit_code(&outcome, args));
     }
     let outcome = run_rom(&rom, args);
