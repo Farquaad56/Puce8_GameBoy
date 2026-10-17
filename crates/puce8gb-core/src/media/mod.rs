@@ -3,6 +3,9 @@
 
 pub mod header;
 pub mod mapper;
+pub mod mbc1;
+pub mod mbc2;
+pub mod mbc3;
 
 /// Mapper state for the loaded cartridge. The mapper itself is built by later tasks
 /// from the type code at $0147 (decision A_06); see `mapper::Mapper`.
