@@ -259,6 +259,9 @@ impl Cpu {
     /// M-cycles total, at most one bus access each. M1/M2 internal, M3 writes the PC high
     /// byte at [SP-1], M4 writes the low byte at [SP-2], M5 internal; then SP = SP - 2,
     /// PC = vector of the lowest pending bit, IME cleared and that IF bit acknowledged.
+    /// After the high-byte push (M3) the pending set is re-evaluated because that write may
+    /// have hit IE ($FFFF) when SP = $0000; if no interrupt remains pending, the dispatch is
+    /// cancelled with PC = $0000 and IF left untouched (FIX_04).
     fn advance_interrupt(&mut self, bus: &mut Bus) {
         match self.interrupt_step {
             // M2: internal wait cycle, no bus access (M1 was the tick that started it).
@@ -266,6 +269,12 @@ impl Cpu {
             // M3: push the high byte of the PC at [SP-1] (one bus access).
             2 => {
                 bus.write(self.sp.wrapping_sub(1), (self.pc >> 8) as u8);
+                // The vector is chosen AFTER the high-byte push: that write may hit IE ($FFFF)
+                // when SP = $0000 (mooneye ie_push). Re-evaluate the pending set; an empty set
+                // cancels the dispatch (PC = $0000 at the end of the entry). The low-byte push
+                // happens too late to change anything.
+                let pending = bus.pending_interrupts();
+                self.interrupt_mask = pending & 0u8.wrapping_sub(pending);
             }
             // M4: push the low byte of the PC at [SP-2] (one bus access).
             3 => {
@@ -275,9 +284,13 @@ impl Cpu {
             // fetched, so it stays put; SP drops by two and PC jumps to the vector.
             _ => {
                 self.sp = self.sp.wrapping_sub(2);
-                self.pc = interrupt_vector(self.interrupt_mask);
+                if self.interrupt_mask == 0 {
+                    self.pc = 0x0000; // dispatch cancelled: IF is left untouched
+                } else {
+                    self.pc = interrupt_vector(self.interrupt_mask);
+                    bus.clear_if_bit(self.interrupt_mask);
+                }
                 self.ime = false;
-                bus.clear_if_bit(self.interrupt_mask);
             }
         }
         // Advance to the next M-cycle, or end the sequence after M5 (interrupt_step 4).

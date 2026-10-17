@@ -297,6 +297,7 @@ mod tests {
         let mut bus = testutil::new_bus();
         let mut cpu = cpu_at_code(&mut bus, &[0x00]); // NOP at CODE
         cpu.ime = true;
+        cpu.sp = 0xDFFE; // a real stack: SP=$0000 would push into IE and cancel the dispatch (FIX_04)
         bus.write(0xFFFF, 0x1F); // IE: all five sources enabled
         bus.io[0x0F] = 0x05; // IF: vblank (bit 0) + timer (bit 2) requested
 
@@ -440,5 +441,96 @@ mod tests {
         assert_eq!(cpu.pc, 0x0058); // serial transfer end vector
         assert_eq!(bus.read(0xDFFC), 0x02); // pushed PC low byte ($C002 at sp - 2)
         assert_eq!(bus.read(0xDFFD), 0xC0); // pushed PC high byte (at sp - 1)
+    }
+
+    // ---- FIX_04: the high-byte push of an interrupt entry may hit IE ($FFFF) when SP = $0000 (mooneye ie_push) ----
+
+    #[test]
+    fn fix_04_high_push_to_ie_cancels_the_dispatch() {
+        let mut bus = testutil::new_bus();
+        bus.write(0xFFFF, 0x04); // IE: timer interrupt enabled
+        bus.write(0xFF0F, 0x04); // IF: request pending (bit $04)
+        let mut cpu = Cpu {
+            ime: true,
+            sp: 0x0000,
+            pc: 0x0234,
+            ..Cpu::default()
+        };
+
+        for _ in 0..5 {
+            cpu.tick(&mut bus); // five M-cycles of interrupt entry (note 02b)
+        }
+
+        assert_eq!(cpu.pc, 0x0000); // dispatch cancelled: the high-byte push hit IE and emptied the pending set
+        assert!(!cpu.ime);
+        assert_eq!(cpu.sp, 0xFFFE);
+        assert_eq!(bus.read(0xFFFF), 0x02); // IE overwritten by the pushed PC high byte
+        assert_eq!(bus.read(0xFF0F) & 0x1F, 0x04); // IF left untouched
+    }
+
+    #[test]
+    fn fix_04_low_push_to_ie_is_too_late_to_cancel() {
+        let mut bus = testutil::new_bus();
+        bus.write(0xFFFF, 0x08); // IE: serial transfer end enabled
+        bus.write(0xFF0F, 0x08); // IF: request pending (bit $08)
+        let mut cpu = Cpu {
+            ime: true,
+            sp: 0x0001,
+            pc: 0x0235,
+            ..Cpu::default()
+        };
+
+        for _ in 0..5 {
+            cpu.tick(&mut bus); // five M-cycles of interrupt entry (note 02b)
+        }
+
+        assert_eq!(cpu.pc, 0x0058); // serial transfer end vector: the low-byte push hits IE too late to cancel
+        assert!(!cpu.ime);
+        assert_eq!(bus.read(0xFF0F) & 0x1F, 0x00); // IF bit acknowledged
+        assert_eq!(bus.read(0xFFFF), 0x35); // IE overwritten by the pushed PC low byte
+    }
+
+    #[test]
+    fn fix_04_high_push_to_ie_keeps_the_remaining_interrupt() {
+        let mut bus = testutil::new_bus();
+        bus.write(0xFFFF, 0x03); // IE: vblank and stat enabled
+        bus.write(0xFF0F, 0x03); // IF: both requests pending
+        let mut cpu = Cpu {
+            ime: true,
+            sp: 0x0000,
+            pc: 0x0210,
+            ..Cpu::default()
+        };
+
+        for _ in 0..5 {
+            cpu.tick(&mut bus); // five M-cycles of interrupt entry (note 02b)
+        }
+
+        assert_eq!(cpu.pc, 0x0048); // stat vector: the high-byte push leaves only bit $02 pending
+        assert!(!cpu.ime);
+        assert_eq!(bus.read(0xFF0F) & 0x1F, 0x01); // only the vblank IF bit remains
+        assert_eq!(bus.read(0xFFFF), 0x02); // IE overwritten by the pushed PC high byte
+    }
+
+    #[test]
+    fn fix_04_normal_dispatch_is_unchanged() {
+        let mut bus = testutil::new_bus();
+        bus.write(0xFFFF, 0x04); // IE: timer interrupt enabled
+        bus.write(0xFF0F, 0x04); // IF: request pending (bit $04)
+        let mut cpu = Cpu {
+            ime: true,
+            sp: 0xDFFE,
+            pc: 0xC123,
+            ..Cpu::default()
+        };
+
+        for _ in 0..5 {
+            cpu.tick(&mut bus); // five M-cycles of interrupt entry (note 02b)
+        }
+
+        assert_eq!(cpu.pc, 0x0050); // timer vector
+        assert!(!cpu.ime);
+        assert_eq!(cpu.sp, 0xDFFC);
+        assert_eq!(bus.read(0xFF0F) & 0x1F, 0x00); // IF bit acknowledged
     }
 }
