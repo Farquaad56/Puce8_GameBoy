@@ -1,14 +1,20 @@
 //! Desktop frontend: an eframe window showing the core framebuffer (E07_01).
+mod emu;
+mod pacing;
 mod scale;
 
 use eframe::egui;
-use puce8gb_core::{Dmg, Machine};
+use emu::{Command, EmuHandle};
+use puce8gb_core::Input;
 
 const SCREEN_W: usize = 160;
 const SCREEN_H: usize = 144;
 
 struct App {
-    machine: Option<Dmg>,
+    emu: EmuHandle,
+    frame: Vec<u32>,
+    paused: bool,
+    last_input: Input,
     texture: Option<egui::TextureHandle>,
     status: String,
 }
@@ -16,7 +22,10 @@ struct App {
 impl App {
     fn new(rom_path: Option<String>) -> Self {
         let mut app = App {
-            machine: None,
+            emu: EmuHandle::spawn(),
+            frame: Vec::new(),
+            paused: false,
+            last_input: Input::default(),
             texture: None,
             status: String::from("Drop a ROM file on the window"),
         };
@@ -28,13 +37,12 @@ impl App {
 
     fn load_rom(&mut self, path: &std::path::Path) {
         match std::fs::read(path) {
-            Ok(bytes) => match Dmg::new(&bytes) {
-                Ok(dmg) => {
-                    self.machine = Some(dmg);
-                    self.status = format!("Loaded {}", path.display());
-                }
-                Err(err) => self.status = format!("ROM rejected: {err:?}"),
-            },
+            Ok(bytes) => {
+                self.emu.send(Command::Load(bytes));
+                self.frame.clear();
+                self.last_input = Input::default();
+                self.status = format!("Loading {}", path.display());
+            }
             Err(err) => self.status = format!("Cannot read {}: {err}", path.display()),
         }
     }
@@ -42,13 +50,11 @@ impl App {
     /// Current framebuffer as an egui image (black when no ROM is loaded).
     fn current_image(&self) -> egui::ColorImage {
         let mut image = egui::ColorImage::filled([SCREEN_W, SCREEN_H], egui::Color32::BLACK);
-        if let Some(machine) = &self.machine {
-            for (dst, &argb) in image.pixels.iter_mut().zip(machine.framebuffer()) {
-                let r = ((argb >> 16) & 0xFF) as u8;
-                let g = ((argb >> 8) & 0xFF) as u8;
-                let b = (argb & 0xFF) as u8;
-                *dst = egui::Color32::from_rgb(r, g, b);
-            }
+        for (dst, &argb) in image.pixels.iter_mut().zip(self.frame.iter()) {
+            let r = ((argb >> 16) & 0xFF) as u8;
+            let g = ((argb >> 8) & 0xFF) as u8;
+            let b = (argb & 0xFF) as u8;
+            *dst = egui::Color32::from_rgb(r, g, b);
         }
         image
     }
@@ -61,8 +67,35 @@ impl eframe::App for App {
         if let Some(path) = dropped.iter().map(|f| f.path().to_path_buf()).next() {
             self.load_rom(&path);
         }
-        if let Some(machine) = self.machine.as_mut() {
-            machine.run_frame(); // temporary: the core runs on the UI thread, replaced in E07_02
+        while let Ok(frame) = self.emu.frames.try_recv() {
+            self.frame = frame;
+        }
+        while let Ok(message) = self.emu.status.try_recv() {
+            self.status = message;
+        }
+        let input = ctx.input(|i| Input {
+            up: i.key_down(egui::Key::ArrowUp),
+            down: i.key_down(egui::Key::ArrowDown),
+            left: i.key_down(egui::Key::ArrowLeft),
+            right: i.key_down(egui::Key::ArrowRight),
+            a: i.key_down(egui::Key::W),
+            b: i.key_down(egui::Key::X),
+            start: i.key_down(egui::Key::Enter),
+            select: i.key_down(egui::Key::Backspace),
+        });
+        if input != self.last_input {
+            self.emu.send(Command::Input(input));
+            self.last_input = input;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::P)) {
+            self.paused = !self.paused;
+            self.emu.send(Command::Pause(self.paused));
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::R)) {
+            self.emu.send(Command::Reset);
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::N)) {
+            self.emu.send(Command::FrameStep);
         }
         let image = self.current_image();
         if let Some(texture) = &mut self.texture {
@@ -72,6 +105,9 @@ impl eframe::App for App {
         }
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.label(&self.status);
+            ui.label(
+                "Arrows, W=A, X=B, Enter=Start, Backspace=Select | P pause, N frame step, R reset",
+            );
         });
         egui::CentralPanel::default().show(ui, |ui| {
             let avail = ui.available_size();
