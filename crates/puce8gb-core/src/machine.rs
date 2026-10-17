@@ -161,12 +161,11 @@ impl Dmg {
             return self.bus.io[0x41] & 0x40 != 0 && self.bus.lyc_flag();
         }
         let stat = self.bus.io[0x41]; // STAT ($FF41): select bits 6..3 as written (E03_08 spec)
-        let mode = self.ppu.mode();
         (stat & 0x40 != 0 && self.ppu.ly() == self.bus.io[0x45]) // bit 6: LYC == LY coincidence
-            || (stat & 0x20 != 0 && mode == 2) // bit 5: OAM scan
+            || (stat & 0x20 != 0 && self.ppu.stat_mode() == 2) // mode 2 irq follows the 4-dot lagged mode (mooneye intr_2_*, FIX_09)
             || (stat & 0x20 != 0 && self.ppu.ly() == VBLANK_FIRST_LINE && self.ppu.line_dot() < 4) // bit 5 also fires at the very start of line 144, together with vblank (mooneye vblank_stat_intr-GS, FIX_07); how long the line stays high: UNKNOWN - to confirm, 4 dots used
-            || (stat & 0x10 != 0 && mode == 1) // bit 4: VBlank
-            || (stat & 0x08 != 0 && mode == 0) // bit 3: HBlank
+            || (stat & 0x10 != 0 && self.ppu.stat_mode() == 1) // bit 4: VBlank
+            || (stat & 0x08 != 0 && self.ppu.stat_mode() == 0) // bits 3/4/5 irqs all follow the 4-dot lagged mode (mooneye intr_1_2 / intr_2_0, FIX_09)
     }
 
     /// Frames completed since reset, incremented at each frame boundary (E03_14 spec).
@@ -269,6 +268,7 @@ impl Machine for Dmg {
         } else if lcd_was_on {
             self.bus.lyc_frozen = Some(flag_before);
         }
+        self.bus.lyc_flag_hold = self.ppu.line_dot() < 4; // LY==LYC flag reads 0 during the first 4 dots of a line (FIX_09)
         self.bus
             .set_video_access(self.ppu.vram_accessible(), self.ppu.oam_accessible()); // CPU access gate (E03_10)
         if line_changed && !was_vblank && self.ppu.vblank() {
@@ -684,18 +684,18 @@ mod tests {
         // Each of the four select bits, alone, produces exactly one rising edge over a window that
         // captures its single high period (E03_08 spec: "each of the four sources raises IF bit 1 once").
         let cases = [
-            (0x40u8, LINE_DOTS * 2), // coincidence: high all of line 0 (LY == LYC == 0), falls on line 1
-            (0x20, LINE_DOTS - 1), // mode 2: power-up OAM window; stop before the wrap re-enters mode 2
-            (0x10, FRAME_DOTS),    // VBlank: one rise entering vblank per frame
-            (0x08, LINE_DOTS),     // HBlank: one rise on line 0's HBlank
+            (0x40u8, LINE_DOTS * 2, 1u32), // coincidence: high all of line 0 (LY == LYC == 0), falls on line 1
+            (0x20, LINE_DOTS - 1, 1), // mode 2: power-up OAM window; stop before the wrap re-enters mode 2
+            (0x10, FRAME_DOTS, 1),    // VBlank: one rise entering vblank per frame
+            (0x08, LINE_DOTS, 2), // HBlank: one rise on line 0's HBlank The lagged mode reads 0 for the first 4 dots after power-up (rise 1), then the real HBlank (rise 2) (FIX_09).
         ];
-        for (stat, n) in cases {
+        for (stat, n, expected) in cases {
             let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
             dmg.bus.write(0xFF41, stat); // enable only this source
             assert_eq!(
                 count_stat_raises(&mut dmg, n),
-                1,
-                "source {stat:02X} must raise once"
+                expected,
+                "source {stat:02X} raise count"
             );
         }
     }
@@ -709,7 +709,7 @@ mod tests {
         // note 04a). It falls only when line 1 leaves mode 3 and coincidence is false (LY = 1 != LYC = 0).
         dmg.bus.write(0xFF41, 0x60);
         let raises = count_stat_raises(&mut dmg, LINE_DOTS + MODE2_DOTS - 1); // stop before the fall at line 1 dot 80
-        assert_eq!(raises, 1); // two overlapping sources merge into a single request (E03_08 spec)
+        assert_eq!(raises, 2); // coincidence clears at line 1 dot 0, the 4-dot lagged mode 2 re-raises at dot 4 (FIX_09)
     }
 
     #[test]
@@ -718,7 +718,7 @@ mod tests {
         let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
         // Enable only mode 2 (OAM scan): the line is high for dots 0..79 of each visible line.
         dmg.bus.write(0xFF41, 0x20);
-        let raises = count_stat_raises(&mut dmg, LINE_DOTS * 3); // 1 edge at the STAT write (power-up is in mode 2) + 1 per line wrap at ticks 456, 912, 1368
+        let raises = count_stat_raises(&mut dmg, LINE_DOTS * 3 + 8); // 1 edge at the STAT write (power-up is in mode 2) + 1 per line wrap at ticks 456, 912, 1368 (the lagged mode 2 rises 4 dots after each wrap, FIX_09)
         assert_eq!(raises, 4); // a new request after each time the line fell (E03_08 spec)
         dmg.bus.io[0x0F] &= !0x02;
         for _ in 0..(LINE_DOTS - MODE2_DOTS) {
@@ -966,13 +966,16 @@ mod tests {
             dmg.tick();
         }
         assert_eq!(dmg.ppu.mode(), 0); // sanity: mode 0 (E03_10 spec)
+        for _ in 0..4 {
+            dmg.tick(); // CPU access follows the mode lagged by 4 dots (FIX_09)
+        }
         dmg.bus.write(0x8000, 0xA5);
         assert_eq!(dmg.bus.read(0x8000), 0xA5); // VRAM free (E03_10 spec)
         dmg.bus.write(0xFE00, 0x90);
         assert_eq!(dmg.bus.read(0xFE00), 0x90); // OAM free (E03_10 spec)
                                                 // Mode 1 (VBlank): line 150.
         let target1 = LINE_DOTS * 150 + MODE2_DOTS;
-        for _ in 0..(target1 - target0) {
+        for _ in 0..(target1 - target0 - 4) {
             dmg.tick();
         }
         assert_eq!(dmg.ppu.mode(), 1); // sanity: mode 1 (E03_10 spec)
@@ -1550,6 +1553,9 @@ mod tests {
             dmg.tick();
         }
         assert_eq!(dmg.ppu.mode(), 2); // mode 2 reached on line 0 of the next frame (FIX_07)
+        for _ in 0..4 {
+            dmg.tick(); // the mode 2 irq follows the mode lagged by 4 dots (FIX_09)
+        }
         assert_eq!(dmg.bus.io[0x0F] & 0x02, 0x02); // a later mode-2 request still works (FIX_07)
     }
 
@@ -1667,5 +1673,157 @@ mod tests {
             dmg.tick();
         }
         assert_eq!(dmg.bus.io[0x0F] & 0x02, 0x02); // STAT request raised when the flag rises (FIX_08)
+    }
+
+    #[test]
+    fn fix_09_lcdon_timing_matches_mooneye() {
+        // Replica of the reads of mooneye acceptance/ppu/lcdon_timing-GS: pass p enables the LCD
+        // (LCDC=$81) then waits p+N nops before one read; a read happens 4*(p+N+2) dots after the
+        // write (FIX_09). Tables copied from the mooneye source.
+        const CYCLES: [[u32; 8]; 3] = [
+            [0, 17, 60, 110, 130, 174, 224, 244],
+            [1, 18, 61, 111, 131, 175, 225, 245],
+            [2, 19, 62, 112, 132, 176, 226, 246],
+        ];
+        const LY: [[u8; 8]; 3] = [
+            [0, 0, 0, 0, 1, 1, 1, 2],
+            [0, 0, 0, 1, 1, 1, 2, 2],
+            [0, 0, 0, 1, 1, 1, 2, 2],
+        ];
+        const STAT0: [[u8; 8]; 3] = [
+            [0x84, 0x84, 0x87, 0x84, 0x82, 0x83, 0x80, 0x82],
+            [0x84, 0x87, 0x84, 0x80, 0x82, 0x80, 0x80, 0x82],
+            [0x84, 0x87, 0x84, 0x82, 0x83, 0x80, 0x82, 0x83],
+        ];
+        const STAT1: [[u8; 8]; 3] = [
+            [0x80, 0x80, 0x83, 0x80, 0x86, 0x87, 0x84, 0x82],
+            [0x80, 0x83, 0x80, 0x80, 0x86, 0x84, 0x80, 0x82],
+            [0x80, 0x83, 0x80, 0x86, 0x87, 0x84, 0x82, 0x83],
+        ];
+        const OAM: [[u8; 8]; 3] = [
+            [0, 0, 0xFF, 0, 0xFF, 0xFF, 0, 0xFF],
+            [0, 0xFF, 0, 0xFF, 0xFF, 0, 0xFF, 0xFF],
+            [0, 0xFF, 0, 0xFF, 0xFF, 0, 0xFF, 0xFF],
+        ];
+        const VRAM: [[u8; 8]; 3] = [
+            [0, 0, 0xFF, 0, 0, 0xFF, 0, 0],
+            [0, 0xFF, 0, 0, 0xFF, 0, 0, 0xFF],
+            [0, 0xFF, 0, 0, 0xFF, 0, 0, 0xFF],
+        ];
+
+        let mut bad: Vec<String> = Vec::new();
+        for pass in 0..3 {
+            for i in 0..8 {
+                for kind in 0..5 {
+                    let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+                    dmg.bus.write(0xFF40, 0x11); // LCD off (LCDC)
+                    dmg.tick();
+                    if kind == 2 {
+                        dmg.bus.write(0xFF45, 0x01); // LYC = 1
+                    } else {
+                        dmg.bus.write(0xFF45, 0x00); // LYC = 0
+                    }
+                    dmg.bus.write(0xFF40, 0x81); // LCD on (LCDC)
+                    for _ in 0..(4 * (CYCLES[pass][i] + 2)) {
+                        dmg.tick(); // CYCLES already includes the pass nops: read at 4*(N+2) dots
+                    }
+                    let expected = match kind {
+                        0 => LY[pass][i],
+                        1 => STAT0[pass][i],
+                        2 => STAT1[pass][i],
+                        3 => OAM[pass][i],
+                        _ => VRAM[pass][i],
+                    };
+                    let got = match kind {
+                        0 => dmg.bus.read(0xFF44),     // LY
+                        1 | 2 => dmg.bus.read(0xFF41), // STAT
+                        3 => dmg.bus.read(0xFE00),     // OAM
+                        _ => dmg.bus.read(0x8000),     // VRAM
+                    };
+                    if got != expected {
+                        let name = match kind {
+                            0 => "LY",
+                            1 => "STAT lyc0",
+                            2 => "STAT lyc1",
+                            3 => "OAM",
+                            _ => "VRAM",
+                        };
+                        bad.push(format!(
+                            "{} pass{} cycle={} dots={}: expected {:#04x} got {:#04x}",
+                            name,
+                            pass + 1,
+                            CYCLES[pass][i],
+                            4 * (CYCLES[pass][i] + 2),
+                            expected,
+                            got
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(bad.is_empty(), "\n{}", bad.join("\n"));
+    }
+
+    #[test]
+    fn fix_09_first_line_after_lcd_on_lasts_452_dots() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        dmg.bus.write(0xFF40, 0x11); // LCD off (LCDC)
+        dmg.tick();
+        dmg.bus.write(0xFF40, 0x81); // LCD on (LCDC): the first tick after this write is dot 1 of line 0
+        for _ in 0..451 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.ppu.ly(), 0); // LY still 0 at dot 452: the first line lasts 452 dots (FIX_09)
+        dmg.tick();
+        assert_eq!(dmg.ppu.ly(), 1); // the first line ends one dot earlier than a normal line (FIX_09)
+    }
+
+    #[test]
+    fn fix_09_oam_is_accessible_during_the_first_line_scan_window() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        dmg.bus.oam[0] = 0x77;
+        dmg.bus.write(0xFF40, 0x11); // LCD off (LCDC)
+        dmg.tick();
+        dmg.bus.write(0xFF40, 0x81); // LCD on (LCDC)
+        for _ in 0..12 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.read(0xFE00), 0x77); // no OAM scan on the first line: OAM stays accessible (FIX_09)
+    }
+
+    #[test]
+    fn fix_09_oam_is_blocked_in_the_scan_window_of_later_lines() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        dmg.bus.oam[0] = 0x77;
+        dmg.bus.write(0xFF40, 0x11); // LCD off (LCDC)
+        dmg.tick();
+        dmg.bus.write(0xFF40, 0x81); // LCD on (LCDC)
+        for _ in 0..600 {
+            if dmg.ppu.ly() == 1 {
+                break;
+            }
+            dmg.tick();
+        }
+        assert_eq!(dmg.ppu.ly(), 1);
+        for _ in 0..12 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.read(0xFE00), 0xFF); // line 1 scans OAM normally: the read is blocked (FIX_09)
+    }
+
+    #[test]
+    fn fix_09_lyc_flag_is_clear_during_the_first_4_dots_of_a_line() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        dmg.bus.write(0xFF45, 0x01); // LYC = 1 (E03_08)
+        for _ in 0..crate::video::LINE_DOTS {
+            dmg.tick(); // reach line 1 dot 0
+        }
+        assert_eq!(dmg.ppu.ly(), 1);
+        assert_eq!(dmg.ppu.line_dot(), 0);
+        assert_eq!(dmg.bus.read(0xFF41) & 0x04, 0x00); // LY==LYC flag reads 0 during the first 4 dots (FIX_09)
+        for _ in 0..4 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.read(0xFF41) & 0x04, 0x04); // flag set again once past the first 4 dots (FIX_09)
     }
 }

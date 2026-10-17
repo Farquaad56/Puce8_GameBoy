@@ -7,6 +7,9 @@ use crate::machine::FRAMEBUFFER_SIZE;
 /// Dots per scanline: 456 (note 01_timing.md "Lignes par frame").
 pub const LINE_DOTS: u32 = 456;
 
+/// Dots by which the first line after the LCD is switched on is shorter than a normal line (mooneye lcdon_timing-GS: LY becomes 1 after 452 dots, FIX_09).
+pub const FIRST_LINE_SHORTFALL: u32 = 4;
+
 /// Scanlines per frame: 154; LY holds 0..=153, values 144-153 are the VBlank period
 /// (note 01_timing.md "Lignes par frame", note 04a "LY").
 pub const LINES_PER_FRAME: u8 = 154;
@@ -93,6 +96,10 @@ pub struct Ppu {
     mode: u8,
     /// true on line 0 right after the LCD was switched on: STAT reads mode 0 instead of 2 (mooneye stat_lyc_onoff, FIX_08)
     first_line: bool,
+    /// STAT readback and CPU VRAM/OAM access lag the internal mode by 4 dots on lines 1.. (mooneye lcdon_timing-GS, FIX_09)
+    mode_hist: [u8; 4],
+    /// Internal mode 4 dots ago: the oldest entry of `mode_hist` after each tick.
+    mode_lag: u8,
     /// LCD and PPU enable = LCDC ($FF40) bit 7 (E03_09 spec): false stops the dot counter.
     lcd_on: bool,
     /// Mirror of LCDC ($FF40) as written by the CPU (E03_09 spec); bit 2 selects the sprite
@@ -155,6 +162,8 @@ impl Default for Ppu {
             ly: 0,
             mode: 0,
             first_line: false, // not on the first line after an LCD off -> on restart (FIX_08)
+            mode_hist: [0; 4], // no mode history before the first tick (FIX_09)
+            mode_lag: 0,       // internal mode 4 dots ago is unknown at power-up (FIX_09)
             lcd_on: true,      // post-boot LCDC ($FF40) is $91: bit 7 set (note 08)
             lcdc: 0x91,        // post-boot LCDC value (E03_09 spec); the machine keeps it current
             line_sprites: [0x00; 10],
@@ -217,6 +226,8 @@ impl Ppu {
         self.dot_in_line = 0;
         self.ly = 0;
         self.first_line = false; // post-boot is not the first line after an LCD off -> on restart (FIX_08)
+        self.mode_hist = [0; 4]; // no mode history before the first tick (FIX_09)
+        self.mode_lag = 0; // internal mode 4 dots ago is unknown at power-up (FIX_09)
         self.mode = Self::mode_for(self.ly, self.dot_in_line, self.pixels_output); // mode 2 at start of line 0
         self.lcd_on = true; // post-boot LCDC ($FF40) is $91: bit 7 set (note 08)
         self.lcdc = 0x91; // post-boot LCDC value (E03_09 spec); the machine keeps it current
@@ -270,6 +281,8 @@ impl Ppu {
             self.ly = 0;
             self.mode = Self::mode_for(self.ly, self.dot_in_line, self.pixels_output); // normal line (E03_09 spec)
             self.first_line = true; // STAT reads mode 0 on this first line (mooneye stat_lyc_onoff, FIX_08)
+            self.mode_hist = [0; 4]; // the restarted line has no mode history yet (FIX_09)
+            self.mode_lag = 0; // internal mode 4 dots ago is unknown at restart (FIX_09)
             self.oam_scan_pending = true; // the restarted line 0 starts in mode 2: its scan is due (E03_02)
             self.reset_pixel_state(); // the restarted line 0 fetches fresh pixels (E03_03)
             self.win_line = 0; // window internal counter restarts with the frame (E03_12 spec)
@@ -278,6 +291,8 @@ impl Ppu {
             self.ly = 0;
             self.mode = 0; // STAT mode bits read 0 while the PPU is disabled (note 04a "STAT")
             self.first_line = false; // no first-line state while the PPU is disabled (FIX_08)
+            self.mode_hist = [0; 4]; // no mode history while the PPU is disabled (FIX_09)
+            self.mode_lag = 0; // internal mode 4 dots ago is unknown while off (FIX_09)
             self.oam_scan_pending = false; // the line whose scan was due no longer exists (E03_02)
             self.frame.fill(PALETTE[0]);
         }
@@ -292,7 +307,13 @@ impl Ppu {
             return false; // LCD off: the dot counter, LY and mode are frozen (E03_09 spec)
         }
         let next_dot = self.dot_in_line.wrapping_add(1);
-        if next_dot == LINE_DOTS {
+        let line_len = if self.first_line {
+            LINE_DOTS - FIRST_LINE_SHORTFALL
+        } else {
+            LINE_DOTS
+        };
+        let line_ends = next_dot == line_len;
+        if line_ends {
             // End of line: wrap to dot 0 and advance LY; after the last line it wraps (note 04a "LY").
             self.dot_in_line = 0;
             self.first_line = false; // the first line after an LCD on is over (FIX_08)
@@ -321,7 +342,10 @@ impl Ppu {
             // Entry to the OAM scan of a visible line (E03_01): its sprite selection is due.
             self.oam_scan_pending = true;
         }
-        next_dot == LINE_DOTS
+        self.mode_lag = self.mode_hist[0]; // the mode 4 dots ago becomes the lagged readback (FIX_09)
+        self.mode_hist.rotate_left(1);
+        self.mode_hist[3] = self.mode; // record the new internal mode as the newest history entry (FIX_09)
+        line_ends
     }
 
     /// True while the mode 2 OAM scan of the current line is due and not yet performed
@@ -542,12 +566,16 @@ impl Ppu {
         self.mode
     }
 
-    /// Mode bits as read through STAT: the first line after the LCD is switched on has no OAM scan phase and reads mode 0 (FIX_08; exact length of that phase: see lcdon_timing, UNKNOWN - to confirm).
+    /// Mode bits as read through STAT: the first line after the LCD is switched on has no OAM scan phase and reads mode 0 (FIX_08; exact length of that phase: see lcdon_timing, UNKNOWN - to confirm). From line 1 on, STAT shows the internal mode as it was 4 dots earlier (FIX_09).
     pub fn stat_mode(&self) -> u8 {
-        if self.first_line && self.mode == 2 {
-            0
+        if self.first_line {
+            if self.mode == 2 {
+                0
+            } else {
+                self.mode
+            }
         } else {
-            self.mode
+            self.mode_lag
         }
     }
 
@@ -723,16 +751,19 @@ impl Ppu {
 
     /// True while the CPU may access VRAM ($8000-$9FFF) (E03_10 spec): every mode except 3;
     /// when the LCD is off the PPU mode reads as 0, so access is free. The PPU's own reads are
-    /// never blocked: they go through the raw bus arrays, not Bus::read (decision A_01).
+    /// never blocked: they go through the raw bus arrays, not Bus::read (decision A_01). From line 1 on the CPU block lasts until the lagged mode 3 ends, 4 dots after the internal one (FIX_09).
     pub(crate) fn vram_accessible(&self) -> bool {
-        self.mode != 3 // LCD off forces mode 0, so this covers it too (E03_10 spec)
+        self.mode != 3 && (self.first_line || self.mode_lag != 3) // LCD off forces mode 0, so this covers it too (E03_10 spec)
     }
 
     /// True while the CPU may access OAM ($FE00-$FE9F) (E03_10 spec): modes 0 and 1 only;
     /// when the LCD is off the PPU mode reads as 0, so access is free. The PPU's own reads are
-    /// never blocked: they go through the raw bus arrays, not Bus::read (decision A_01).
+    /// never blocked: they go through the raw bus arrays, not Bus::read (decision A_01). On the
+    /// first line after the LCD is switched on there is no OAM scan: OAM stays accessible
+    /// (mooneye lcdon_timing-GS, FIX_09). From line 1 on the CPU block lasts until the lagged mode 3 ends, 4 dots after the internal one (FIX_09).
     pub(crate) fn oam_accessible(&self) -> bool {
-        self.mode < 2 // LCD off forces mode 0, so this covers it too (E03_10 spec)
+        (self.mode < 2 || (self.first_line && self.mode == 2))
+            && (self.first_line || self.mode_lag != 3)
     }
 }
 

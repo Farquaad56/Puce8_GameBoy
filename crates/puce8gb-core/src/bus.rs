@@ -70,6 +70,8 @@ pub struct Bus {
     pub ppu_mode: u8,
     /// Value of the STAT LY==LYC flag frozen while the LCD is off (None while the LCD is on: live compare) (mooneye stat_lyc_onoff, FIX_08).
     pub(crate) lyc_frozen: Option<bool>,
+    /// true during the first 4 dots of a line: the STAT LY==LYC flag reads 0 there (mooneye lcdon_timing-GS, FIX_09)
+    pub(crate) lyc_flag_hold: bool,
     /// CPU access to VRAM ($8000-$9FFF) allowed (E03_10): mirrored from the PPU by Machine::tick.
     vram_open: bool,
     /// CPU access to OAM ($FE00-$FE9F) allowed (E03_10): mirrored from the PPU by Machine::tick.
@@ -115,9 +117,10 @@ impl Bus {
             io: [0xFF; IO_SIZE],
             serial: [0x00; 256],
             serial_len: 0,
-            ly: 0,              // LY ($FF44) post-boot value (note 08, C01_15)
+            ly: 0,                // LY ($FF44) post-boot value (note 08, C01_15)
             ppu_mode: 2, // PPU mode at the start of line 0 is OAM scan (E03_01); Machine::tick keeps it current
             lyc_frozen: None, // no frozen coincidence flag while the LCD is on (FIX_08)
+            lyc_flag_hold: false, // LY==LYC flag not held low at power-up (FIX_09)
             vram_open: true, // VRAM access allowed until Machine::tick mirrors the PPU state (E03_10)
             oam_open: true, // OAM access allowed until Machine::tick mirrors the PPU state (E03_10)
             dma_active: false, // no OAM DMA transfer running at power-up (E03_06 spec)
@@ -167,6 +170,7 @@ impl Bus {
         self.ly = 0; // LY ($FF44) post-boot value (note 08, C01_15)
         self.ppu_mode = 2; // PPU mode restarts at the start of line 0: OAM scan (E03_01)
         self.lyc_frozen = None; // no frozen coincidence flag while the LCD is on (FIX_08)
+        self.lyc_flag_hold = false; // LY==LYC flag not held low at power-up (FIX_09)
         self.vram_open = true; // VRAM access allowed until Machine::tick mirrors the PPU state (E03_10)
         self.oam_open = true; // OAM access allowed until Machine::tick mirrors the PPU state (E03_10)
         self.dma_active = false; // no OAM DMA transfer running at power-up (E03_06 spec)
@@ -448,7 +452,7 @@ impl Bus {
     pub(crate) fn lyc_flag(&self) -> bool {
         match self.lyc_frozen {
             Some(f) => f,
-            None => self.ly == self.io[0x45],
+            None => self.ly == self.io[0x45] && !self.lyc_flag_hold,
         }
     }
 
