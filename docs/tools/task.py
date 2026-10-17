@@ -53,7 +53,7 @@ python3 docs/tools/task.py done
 
 FIX_CHECK = """#!/usr/bin/env bash
 source "$(dirname "$0")/lib.sh"
-t "target test passes" 'cargo run -q --release -p puce8gb-cli -- suite --only {name_q}'
+t "target test passes" 'cargo run -q --release -p puce8gb-cli -- suite --only "{name_q}"'
 t "suite >= baseline" 'cargo run -q --release -p puce8gb-cli -- suite --baseline docs/annexes/baseline_score.txt'
 t "fix unit test exists" 'ct puce8gb-core fix_{num}_'
 score
@@ -467,7 +467,7 @@ def cmd_addfix(name):
         f.write(FIX_TEMPLATE.format(id=fid, name=name, num=num))
     import shlex
     with open(os.path.join(CHECKS, fid + ".sh"), "w", encoding="utf-8") as f:
-        f.write(FIX_CHECK.format(name_q=shlex.quote(name), num=num))
+        f.write(FIX_CHECK.format(name_q=name.replace("\\", "\\\\").replace('"', '\\"'), num=num))
     new = dict(id=fid, role="TEST", gate=False, path=rel, title="Fix test " + name)
     pos = [r["id"] for r in rows].index(prog["current_task"]) if prog.get("current_task") else len(rows)
     rows.insert(pos, new)
