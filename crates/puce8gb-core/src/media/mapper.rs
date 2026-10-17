@@ -6,6 +6,7 @@ use super::header::{CartridgeLoadError, Header};
 use super::mbc1::Mbc1;
 use super::mbc2::Mbc2;
 use super::mbc3::Mbc3;
+use super::mbc5::Mbc5;
 
 /// External RAM size of a ROM-only cartridge: up to 8 KiB at A000-BFFF (note 07b
 /// "No-MBC / ROM-only").
@@ -24,12 +25,14 @@ pub enum Mapper {
     Mbc2(Mbc2),
     /// MBC3 chip with a real-time clock driven by emulated dots (note 07b; types $0F, $10, $13).
     Mbc3(Mbc3),
+    /// MBC5 chip (note 07b): 9-bit ROM bank and banked RAM (types $19-$1E).
+    Mbc5(Mbc5),
 }
 
 impl Mapper {
     /// Build the mapper for a cartridge from its header (decision A_06). ROM-only ($00),
-    /// MBC1 ($01-$03), MBC2 ($05-$06, RAM size code ignored) and MBC3 ($0F, $10, $13) are
-    /// supported; every other code at $0147 is rejected with
+    /// MBC1 ($01-$03), MBC2 ($05-$06, RAM size code ignored), MBC3 ($0F, $10, $13) and
+    /// MBC5 ($19-$1E) are supported; every other code at $0147 is rejected with
     /// `CartridgeLoadError::UnsupportedCartridgeType`.
     pub fn new(rom: Vec<u8>, header: &Header) -> Result<Mapper, CartridgeLoadError> {
         match header.cartridge_type {
@@ -37,6 +40,7 @@ impl Mapper {
             0x01..=0x03 => Ok(Mapper::Mbc1(Mbc1::new(rom, header.ram_size_code)?)),
             0x05 | 0x06 => Ok(Mapper::Mbc2(Mbc2::new(rom))),
             0x0F | 0x10 | 0x13 => Ok(Mapper::Mbc3(Mbc3::new(rom, header.ram_size_code)?)),
+            0x19..=0x1E => Ok(Mapper::Mbc5(Mbc5::new(rom, header.ram_size_code)?)),
             other => Err(CartridgeLoadError::UnsupportedCartridgeType(other)),
         }
     }
@@ -49,6 +53,7 @@ impl Mapper {
             Mapper::Mbc1(m) => m.read(addr),
             Mapper::Mbc2(m) => m.read(addr),
             Mapper::Mbc3(m) => m.read(addr),
+            Mapper::Mbc5(m) => m.read(addr),
         }
     }
 
@@ -60,6 +65,7 @@ impl Mapper {
             Mapper::Mbc1(m) => m.write(addr, val),
             Mapper::Mbc2(m) => m.write(addr, val),
             Mapper::Mbc3(m) => m.write(addr, val),
+            Mapper::Mbc5(m) => m.write(addr, val),
         }
     }
 
@@ -282,8 +288,8 @@ mod tests {
 
     #[test]
     fn e01_04_mapper_unsupported_cartridge_type_rejected() {
-        // MBC5 and later mappers arrive with later tasks.
-        for code in [0x19u8, 0xFF] {
+        // other mappers are not supported.
+        for code in [0x20u8, 0xFF] {
             let header = header_with(code, 0x00);
             let err = Mapper::new(rom_image(32 * 1024), &header).unwrap_err();
             assert!(matches!(&err, CartridgeLoadError::UnsupportedCartridgeType(c) if *c == code));
@@ -357,5 +363,25 @@ mod tests {
         let header = header_with(0x13, 0x04);
         let err = Mapper::new(rom_image(32 * 1024), &header).unwrap_err();
         assert!(matches!(err, CartridgeLoadError::UnknownRamSize(0x04)));
+    }
+
+    #[test]
+    fn e05_05_mapper_new_builds_mbc5_for_types_19_to_1e() {
+        for code in 0x19u8..=0x1E {
+            let header = header_with(code, 0x00);
+            let mut rom = vec![0u8; 64 * 0x4000];
+            rom[3 * 0x4000] = 3;
+            let mut m = Mapper::new(rom, &header).expect("MBC5 loads");
+            assert!(matches!(&m, Mapper::Mbc5(_)));
+            m.write(0x2000, 3);
+            assert_eq!(m.read(0x4000), 3);
+        }
+    }
+
+    #[test]
+    fn e05_05_mapper_new_rejects_an_unknown_ram_size_for_mbc5() {
+        let header = header_with(0x1B, 0x05);
+        let err = Mapper::new(rom_image(32 * 1024), &header).unwrap_err();
+        assert!(matches!(err, CartridgeLoadError::UnknownRamSize(0x05)));
     }
 }
