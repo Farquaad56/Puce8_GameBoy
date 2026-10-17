@@ -2,6 +2,7 @@
 //! dots, never from the system clock (determinism, decision A_05).
 
 use super::header::CartridgeLoadError;
+use super::BatteryError;
 
 /// Size of one ROM bank (note 07b).
 const ROM_BANK_SIZE: usize = 0x4000;
@@ -11,6 +12,11 @@ const RAM_BANK_SIZE: usize = 0x2000;
 pub const RTC_DOTS_PER_SECOND: u64 = 4_194_304;
 /// Seconds in one day.
 const SECONDS_PER_DAY: u64 = 86_400;
+/// Bytes of one RTC snapshot in the battery payload (E05_06).
+const RTC_BYTES: usize = 7;
+/// Bytes of the RTC block that follows the RAM in the battery payload: running clock, latched
+/// clock, then the sub-second dots as a u64 (E05_06).
+const BATTERY_RTC_LEN: usize = 2 * RTC_BYTES + 8;
 
 /// The five RTC registers (note 07b): seconds, minutes, hours, 9-bit day counter, halt, carry.
 /// UNKNOWN - to confirm: behaviour of out-of-range values written by a program (the register
@@ -80,6 +86,33 @@ impl Rtc {
             self.carry = true;
         }
         self.day = (days % 512) as u16;
+    }
+
+    /// Fixed 7-byte encoding, little-endian (decision A_05): seconds, minutes, hours, day low,
+    /// day high, halt (0/1), carry (0/1) (E05_06).
+    fn to_bytes(self) -> [u8; RTC_BYTES] {
+        let day = self.day.to_le_bytes();
+        [
+            self.seconds,
+            self.minutes,
+            self.hours,
+            day[0],
+            day[1],
+            u8::from(self.halt),
+            u8::from(self.carry),
+        ]
+    }
+
+    /// Decode `to_bytes`; out-of-range fields are masked to their register width.
+    fn from_bytes(b: &[u8; RTC_BYTES]) -> Rtc {
+        Rtc {
+            seconds: b[0] & 0x3F,
+            minutes: b[1] & 0x3F,
+            hours: b[2] & 0x1F,
+            day: u16::from_le_bytes([b[3], b[4]]) & 0x1FF,
+            halt: b[5] != 0,
+            carry: b[6] != 0,
+        }
     }
 }
 
@@ -256,6 +289,44 @@ impl Mbc3 {
         } else if (0xA000..=0xBFFF).contains(&addr) {
             self.write_ram(addr - 0xA000, val);
         }
+    }
+
+    /// Persistent bytes of the cartridge (E05_06, decision A_05): the external RAM, then the RTC
+    /// block: running clock (7 bytes), latched clock (7 bytes), sub-second dots (u64 little-endian).
+    /// The payload has no header or version: UNKNOWN - to confirm.
+    pub fn battery_payload(&self) -> Option<Vec<u8>> {
+        let mut out = self.ram.clone();
+        out.extend_from_slice(&self.rtc.to_bytes());
+        out.extend_from_slice(&self.latched.to_bytes());
+        out.extend_from_slice(&self.dot_acc.to_le_bytes());
+        Some(out)
+    }
+
+    /// Load the persistent RAM and clock; the length must match exactly (E05_06). Out-of-range
+    /// clock fields are masked, the sub-second remainder is reduced below one second, and a
+    /// latch sequence in progress is forgotten.
+    pub fn load_battery_payload(&mut self, data: &[u8]) -> Result<(), BatteryError> {
+        let ram_len = self.ram.len();
+        let expected = ram_len + BATTERY_RTC_LEN;
+        if data.len() != expected {
+            return Err(BatteryError::SizeMismatch {
+                expected,
+                actual: data.len(),
+            });
+        }
+        let (ram, clock) = data.split_at(ram_len);
+        let mut running = [0u8; RTC_BYTES];
+        running.copy_from_slice(&clock[..RTC_BYTES]);
+        let mut latched = [0u8; RTC_BYTES];
+        latched.copy_from_slice(&clock[RTC_BYTES..2 * RTC_BYTES]);
+        let mut dots = [0u8; 8];
+        dots.copy_from_slice(&clock[2 * RTC_BYTES..]);
+        self.ram.copy_from_slice(ram);
+        self.rtc = Rtc::from_bytes(&running);
+        self.latched = Rtc::from_bytes(&latched);
+        self.dot_acc = u64::from_le_bytes(dots) % RTC_DOTS_PER_SECOND;
+        self.latch_armed = false;
+        Ok(())
     }
 }
 
@@ -532,5 +603,92 @@ mod tests {
             let err = Mbc3::new(banked_rom(2), code).unwrap_err();
             assert!(matches!(err, CartridgeLoadError::UnknownRamSize(c) if c == code));
         }
+    }
+
+    /// A clock with RAM data, a latched time and a live time that differ, plus a sub-second rest.
+    fn aged_clock() -> Mbc3 {
+        let mut m = clock_on();
+        m.write(0x4000, 0x01);
+        m.write(0xA000, 0x42);
+        run_seconds(&mut m, 90_061); // 1 day 01:01:01
+        latch(&mut m);
+        run_seconds(&mut m, 5);
+        m.tick(1234);
+        m
+    }
+
+    #[test]
+    fn e05_06_mbc3_payload_holds_ram_then_the_clock() {
+        let m = aged_clock();
+        let payload = m.battery_payload().expect("always has a clock");
+        let ram_len = 4 * 0x2000;
+        assert_eq!(payload.len(), ram_len + 22);
+        assert_eq!(payload[0x2000], 0x42);
+        assert_eq!(&payload[ram_len..ram_len + 7], &[6, 1, 1, 1, 0, 0, 0]);
+        assert_eq!(&payload[ram_len + 7..ram_len + 14], &[1, 1, 1, 1, 0, 0, 0]);
+        assert_eq!(&payload[ram_len + 14..], &[0xD2, 0x04, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn e05_06_mbc3_payload_round_trips_ram_and_clock() {
+        let m = aged_clock();
+        let payload = m.battery_payload().expect("always has a clock");
+        let mut other = clock_on();
+        assert_eq!(other.load_battery_payload(&payload), Ok(()));
+        assert_eq!(other.rtc, m.rtc);
+        assert_eq!(other.latched, m.latched);
+        assert_eq!(other.dot_acc, m.dot_acc);
+        other.write(0x4000, 0x01);
+        assert_eq!(other.read(0xA000), 0x42);
+    }
+
+    #[test]
+    fn e05_06_mbc3_payload_without_ram_is_the_clock_only() {
+        let mut m = mbc3(2, 0x00);
+        m.write(0x0000, 0x0A);
+        run_seconds(&mut m, 3);
+        let payload = m.battery_payload().expect("always has a clock");
+        assert_eq!(payload.len(), 22);
+        assert_eq!(payload[0], 3);
+    }
+
+    #[test]
+    fn e05_06_mbc3_load_rejects_a_wrong_size_and_keeps_the_state() {
+        let mut m = mbc3(2, 0x00);
+        m.write(0x0000, 0x0A);
+        run_seconds(&mut m, 3);
+        assert_eq!(
+            m.load_battery_payload(&[0u8; 21]),
+            Err(BatteryError::SizeMismatch {
+                expected: 22,
+                actual: 21
+            })
+        );
+        assert_eq!(m.rtc.seconds, 3);
+    }
+
+    #[test]
+    fn e05_06_mbc3_payload_keeps_halt_and_carry() {
+        let mut m = clock_on();
+        put(&mut m, 0x0C, 0xC0);
+        let payload = m.battery_payload().expect("always has a clock");
+        let ram_len = 4 * 0x2000;
+        assert_eq!(payload[ram_len + 5], 1);
+        assert_eq!(payload[ram_len + 6], 1);
+        let mut other = clock_on();
+        assert_eq!(other.load_battery_payload(&payload), Ok(()));
+        assert!(other.rtc.halt && other.rtc.carry);
+    }
+
+    #[test]
+    fn e05_06_mbc3_load_masks_out_of_range_fields() {
+        let mut m = mbc3(2, 0x00);
+        m.write(0x0000, 0x0A);
+        assert_eq!(m.load_battery_payload(&[0xFFu8; 22]), Ok(()));
+        assert_eq!(reg(&mut m, 0x08), 0x3F);
+        assert_eq!(reg(&mut m, 0x0A), 0x1F);
+        assert_eq!(reg(&mut m, 0x0B), 0xFF);
+        assert_eq!(reg(&mut m, 0x0C), 0xC1);
+        assert_eq!(m.dot_acc, RTC_DOTS_PER_SECOND - 1);
     }
 }

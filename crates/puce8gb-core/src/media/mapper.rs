@@ -7,6 +7,7 @@ use super::mbc1::Mbc1;
 use super::mbc2::Mbc2;
 use super::mbc3::Mbc3;
 use super::mbc5::Mbc5;
+use super::{load_ram_payload, BatteryError};
 
 /// External RAM size of a ROM-only cartridge: up to 8 KiB at A000-BFFF (note 07b
 /// "No-MBC / ROM-only").
@@ -75,6 +76,40 @@ impl Mapper {
             m.tick(u64::from(dots));
         }
     }
+
+    /// Persistent bytes of the cartridge (E05_06): the RAM, plus the RTC block for the MBC3.
+    /// Whether the cartridge has a battery at all is decided by `cartridge_has_battery`.
+    pub fn battery_payload(&self) -> Option<Vec<u8>> {
+        match self {
+            Mapper::RomOnly(m) => m.battery_payload(),
+            Mapper::Mbc1(m) => m.battery_payload(),
+            Mapper::Mbc2(m) => m.battery_payload(),
+            Mapper::Mbc3(m) => m.battery_payload(),
+            Mapper::Mbc5(m) => m.battery_payload(),
+        }
+    }
+
+    /// Load the persistent bytes produced by `battery_payload` (E05_06).
+    pub fn load_battery_payload(&mut self, data: &[u8]) -> Result<(), BatteryError> {
+        match self {
+            Mapper::RomOnly(m) => m.load_battery_payload(data),
+            Mapper::Mbc1(m) => m.load_battery_payload(data),
+            Mapper::Mbc2(m) => m.load_battery_payload(data),
+            Mapper::Mbc3(m) => m.load_battery_payload(data),
+            Mapper::Mbc5(m) => m.load_battery_payload(data),
+        }
+    }
+}
+
+/// True when the cartridge type at $0147 carries a battery, for the types the `Mapper` supports:
+/// $03 (MBC1), $06 (MBC2), $0F/$10/$13 (MBC3), $1B/$1E (MBC5). Note 07a gives only ranges
+/// ($0F-$13, $19-$1E); the exact codes inside them come from the Pan Docs cartridge type table:
+/// UNKNOWN - to confirm. Battery types of unsupported mappers ($09, $0D, $22, $FF) are not listed.
+pub fn cartridge_has_battery(cartridge_type: u8) -> bool {
+    matches!(
+        cartridge_type,
+        0x03 | 0x06 | 0x0F | 0x10 | 0x13 | 0x1B | 0x1E
+    )
 }
 
 /// ROM-only cartridge (note 07b "No-MBC / ROM-only"): at most 32 KiB of ROM mapped
@@ -161,6 +196,19 @@ impl RomOnly {
             self.write_rom(addr, val);
         } else if (0xA000..=0xBFFF).contains(&addr) {
             self.write_ram(addr - 0xA000, val);
+        }
+    }
+
+    /// Persistent bytes of the cartridge (E05_06): the external RAM, or None when there is none.
+    pub fn battery_payload(&self) -> Option<Vec<u8>> {
+        self.ram.clone()
+    }
+
+    /// Load the persistent RAM; the length must match exactly (E05_06).
+    pub fn load_battery_payload(&mut self, data: &[u8]) -> Result<(), BatteryError> {
+        match self.ram.as_mut() {
+            Some(ram) => load_ram_payload(ram, data),
+            None => Err(BatteryError::NoBatteryData),
         }
     }
 }
@@ -383,5 +431,63 @@ mod tests {
         let header = header_with(0x1B, 0x05);
         let err = Mapper::new(rom_image(32 * 1024), &header).unwrap_err();
         assert!(matches!(err, CartridgeLoadError::UnknownRamSize(0x05)));
+    }
+
+    #[test]
+    fn e05_06_mapper_battery_payload_sizes_follow_the_mapper() {
+        for (cart_type, ram_code, len) in [
+            (0x00u8, 0x00u8, None),
+            (0x00, 0x02, Some(8192)),
+            (0x01, 0x00, None),
+            (0x03, 0x03, Some(32 * 1024)),
+            (0x06, 0x00, Some(512)),
+            (0x0F, 0x00, Some(22)),
+            (0x10, 0x03, Some(32 * 1024 + 22)),
+            (0x19, 0x00, None),
+            (0x1B, 0x04, Some(128 * 1024)),
+        ] {
+            let header = header_with(cart_type, ram_code);
+            let m = Mapper::new(rom_image(32 * 1024), &header).expect("loads");
+            assert_eq!(
+                m.battery_payload().map(|p| p.len()),
+                len,
+                "type {cart_type:#04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn e05_06_mapper_load_battery_payload_round_trips_and_checks_the_size() {
+        let header = header_with(0x03, 0x02);
+        let mut a = Mapper::new(rom_image(32 * 1024), &header).expect("loads");
+        a.write(0x0000, 0x0A);
+        a.write(0xA010, 0x77);
+        let payload = a.battery_payload().expect("has RAM");
+        let mut b = Mapper::new(rom_image(32 * 1024), &header).expect("loads");
+        assert_eq!(b.load_battery_payload(&payload), Ok(()));
+        b.write(0x0000, 0x0A);
+        assert_eq!(b.read(0xA010), 0x77);
+        assert_eq!(
+            b.load_battery_payload(&payload[1..]),
+            Err(BatteryError::SizeMismatch {
+                expected: 8192,
+                actual: 8191
+            })
+        );
+        let mut none = Mapper::new(rom_image(32 * 1024), &header_with(0x00, 0x00)).expect("loads");
+        assert_eq!(
+            none.load_battery_payload(&[0u8; 4]),
+            Err(BatteryError::NoBatteryData)
+        );
+    }
+
+    #[test]
+    fn e05_06_cartridge_has_battery_follows_the_type_table() {
+        for code in [0x03u8, 0x06, 0x0F, 0x10, 0x13, 0x1B, 0x1E] {
+            assert!(cartridge_has_battery(code), "type {code:#04x}");
+        }
+        for code in [0x00u8, 0x01, 0x02, 0x05, 0x11, 0x12, 0x19, 0x1A, 0x1C, 0x1D] {
+            assert!(!cartridge_has_battery(code), "type {code:#04x}");
+        }
     }
 }

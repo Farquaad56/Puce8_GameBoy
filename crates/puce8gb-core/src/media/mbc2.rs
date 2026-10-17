@@ -1,5 +1,7 @@
 //! MBC2 mapper (E05_03, note 07b): ROM banking plus 512 x 4-bit built-in RAM.
 
+use super::{load_ram_payload, BatteryError};
+
 /// Size of one ROM bank (note 07b).
 const ROM_BANK_SIZE: usize = 0x4000;
 /// Number of 4-bit RAM cells at A000-A1FF (note 07b); A200-BFFF echoes them.
@@ -102,6 +104,21 @@ impl Mbc2 {
         } else if (0xA000..=0xBFFF).contains(&addr) {
             self.write_ram(addr - 0xA000, val);
         }
+    }
+
+    /// Persistent bytes of the cartridge (E05_06): the 512 built-in RAM cells, one low nibble each.
+    pub fn battery_payload(&self) -> Option<Vec<u8>> {
+        Some(self.ram.clone())
+    }
+
+    /// Load the 512 RAM cells; the length must match exactly, only the low nibble of each byte is
+    /// kept (note 07b) (E05_06).
+    pub fn load_battery_payload(&mut self, data: &[u8]) -> Result<(), BatteryError> {
+        load_ram_payload(&mut self.ram, data)?;
+        for cell in &mut self.ram {
+            *cell &= 0x0F;
+        }
+        Ok(())
     }
 }
 
@@ -252,5 +269,33 @@ mod tests {
         assert_eq!(m.read(0x4000), 1);
         assert_eq!(m.read(0x8000), 0xFF);
         assert_eq!(m.read(0xC000), 0xFF);
+    }
+
+    #[test]
+    fn e05_06_mbc2_battery_payload_holds_the_512_nibbles() {
+        let mut m = mbc2(16);
+        m.write(0x0000, 0x0A);
+        m.write(0xA000, 0xA5);
+        m.write(0xA1FF, 0x3C);
+        let payload = m.battery_payload().expect("built-in RAM");
+        assert_eq!(payload.len(), 512);
+        assert_eq!(payload[0], 0x05);
+        assert_eq!(payload[511], 0x0C);
+    }
+
+    #[test]
+    fn e05_06_mbc2_load_keeps_only_the_low_nibble_and_checks_the_size() {
+        let mut m = mbc2(16);
+        assert_eq!(m.load_battery_payload(&[0xFFu8; 512]), Ok(()));
+        m.write(0x0000, 0x0A);
+        assert_eq!(m.read(0xA000) & 0x0F, 0x0F);
+        assert_eq!(m.battery_payload().expect("RAM")[0], 0x0F);
+        assert_eq!(
+            m.load_battery_payload(&[0u8; 511]),
+            Err(BatteryError::SizeMismatch {
+                expected: 512,
+                actual: 511
+            })
+        );
     }
 }

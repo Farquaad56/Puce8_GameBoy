@@ -1,6 +1,7 @@
 //! MBC5 mapper (E05_05, note 07b): 9-bit ROM bank (bank 0 selectable) and banked RAM.
 
 use super::header::CartridgeLoadError;
+use super::{load_ram_payload, BatteryError};
 
 /// Size of one ROM bank (note 07b).
 const ROM_BANK_SIZE: usize = 0x4000;
@@ -140,6 +141,20 @@ impl Mbc5 {
         } else if (0xA000..=0xBFFF).contains(&addr) {
             self.write_ram(addr - 0xA000, val);
         }
+    }
+
+    /// Persistent bytes of the cartridge (E05_06): the external RAM, or None when there is none.
+    pub fn battery_payload(&self) -> Option<Vec<u8>> {
+        if self.ram.is_empty() {
+            None
+        } else {
+            Some(self.ram.clone())
+        }
+    }
+
+    /// Load the persistent RAM; the length must match exactly (E05_06).
+    pub fn load_battery_payload(&mut self, data: &[u8]) -> Result<(), BatteryError> {
+        load_ram_payload(&mut self.ram, data)
     }
 }
 
@@ -311,5 +326,47 @@ mod tests {
         assert_eq!(m.ram_bank_register(), 0);
         assert_eq!(m.read(0x8000), 0xFF);
         assert_eq!(m.read(0xC000), 0xFF);
+    }
+
+    #[test]
+    fn e05_06_mbc5_battery_payload_round_trips_sixteen_ram_banks() {
+        let mut m = mbc5(4, 0x04);
+        m.write(0x0000, 0x0A);
+        for b in 0..16u8 {
+            m.write(0x4000, b);
+            m.write(0xA000, 0x40 + b);
+        }
+        let payload = m.battery_payload().expect("has RAM");
+        assert_eq!(payload.len(), 128 * 1024);
+        for b in 0..16usize {
+            assert_eq!(payload[b * 0x2000], 0x40 + b as u8, "bank {b}");
+        }
+        let mut other = mbc5(4, 0x04);
+        assert_eq!(other.load_battery_payload(&payload), Ok(()));
+        other.write(0x0000, 0x0A);
+        other.write(0x4000, 0x09);
+        assert_eq!(other.read(0xA000), 0x49);
+    }
+
+    #[test]
+    fn e05_06_mbc5_without_ram_has_no_payload() {
+        let mut m = mbc5(4, 0x00);
+        assert_eq!(m.battery_payload(), None);
+        assert_eq!(
+            m.load_battery_payload(&[0u8; 8]),
+            Err(BatteryError::NoBatteryData)
+        );
+    }
+
+    #[test]
+    fn e05_06_mbc5_load_rejects_a_wrong_size() {
+        let mut m = mbc5(4, 0x02);
+        assert_eq!(
+            m.load_battery_payload(&vec![0u8; 8193]),
+            Err(BatteryError::SizeMismatch {
+                expected: 8192,
+                actual: 8193
+            })
+        );
     }
 }

@@ -12,3 +12,27 @@ pub mod mbc5;
 /// from the type code at $0147 (decision A_06); see `mapper::Mapper`.
 #[derive(Debug, Default)]
 pub struct Media;
+
+/// Error returned by the battery RAM API of the mappers (E05_06).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatteryError {
+    /// The cartridge has no persistent data to load into.
+    NoBatteryData,
+    /// The payload length differs from the expected one.
+    SizeMismatch { expected: usize, actual: usize },
+}
+
+/// Copy `data` into `ram` when the sizes match (E05_06); an empty `ram` means no persistent RAM.
+pub(crate) fn load_ram_payload(ram: &mut [u8], data: &[u8]) -> Result<(), BatteryError> {
+    if ram.is_empty() {
+        return Err(BatteryError::NoBatteryData);
+    }
+    if data.len() != ram.len() {
+        return Err(BatteryError::SizeMismatch {
+            expected: ram.len(),
+            actual: data.len(),
+        });
+    }
+    ram.copy_from_slice(data);
+    Ok(())
+}
