@@ -126,6 +126,7 @@ FIX_08	TEST	0	docs/tasks/FIX/FIX_08.md	Fix test mooneye acceptance/ppu/stat_lyc_
 FIX_09	TEST	0	docs/tasks/FIX/FIX_09.md	Fix test mooneye acceptance/ppu/lcdon_timing-GS
 FIX_10	TEST	0	docs/tasks/FIX/FIX_10.md	Fix test mooneye acceptance/ppu/lcdon_write_timing-GS
 FIX_11	TEST	0	docs/tasks/FIX/FIX_11.md	Fix test mooneye acceptance/ppu/hblank_ly_scx_timing-GS
+FIX_12	TEST	0	docs/tasks/FIX/FIX_12.md	Fix test mooneye acceptance/ppu/intr_2_mode0_timing_sprites
 E07_01	CODE	0	docs/tasks/E07/E07_01.md	eframe window and texture
 E07_02	CODE	0	docs/tasks/E07/E07_02.md	Emulation thread and pacing
 E07_03	CODE	0	docs/tasks/E07/E07_03.md	cpal output and lock-free ring buffer
