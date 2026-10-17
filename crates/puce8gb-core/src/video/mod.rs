@@ -202,11 +202,12 @@ fn line_obj_penalty(xs: &[u8], scx: u8) -> u32 {
         if x >= 168 {
             continue;
         }
-        if x == 0 {
-            total += 11;
-            continue;
-        }
-        let sum = u16::from(x) + u16::from(scx);
+        // X == 0 ignores SCX (the sprite is fully off-screen) but shares tile 0 with X 1..7 like any other sprite: the first costs 11 dots, the next 6 each (mooneye intr_2_mode0_timing_sprites, FIX_12).
+        let sum = if x == 0 {
+            0
+        } else {
+            u16::from(x) + u16::from(scx)
+        };
         let tile = sum / 8;
         let mut cost = 6u32;
         if !seen[..i].contains(&tile) {
@@ -282,7 +283,7 @@ impl Ppu {
         }
         self.lcd_on = on;
         if on {
-            self.dot_in_line = 0;
+            self.dot_in_line = 3; // the restarted line begins 3 dots in: CPU access then samples the PPU at line dots = 3 mod 4 like after boot (mooneye intr_2_mode0_timing_sprites, FIX_12)
             self.ly = 0;
             self.mode = Self::mode_for(self.ly, self.dot_in_line, self.pixels_output); // normal line (E03_09 spec)
             self.first_line = true; // STAT reads mode 0 on this first line (mooneye stat_lyc_onoff, FIX_08)
@@ -2188,5 +2189,14 @@ mod tests {
             mode3_last_dot_with_sprites(&[160], 0),
             MODE2_DOTS + MODE3_LEN - 1 + 11
         );
+    }
+
+    #[test]
+    fn fix_12_sprites_at_x_zero_share_tile_zero() {
+        assert_eq!(line_obj_penalty(&[0], 0), 11);
+        assert_eq!(line_obj_penalty(&[0], 3), 11);
+        assert_eq!(line_obj_penalty(&[0, 0], 0), 17);
+        assert_eq!(line_obj_penalty(&[0; 10], 0), 65);
+        assert_eq!(line_obj_penalty(&[0, 1], 0), 17);
     }
 }

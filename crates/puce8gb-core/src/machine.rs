@@ -1770,17 +1770,17 @@ mod tests {
     }
 
     #[test]
-    fn fix_09_first_line_after_lcd_on_lasts_452_dots() {
+    fn fix_09_first_line_after_lcd_on_ends_449_ticks_after_the_write() {
         let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
         dmg.bus.write(0xFF40, 0x11); // LCD off (LCDC)
         dmg.tick();
-        dmg.bus.write(0xFF40, 0x81); // LCD on (LCDC): the first tick after this write is dot 1 of line 0
-        for _ in 0..451 {
+        dmg.bus.write(0xFF40, 0x81); // LCD on (LCDC): the line restarts at dot 3, so the first tick after this write is dot 4 (FIX_12)
+        for _ in 0..448 {
             dmg.tick();
         }
-        assert_eq!(dmg.ppu.ly(), 0); // LY still 0 at dot 452: the first line lasts 452 dots (FIX_09)
+        assert_eq!(dmg.ppu.ly(), 0); // LY still 0 after 448 ticks (dot 451): the first line runs from dot 3 to dot 452 (FIX_09, FIX_12)
         dmg.tick();
-        assert_eq!(dmg.ppu.ly(), 1); // the first line ends one dot earlier than a normal line (FIX_09)
+        assert_eq!(dmg.ppu.ly(), 1); // the 449th tick ends the first line (FIX_09, FIX_12)
     }
 
     #[test]
