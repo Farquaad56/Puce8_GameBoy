@@ -218,6 +218,11 @@ fn line_obj_penalty(xs: &[u8], scx: u8) -> u32 {
     total
 }
 
+/// Mode 3 ends in 4-dot steps with SCX mod 8: 0 -> 0, 1..=4 -> 4, 5..=7 -> 8 (mooneye hblank_ly_scx_timing-GS, FIX_11).
+fn scroll_delay(fine: u8) -> u32 {
+    u32::from(fine).div_ceil(4) * 4
+}
+
 impl Ppu {
     /// Post-boot state (note 08): LY = 0 at the start of line 0, LCD enabled.
     pub fn reset(&mut self) {
@@ -455,7 +460,7 @@ impl Ppu {
             }
             self.produce_count += 1;
         }
-        if dots_in_mode3 >= FETCH_INITIAL_DOTS + u32::from(self.fine_scroll) + self.obj_penalty
+        if dots_in_mode3 >= FETCH_INITIAL_DOTS + scroll_delay(self.fine_scroll) + self.obj_penalty
             && self.fifo_count > 0
         {
             // One pixel leaves the FIFO per dot (E03_03 spec); the fine scroll pause delays the first
@@ -1992,8 +1997,8 @@ mod tests {
         for scx in 0..=7u8 {
             let mut p = Ppu::default();
             let vram = [0x00u8; 0x2000];
-            // Last dot of mode 3: dots 80..=251+SCX mod 8, i.e. a duration of 172 + SCX mod 8 (E03_11 spec).
-            let mode3_end = MODE2_DOTS + MODE3_LEN - 1 + u32::from(scx);
+            // Last dot of mode 3: 172 dots plus the 4-dot-stepped SCX delay (FIX_11).
+            let mode3_end = MODE2_DOTS + MODE3_LEN - 1 + scroll_delay(scx);
             for dot in 0..LINE_DOTS {
                 if dot > 0 {
                     p.tick();
@@ -2016,7 +2021,7 @@ mod tests {
         for scx in 0..=7u8 {
             let mut p = Ppu::default();
             let vram = [0x00u8; 0x2000];
-            let mode3_end = MODE2_DOTS + MODE3_LEN - 1 + u32::from(scx); // last dot of mode 3 (E03_11 spec)
+            let mode3_end = MODE2_DOTS + MODE3_LEN - 1 + scroll_delay(scx); // last dot of mode 3, SCX delay in 4-dot steps (FIX_11)
             for dot in 0..=mode3_end {
                 if dot > 0 {
                     p.tick();
@@ -2034,6 +2039,27 @@ mod tests {
                 p.tick(); // mode 0 runs from the transition dot to dot 455 (note 04b)
                 assert_eq!(p.mode(), 0, "scx {scx}, mode at dot {dot}");
             }
+        }
+    }
+
+    #[test]
+    fn fix_11_mode3_end_is_quantised_to_4_dot_steps_for_scx() {
+        for scx in 0..=7u8 {
+            let mut p = Ppu::default();
+            let vram = [0x00u8; 0x2000];
+            // Mode 3 ends in 4-dot steps with SCX mod 8: 0 -> 0, 1..=4 -> 4, 5..=7 -> 8 (mooneye hblank_ly_scx_timing-GS, FIX_11).
+            let expected_len = MODE3_LEN + [0u32, 4, 4, 4, 4, 8, 8, 8][usize::from(scx)];
+            let mut mode3_dots = 0u32;
+            for dot in 0..LINE_DOTS {
+                if dot > 0 {
+                    p.tick();
+                }
+                p.fetch_pixels(&vram, scx, 0);
+                if p.mode() == 3 {
+                    mode3_dots += 1;
+                }
+            }
+            assert_eq!(mode3_dots, expected_len, "scx {scx}: mode 3 length");
         }
     }
 
@@ -2063,8 +2089,8 @@ mod tests {
                 "pixel {x}"
             );
         }
-        // mode 3 still lasts 172 + 3 dots: it ends on dot 254 (E03_11 spec)
-        assert_eq!(last_mode3_dot, MODE2_DOTS + MODE3_LEN + 3 - 1);
+        // mode 3 lasts 172 + 4 dots (SCX 3 is padded to a 4-dot step): it ends on dot 255 (FIX_11)
+        assert_eq!(last_mode3_dot, MODE2_DOTS + MODE3_LEN + scroll_delay(3) - 1);
     }
 
     #[test]
@@ -2146,11 +2172,11 @@ mod tests {
     #[test]
     fn e03_13_sprite_at_x_zero_costs_eleven_dots_regardless_of_scx() {
         // A sprite at X=0 is completely off-screen to the left: it always costs 11 dots, whatever SCX
-        // (E03_13 spec). With SCX=3 the fine scroll adds 3 more dots, so mode 3 lasts 172 + 11 + 3 =
-        // 186 dots, ending on dot 265.
+        // (E03_13 spec). With SCX=3 the fine scroll adds 4 more dots (4-dot steps, FIX_11), so mode 3 lasts 172 + 11 + 4 =
+        // 187 dots, ending on dot 266.
         assert_eq!(
             mode3_last_dot_with_sprites(&[0], 3),
-            MODE2_DOTS + MODE3_LEN - 1 + 11 + 3
+            MODE2_DOTS + MODE3_LEN - 1 + 11 + scroll_delay(3)
         );
     }
 
