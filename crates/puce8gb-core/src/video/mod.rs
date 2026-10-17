@@ -765,6 +765,24 @@ impl Ppu {
         (self.mode < 2 || (self.first_line && self.mode == 2))
             && (self.first_line || self.mode_lag != 3)
     }
+
+    /// CPU write gating for VRAM: follows the 4-dot lagged mode (mooneye lcdon_write_timing-GS, FIX_10).
+    pub(crate) fn vram_writable(&self) -> bool {
+        if self.first_line {
+            self.mode != 3
+        } else {
+            self.mode_lag != 3
+        }
+    }
+
+    /// CPU write gating for OAM (FIX_10): blocked when the lagged mode is 3, or when both lagged and internal mode are 2.
+    pub(crate) fn oam_writable(&self) -> bool {
+        if self.first_line {
+            self.mode != 3
+        } else {
+            !(self.mode_lag == 3 || (self.mode_lag == 2 && self.mode == 2))
+        }
+    }
 }
 
 #[cfg(test)]

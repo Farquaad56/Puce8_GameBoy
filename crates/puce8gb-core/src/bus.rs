@@ -76,6 +76,10 @@ pub struct Bus {
     vram_open: bool,
     /// CPU access to OAM ($FE00-$FE9F) allowed (E03_10): mirrored from the PPU by Machine::tick.
     oam_open: bool,
+    /// CPU write access to VRAM ($8000-$9FFF) allowed (FIX_10): mirrored from the PPU by Machine::tick.
+    pub(crate) vram_write_ok: bool,
+    /// CPU write access to OAM ($FE00-$FE9F) allowed (FIX_10): mirrored from the PPU by Machine::tick.
+    pub(crate) oam_write_ok: bool,
     /// OAM DMA transfer running (E03_06 spec): one byte copied per M-cycle via dma_step.
     dma_active: bool,
     /// OAM DMA source address base = V << 8 from the last write to $FF46 (E03_06 spec).
@@ -123,12 +127,14 @@ impl Bus {
             lyc_flag_hold: false, // LY==LYC flag not held low at power-up (FIX_09)
             vram_open: true, // VRAM access allowed until Machine::tick mirrors the PPU state (E03_10)
             oam_open: true, // OAM access allowed until Machine::tick mirrors the PPU state (E03_10)
-            dma_active: false, // no OAM DMA transfer running at power-up (E03_06 spec)
-            dma_src: 0,     // source base set by a write to $FF46 (E03_06 spec)
-            dma_index: 0,   // next destination index of the running transfer (E03_06 spec)
+            vram_write_ok: true, // VRAM writes allowed until Machine::tick mirrors the PPU state (FIX_10)
+            oam_write_ok: true, // OAM writes allowed until Machine::tick mirrors the PPU state (FIX_10)
+            dma_active: false,  // no OAM DMA transfer running at power-up (E03_06 spec)
+            dma_src: 0,         // source base set by a write to $FF46 (E03_06 spec)
+            dma_index: 0,       // next destination index of the running transfer (E03_06 spec)
             dma_pending_src: 0, // no pending OAM DMA source at power-up (FIX_02)
             dma_start_delay: 0, // no start delay pending at power-up (FIX_02)
-            apu_write: None, // no pending APU register write at power-up (E04_02)
+            apu_write: None,    // no pending APU register write at power-up (E04_02)
             mapper,
             wave_access: WaveAccess::Free,
             ly_override: None,       // no debug override by default (C01_49)
@@ -173,6 +179,8 @@ impl Bus {
         self.lyc_flag_hold = false; // LY==LYC flag not held low at power-up (FIX_09)
         self.vram_open = true; // VRAM access allowed until Machine::tick mirrors the PPU state (E03_10)
         self.oam_open = true; // OAM access allowed until Machine::tick mirrors the PPU state (E03_10)
+        self.vram_write_ok = true; // VRAM writes allowed until Machine::tick mirrors the PPU state (FIX_10)
+        self.oam_write_ok = true; // OAM writes allowed until Machine::tick mirrors the PPU state (FIX_10)
         self.dma_active = false; // no OAM DMA transfer running at power-up (E03_06 spec)
         self.apu_write = None; // no pending APU register write at power-up (E04_02)
         self.dma_index = 0; // next destination index of the running transfer (E03_06 spec)
@@ -316,6 +324,13 @@ impl Bus {
         self.oam_open = oam_open;
     }
 
+    /// Mirror the PPU's CPU write access state for VRAM and OAM (FIX_10): called by Machine::tick
+    /// after every PPU step, and at power-up. The PPU's own writes use the raw arrays directly.
+    pub(crate) fn set_video_write_access(&mut self, vram: bool, oam: bool) {
+        self.vram_write_ok = vram;
+        self.oam_write_ok = oam;
+    }
+
     /// Write a byte to the bus (decision A_02). ROM and unmapped/unusable ranges are
     /// ignored; PPU-mode blocking and OAM DMA gating: E03_15.
     pub fn write(&mut self, addr: u16, val: u8) {
@@ -325,9 +340,9 @@ impl Bus {
         match addr {
             0x0000..=0x7FFF => self.mapper.write(addr, val), // cartridge registers through the mapper (E05_07)
             0x8000..=0x9FFF => {
-                if self.vram_open {
+                if self.vram_write_ok {
                     self.vram[(addr - 0x8000) as usize] = val;
-                } // blocked by the PPU mode: writes are ignored (E03_10 spec)
+                } // blocked by the PPU mode: writes are ignored (E03_10 spec, FIX_10)
             }
             0xA000..=0xBFFF => self.mapper.write(addr, val), // cartridge RAM through the mapper; absent or disabled RAM ignores it (E05_07)
             0xC000..=0xDFFF => self.wram[(addr - 0xC000) as usize] = val,
@@ -337,9 +352,9 @@ impl Bus {
                 self.wram[(addr as usize) & 0x1FFF] = val;
             }
             0xFE00..=0xFE9F => {
-                if self.oam_open {
+                if self.oam_write_ok {
                     self.oam[(addr - 0xFE00) as usize] = val;
-                } // blocked by the PPU mode: writes are ignored (E03_10 spec)
+                } // blocked by the PPU mode: writes are ignored (E03_10 spec, FIX_10)
             }
             0xFEA0..=0xFEFF => {} // unusable range: writes are ignored (note 03a)
             0xFF44 => {} // LY ($FF44) is read-only; writes are ignored (C01_15, note 04a "LY")

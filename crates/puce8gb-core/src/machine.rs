@@ -193,6 +193,9 @@ impl Machine for Dmg {
         // Dmg::new ends by calling this, so both paths are covered.
         self.bus
             .set_video_access(self.ppu.vram_accessible(), self.ppu.oam_accessible());
+        self.bus
+            .set_video_write_access(self.ppu.vram_writable(), self.ppu.oam_writable());
+        // CPU write gate (FIX_10)
     }
 
     fn tick(&mut self) {
@@ -271,6 +274,8 @@ impl Machine for Dmg {
         self.bus.lyc_flag_hold = self.ppu.line_dot() < 4; // LY==LYC flag reads 0 during the first 4 dots of a line (FIX_09)
         self.bus
             .set_video_access(self.ppu.vram_accessible(), self.ppu.oam_accessible()); // CPU access gate (E03_10)
+        self.bus
+            .set_video_write_access(self.ppu.vram_writable(), self.ppu.oam_writable()); // CPU write gate (FIX_10)
         if line_changed && !was_vblank && self.ppu.vblank() {
             self.bus.io[0x0F] |= 0x01; // IF bit 0: vblank request (note 02b)
         }
@@ -1825,5 +1830,56 @@ mod tests {
             dmg.tick();
         }
         assert_eq!(dmg.bus.read(0xFF41) & 0x04, 0x04); // flag set again once past the first 4 dots (FIX_09)
+    }
+
+    #[test]
+    fn fix_10_lcdon_write_timing_matches_mooneye() {
+        // Replica of the writes of mooneye acceptance/ppu/lcdon_write_timing-GS: with the LCD off,
+        // seed OAM/VRAM to $00, turn the LCD on (LCDC=$81), wait NOPS[i] nops, write $81 to the
+        // target, then read it back. Tables copied from the mooneye source.
+        const NOPS: [u32; 19] = [
+            0, 17, 18, 60, 61, 110, 111, 112, 130, 131, 132, 174, 175, 224, 225, 226, 244, 245, 246,
+        ];
+        const OAM_OK: [u8; 19] = [1, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0];
+        const VRAM_OK: [u8; 19] = [1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 0];
+
+        let mut bad = String::new();
+        for i in 0..NOPS.len() {
+            for (addr, ok) in [(0xFE00u16, OAM_OK), (0x8000u16, VRAM_OK)] {
+                let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+                // LCD off so the seed writes land
+                dmg.bus.write(0xFF40, 0x00);
+                for _ in 0..4 {
+                    dmg.tick(); // let the PPU see the LCD switched off before anything else
+                }
+                dmg.bus.write(0xFE00, 0x00);
+                dmg.bus.write(0x8000, 0x00);
+                dmg.bus.write(0xFF40, 0x81); // LCD on (LCDC)
+                for _ in 0..(4 * (NOPS[i] + 2)) {
+                    dmg.tick();
+                }
+                dmg.bus.write(addr, 0x81);
+                dmg.bus.write(0xFF40, 0x00); // LCD off so the read lands
+                for _ in 0..4 {
+                    dmg.tick(); // let the LCD-off access mirrors update before reading back
+                }
+                let got = dmg.bus.read(addr);
+                let expected = if ok[i] == 1 { 0x81 } else { 0x00 };
+                if got != expected {
+                    let name = if addr == 0xFE00 { "OAM" } else { "VRAM" };
+                    bad.push_str(&format!(
+                        "{} nops={} d={}: expected {:#04x} got {:#04x}\n",
+                        name,
+                        NOPS[i],
+                        4 * (NOPS[i] + 2),
+                        expected,
+                        got
+                    ));
+                }
+            }
+        }
+        if !bad.is_empty() {
+            panic!("{}", bad);
+        }
     }
 }
