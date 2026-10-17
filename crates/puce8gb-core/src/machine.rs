@@ -260,6 +260,7 @@ impl Machine for Dmg {
 
     fn set_input(&mut self, input: Input) {
         self.input = input;
+        self.bus.set_buttons(input);
     }
 
     fn save_state(&self, _buf: &mut [u8]) -> Result<(), StateError> {
@@ -1251,5 +1252,18 @@ mod tests {
         apu_write(&mut dmg, 0xFF26, 0x00);
         apu_write(&mut dmg, 0xFF26, 0x00);
         assert_eq!(dmg.bus.wave_access, WaveAccess::Free);
+    }
+
+    #[test]
+    fn e05_01_set_input_reaches_p1_and_requests_the_joypad_interrupt() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        dmg.bus.io[0x0F] &= !0x10;
+        assert_eq!(dmg.bus.read(0xFF00), 0xCF);
+        dmg.set_input(Input {
+            start: true,
+            ..Input::default()
+        });
+        assert_eq!(dmg.bus.read(0xFF00), 0xC7);
+        assert_eq!(dmg.bus.io[0x0F] & 0x10, 0x10);
     }
 }

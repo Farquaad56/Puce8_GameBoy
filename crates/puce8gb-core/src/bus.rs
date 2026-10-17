@@ -3,6 +3,7 @@
 //! and OAM DMA gating arrive with E03.
 
 use crate::audio::wave::WaveAccess;
+use crate::input::{p1_read, Input};
 use crate::timer::Timer;
 
 /// IO register file FF00-FFFF size, including IF ($FF0F) and IE ($FFFF) (decision A_02).
@@ -64,6 +65,10 @@ pub struct Bus {
     ly_override: Option<u8>,
     /// Timer and divider registers DIV/TIMA/TMA/TAC ($FF04-$FF07, note 01b).
     pub timer: Timer,
+    /// Current button state (E05_01).
+    pub input: Input,
+    /// Low nibble of P1 at the previous check, for falling-edge detection (E05_01).
+    p1_prev: u8,
 }
 
 impl Bus {
@@ -94,6 +99,8 @@ impl Bus {
             wave_access: WaveAccess::Free,
             ly_override: None,       // no debug override by default (C01_49)
             timer: Timer::default(), // DIV/TIMA/TMA/TAC are set in reset() (note 08)
+            input: Input::default(), // no button pressed at power-up (E05_01)
+            p1_prev: 0x0F,           // P1 low nibble before the first check (E05_01)
         }
     }
 
@@ -165,6 +172,7 @@ impl Bus {
         io[0x4A] = 0x00; // WY
         io[0x4B] = 0x00; // WX
         io[0xFF] = 0x00; // IE
+        self.p1_prev = p1_read(self.io[0x00], &self.input) & 0x0F; // P1 low nibble at power-up (E05_01)
     }
 
     /// Read a byte from the bus (decision A_02). PPU-mode blocking and OAM DMA gating: E03_15.
@@ -205,6 +213,7 @@ impl Bus {
             0xFEA0..=0xFEFF => 0x00, // unusable range: $00 on DMG outside OAM block (note 03a)
             0xFF44 => self.ly_override.unwrap_or(self.ly), // LY ($FF44): PPU-owned scanline, read-only (C01_15); debug override wins (C01_49)
             0xFF41 => self.stat_read(), // STAT ($FF41): composed readback, side-effect-free (E03_08 spec)
+            0xFF00 => self.p1(), // P1 ($FF00): computed from the select bits and the buttons (E05_01)
             0xFF0F => 0xE0 | (self.io[0x0F] & 0x1F), // IF ($FF0F): bits 5-7 read as 1 (task C01_32)
             0xFF04 => self.timer.div(), // DIV ($FF04, note 01b)
             0xFF05 => self.timer.tima(), // TIMA ($FF05, note 01b)
@@ -220,7 +229,7 @@ impl Bus {
                 WaveAccess::Closed => 0xFF,
                 WaveAccess::Open(i) => self.io[0x30 + usize::from(i & 15)],
             },
-            0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize],
+            0xFF01..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.io[IO_SIZE - 1], // IE (decision A_02)
         }
@@ -272,6 +281,10 @@ impl Bus {
             0xFEA0..=0xFEFF => {} // unusable range: writes are ignored (note 03a)
             0xFF44 => {} // LY ($FF44) is read-only; writes are ignored (C01_15, note 04a "LY")
             0xFF41 => self.io[0x41] = val & 0x78, // STAT ($FF41): only the select bits 6..3 are writable (E03_08 spec); bit 2 and bits 1..0 read back live; LYC ($FF45) is plain R/W through the IO file
+            0xFF00 => {
+                self.io[0x00] = 0xC0 | (val & 0x30); // P1 ($FF00): only the select bits 5-4 are writable (E05_01)
+                self.joypad_edge();
+            }
             0xFF0F => self.io[0x0F] = val & 0x1F, // IF ($FF0F): only bits 0-4 writable (task C01_32)
             0xFF04 => self.timer.write_div(val), // DIV ($FF04): any value resets the counter (note 01b)
             0xFF05 => self.timer.write_tima(val), // TIMA ($FF05, note 01b)
@@ -316,7 +329,7 @@ impl Bus {
                 WaveAccess::Closed => {}
                 WaveAccess::Open(i) => self.io[0x30 + usize::from(i & 15)] = val,
             },
-            0xFF00..=0xFF7F => {
+            0xFF01..=0xFF7F => {
                 self.io[(addr - 0xFF00) as usize] = val;
                 // SC ($FF02): a transfer started with the internal clock (bit7 + bit0 set,
                 // note 06 "SC") completes instantly (documented simplification, C01_03):
@@ -342,6 +355,27 @@ impl Bus {
     /// bit 0 has priority, bit 4 last.
     pub fn pending_interrupts(&self) -> u8 {
         self.io[IO_SIZE - 1] & (self.io[0x0F] & 0x1F)
+    }
+
+    /// P1 ($FF00) as read by the CPU (E05_01, note 06).
+    pub fn p1(&self) -> u8 {
+        p1_read(self.io[0x00], &self.input)
+    }
+
+    /// Store a new button state; a falling edge on P1 bits 3-0 requests the joypad interrupt.
+    pub fn set_buttons(&mut self, input: Input) {
+        self.input = input;
+        self.joypad_edge();
+    }
+
+    /// IF bit 4 (joypad) is requested when a bit of the P1 low nibble goes from 1 to 0 (note 06).
+    /// Contact bounce and the STOP wake-up are not modelled: UNKNOWN - to confirm.
+    fn joypad_edge(&mut self) {
+        let now = self.p1() & 0x0F;
+        if self.p1_prev & !now != 0 {
+            self.io[0x0F] |= 0x10;
+        }
+        self.p1_prev = now;
     }
 
     /// Clear one IF ($FF0F) request bit (task C01_32): the acknowledge at interrupt entry.
@@ -435,12 +469,13 @@ impl Bus {
             0xFEA0..=0xFEFF => 0x00, // unusable range: $00 on DMG outside OAM block (note 03a)
             0xFF44 => self.ly_override.unwrap_or(self.ly), // LY ($FF44): PPU-owned scanline, read-only (C01_15); debug override wins (C01_49)
             0xFF41 => self.stat_read(), // STAT ($FF41): composed readback, side-effect-free (E03_08 spec)
+            0xFF00 => self.p1(), // P1 ($FF00): computed from the select bits and the buttons (E05_01)
             0xFF0F => 0xE0 | (self.io[0x0F] & 0x1F), // IF ($FF0F): bits 5-7 read as 1 (task C01_32)
             0xFF04 => self.timer.div(), // DIV ($FF04, note 01b)
             0xFF05 => self.timer.tima(), // TIMA ($FF05, note 01b)
             0xFF06 => self.timer.tma(), // TMA ($FF06, note 01b)
             0xFF07 => self.timer.tac(), // TAC ($FF07, note 01b)
-            0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize],
+            0xFF01..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.io[IO_SIZE - 1], // IE (decision A_02)
         }
@@ -566,8 +601,8 @@ mod tests {
     #[test]
     fn e01_03_io_read_write() {
         let mut bus = Bus::new(test_rom(32 * 1024));
-        bus.write(0xFF00, 0xC5); // P1
-        assert_eq!(bus.read(0xFF00), 0xC5);
+        bus.write(0xFF01, 0xC5); // SB
+        assert_eq!(bus.read(0xFF01), 0xC5);
         bus.write(0xFF7F, 0x3C);
         assert_eq!(bus.read(0xFF7F), 0x3C);
     }
@@ -647,8 +682,8 @@ mod tests {
         bus.write(0xFE00, 0x81);
         assert_eq!(bus.peek(0xFE00), 0x81); // OAM
         assert_eq!(bus.peek(0xFEA0), 0x00); // unusable range reads $00 on DMG
-        bus.write(0xFF00, 0xC5);
-        assert_eq!(bus.peek(0xFF00), 0xC5); // IO
+        bus.write(0xFF01, 0xC5);
+        assert_eq!(bus.peek(0xFF01), 0xC5); // IO
         bus.write(0xFF80, 0xA1);
         assert_eq!(bus.peek(0xFF80), 0xA1); // HRAM
         assert_eq!(bus.peek(0xFFFF), 0xFF); // IE at its open-bus value
@@ -670,11 +705,11 @@ mod tests {
     #[test]
     fn e01_03_peek_does_not_change_state() {
         let mut bus = Bus::new(test_rom(32 * 1024));
-        bus.write(0xFF00, 0xC5);
+        bus.write(0xFF01, 0xC5);
         for _ in 0..8 {
-            assert_eq!(bus.peek(0xFF00), 0xC5); // peek has no side effect (decision A_02)
+            assert_eq!(bus.peek(0xFF01), 0xC5); // peek has no side effect (decision A_02)
         }
-        assert_eq!(bus.read(0xFF00), 0xC5);
+        assert_eq!(bus.read(0xFF01), 0xC5);
     }
 
     #[test]
@@ -1340,5 +1375,87 @@ mod tests {
         assert_eq!(bus.read(0xFF32), 0xAA);
         assert_eq!(bus.read(0xFF33), 0xBB);
         assert_eq!(bus.read(0xFF34), 0x44);
+    }
+
+    #[test]
+    fn e05_01_p1_write_keeps_only_the_select_bits() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFF00, 0xFF);
+        assert_eq!(bus.read(0xFF00), 0xFF);
+        bus.write(0xFF00, 0x00);
+        assert_eq!(bus.read(0xFF00), 0xCF);
+        bus.write(0xFF00, 0x2F);
+        assert_eq!(bus.read(0xFF00), 0xEF);
+        assert_eq!(bus.peek(0xFF00), 0xEF);
+    }
+
+    #[test]
+    fn e05_01_p1_reads_pressed_buttons_of_the_selected_family() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFF00, 0x10);
+        bus.set_buttons(Input {
+            a: true,
+            start: true,
+            right: true,
+            ..Input::default()
+        });
+        assert_eq!(bus.read(0xFF00), 0xD6);
+        bus.write(0xFF00, 0x20);
+        assert_eq!(bus.read(0xFF00), 0xEE);
+    }
+
+    #[test]
+    fn e05_01_joypad_interrupt_on_press_of_a_selected_button() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFF00, 0x10);
+        bus.io[0x0F] &= !0x10;
+        bus.set_buttons(Input {
+            a: true,
+            ..Input::default()
+        });
+        assert_eq!(bus.io[0x0F] & 0x10, 0x10);
+    }
+
+    #[test]
+    fn e05_01_no_joypad_interrupt_for_an_unselected_family() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFF00, 0x10);
+        bus.io[0x0F] &= !0x10;
+        bus.set_buttons(Input {
+            right: true,
+            ..Input::default()
+        });
+        assert_eq!(bus.io[0x0F] & 0x10, 0x00);
+    }
+
+    #[test]
+    fn e05_01_no_joypad_interrupt_on_release_or_while_held() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFF00, 0x10);
+        let pressed = Input {
+            a: true,
+            ..Input::default()
+        };
+        bus.set_buttons(pressed);
+        bus.io[0x0F] &= !0x10;
+        bus.set_buttons(pressed);
+        assert_eq!(bus.io[0x0F] & 0x10, 0x00);
+        bus.set_buttons(Input::default());
+        assert_eq!(bus.io[0x0F] & 0x10, 0x00);
+    }
+
+    #[test]
+    fn e05_01_selecting_a_family_with_a_held_button_requests_the_interrupt() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFF00, 0x30);
+        bus.set_buttons(Input {
+            a: true,
+            ..Input::default()
+        });
+        bus.io[0x0F] &= !0x10;
+        assert_eq!(bus.read(0xFF00), 0xFF);
+        bus.write(0xFF00, 0x10);
+        assert_eq!(bus.read(0xFF00), 0xDE);
+        assert_eq!(bus.io[0x0F] & 0x10, 0x10);
     }
 }
