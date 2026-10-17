@@ -120,6 +120,7 @@ FIX_02	TEST	0	docs/tasks/FIX/FIX_02.md	Fix test mooneye acceptance/call_timing
 FIX_03	TEST	0	docs/tasks/FIX/FIX_03.md	Fix test mooneye acceptance/ei_sequence
 FIX_04	TEST	0	docs/tasks/FIX/FIX_04.md	Fix test mooneye acceptance/interrupts/ie_push
 FIX_05	TEST	0	docs/tasks/FIX/FIX_05.md	Fix test mooneye acceptance/bits/unused_hwio-GS
+FIX_06	TEST	0	docs/tasks/FIX/FIX_06.md	Fix test mooneye acceptance/oam_dma/sources-GS
 E07_01	CODE	0	docs/tasks/E07/E07_01.md	eframe window and texture
 E07_02	CODE	0	docs/tasks/E07/E07_02.md	Emulation thread and pacing
 E07_03	CODE	0	docs/tasks/E07/E07_03.md	cpal output and lock-free ring buffer
