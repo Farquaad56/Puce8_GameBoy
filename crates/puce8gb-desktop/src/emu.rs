@@ -1,6 +1,7 @@
-//! Emulation thread: owns the core and runs it at the exact speed with an integer accumulator (E07_02).
-use crate::pacing::{clamp_owed, Pacer};
-use puce8gb_core::machine::FRAME_DOTS;
+//! Emulation thread: owns the core, paced by the audio ring when a device is open, else by the clock (E07_02, E07_03).
+use crate::audio::{pacing_decision, push_budget, target_fill, AudioOut, Pace, Resampler};
+use crate::pacing::{clamp_owed, Pacer, MAX_BACKLOG_FRAMES};
+use puce8gb_core::machine::{AUDIO_RING_SAMPLES, FRAME_DOTS};
 use puce8gb_core::{Dmg, Input, Machine};
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TryRecvError};
 use std::thread::JoinHandle;
@@ -54,8 +55,54 @@ impl Drop for EmuHandle {
     }
 }
 
+/// Audio side of the thread: core samples, resampler, lock-free ring, cpal callback.
+struct Sound {
+    out: AudioOut,
+    resampler: Resampler,
+    target: usize,
+    drain: Vec<i16>,
+    mixed: Vec<[f32; 2]>,
+}
+
+impl Sound {
+    fn open() -> Option<Sound> {
+        let out = AudioOut::open()?;
+        let rate = out.rate;
+        Some(Sound {
+            out,
+            resampler: Resampler::new(rate),
+            target: target_fill(rate),
+            drain: vec![0; AUDIO_RING_SAMPLES],
+            mixed: Vec::new(),
+        })
+    }
+
+    fn wants_frame(&self) -> bool {
+        pacing_decision(self.out.fill(), self.target) == Pace::RunFrame
+    }
+
+    /// Moves the samples of the frame just run into the ring; overflow drops the excess.
+    fn collect(&mut self, machine: &mut Dmg) {
+        let count = machine.drain_audio(&mut self.drain).min(self.drain.len());
+        self.mixed.clear();
+        for pair in self.drain[..count].as_chunks::<2>().0 {
+            self.resampler.push(*pair, &mut self.mixed);
+        }
+        let budget = push_budget(self.out.free(), self.mixed.len());
+        for pair in self.mixed.iter().take(budget) {
+            let _ = self.out.producer.push(*pair);
+        }
+    }
+}
+
 fn run(commands: Receiver<Command>, frames: SyncSender<Vec<u32>>, status: Sender<String>) {
     let mut machine: Option<Dmg> = None;
+    let mut sound = Sound::open();
+    let mode = match &sound {
+        Some(s) => format!("audio {} Hz, audio-driven pacing", s.out.rate),
+        None => String::from("no audio device, clock pacing"),
+    };
+    let _ = status.send(mode.clone());
     let mut paused = false;
     let mut steps: u32 = 0;
     let mut pacer = Pacer::default();
@@ -68,7 +115,7 @@ fn run(commands: Receiver<Command>, frames: SyncSender<Vec<u32>>, status: Sender
                     Ok(dmg) => {
                         machine = Some(dmg);
                         owed = 0;
-                        let _ = status.send(String::from("ROM loaded"));
+                        let _ = status.send(format!("ROM loaded - {mode}"));
                     }
                     Err(err) => {
                         let _ = status.send(format!("ROM rejected: {err:?}"));
@@ -103,7 +150,19 @@ fn run(commands: Receiver<Command>, frames: SyncSender<Vec<u32>>, status: Sender
             if paused {
                 while steps > 0 {
                     m.run_frame();
+                    if let Some(s) = sound.as_mut() {
+                        s.collect(m);
+                    }
                     steps -= 1;
+                    produced = true;
+                }
+            } else if let Some(s) = sound.as_mut() {
+                steps = 0;
+                let mut ran: u64 = 0;
+                while ran < MAX_BACKLOG_FRAMES && s.wants_frame() {
+                    m.run_frame();
+                    s.collect(m);
+                    ran += 1;
                     produced = true;
                 }
             } else {

@@ -1,4 +1,5 @@
 //! Desktop frontend: an eframe window showing the core framebuffer (E07_01).
+mod audio;
 mod emu;
 mod pacing;
 mod scale;
