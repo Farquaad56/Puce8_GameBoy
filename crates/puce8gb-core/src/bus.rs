@@ -275,7 +275,7 @@ impl Bus {
             0xFF04 => self.timer.div(), // DIV ($FF04, note 01b)
             0xFF05 => self.timer.tima(), // TIMA ($FF05, note 01b)
             0xFF06 => self.timer.tma(), // TMA ($FF06, note 01b)
-            0xFF07 => self.timer.tac(), // TAC ($FF07, note 01b)
+            0xFF07 => 0xF8 | self.timer.tac(), // TAC ($FF07): bits 7-3 are unused and read 1 (mooneye unused_hwio-GS, FIX_05)
             0xFF10..=0xFF26 => {
                 self.io[(addr - 0xFF00) as usize] | APU_READ_MASK[(addr - 0xFF10) as usize]
             } // APU registers with read masks (E04_01 spec)
@@ -286,6 +286,8 @@ impl Bus {
                 WaveAccess::Closed => 0xFF,
                 WaveAccess::Open(i) => self.io[0x30 + usize::from(i & 15)],
             },
+            0xFF02 => self.io[0x02] | 0x7E, // SC ($FF02): bits 6-1 are unused and read 1 on DMG (mooneye unused_hwio-GS, FIX_05)
+            0xFF03 | 0xFF08..=0xFF0E | 0xFF4C..=0xFF7F => 0xFF, // unmapped I/O reads $FF (mooneye unused_hwio-GS, FIX_05)
             0xFF01..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.io[IO_SIZE - 1], // IE (decision A_02)
@@ -381,6 +383,7 @@ impl Bus {
                 WaveAccess::Closed => {}
                 WaveAccess::Open(i) => self.io[0x30 + usize::from(i & 15)] = val,
             },
+            0xFF03 | 0xFF08..=0xFF0E | 0xFF4C..=0xFF7F => {} // unmapped I/O: writes are ignored (mooneye unused_hwio-GS, FIX_05)
             0xFF01..=0xFF7F => {
                 self.io[(addr - 0xFF00) as usize] = val;
                 // SC ($FF02): a transfer started with the internal clock (bit7 + bit0 set,
@@ -529,7 +532,9 @@ impl Bus {
             0xFF04 => self.timer.div(), // DIV ($FF04, note 01b)
             0xFF05 => self.timer.tima(), // TIMA ($FF05, note 01b)
             0xFF06 => self.timer.tma(), // TMA ($FF06, note 01b)
-            0xFF07 => self.timer.tac(), // TAC ($FF07, note 01b)
+            0xFF07 => 0xF8 | self.timer.tac(),
+            0xFF02 => self.io[0x02] | 0x7E, // same as read() (FIX_05)
+            0xFF03 | 0xFF08..=0xFF0E | 0xFF4C..=0xFF7F => 0xFF, // same as read() (FIX_05)
             0xFF01..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.io[IO_SIZE - 1], // IE (decision A_02)
@@ -658,8 +663,8 @@ mod tests {
         let mut bus = Bus::new(test_rom(32 * 1024));
         bus.write(0xFF01, 0xC5); // SB
         assert_eq!(bus.read(0xFF01), 0xC5);
-        bus.write(0xFF7F, 0x3C);
-        assert_eq!(bus.read(0xFF7F), 0x3C);
+        bus.write(0xFF47, 0x3C);
+        assert_eq!(bus.read(0xFF47), 0x3C);
     }
 
     #[test]
@@ -849,8 +854,8 @@ mod tests {
         assert_eq!(bus.read(0xFF05), 0x3C);
         bus.write(0xFF06, 0x7E); // TMA
         assert_eq!(bus.read(0xFF06), 0x7E);
-        bus.write(0xFF07, 0x04); // TAC: timer enabled, clock select 00 (note 01b)
-        assert_eq!(bus.read(0xFF07), 0x04);
+        bus.write(0xFF07, 0x04); // TAC: bits 7-3 read 1 (FIX_05)
+        assert_eq!(bus.read(0xFF07), 0xFC);
 
         // peek is side-effect-free and agrees with read on the timer registers.
         for addr in [0xFF04u16, 0xFF05, 0xFF06, 0xFF07] {
@@ -1677,5 +1682,45 @@ mod tests {
         }
         bus.dma_step(); // the final step ends the transfer (E03_06 spec)
         assert!(!bus.dma_active());
+    }
+
+    #[test]
+    fn fix_05_unmapped_io_reads_ff_and_ignores_writes() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        for addr in [
+            0xFF03u16, 0xFF08, 0xFF0A, 0xFF0E, 0xFF4C, 0xFF4D, 0xFF50, 0xFF60, 0xFF7F,
+        ] {
+            bus.write(addr, 0x00);
+            assert_eq!(bus.read(addr), 0xFF); // unmapped I/O reads $FF (mooneye unused_hwio-GS)
+            bus.write(addr, 0x55);
+            assert_eq!(bus.read(addr), 0xFF); // writes to unmapped I/O are ignored (FIX_05)
+        }
+    }
+
+    #[test]
+    fn fix_05_sc_unused_bits_read_one() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFF02, 0x00); // SC ($FF02)
+        assert_eq!(bus.read(0xFF02), 0x7E); // bits 6-1 are unused and read 1 (mooneye unused_hwio-GS)
+        bus.write(0xFF02, 0x7E);
+        assert_eq!(bus.read(0xFF02), 0x7E);
+    }
+
+    #[test]
+    fn fix_05_tac_unused_bits_read_one() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFF07, 0x00); // TAC ($FF07)
+        assert_eq!(bus.read(0xFF07), 0xF8); // bits 7-3 are unused and read 1 (mooneye unused_hwio-GS)
+        bus.write(0xFF07, 0x05);
+        assert_eq!(bus.read(0xFF07), 0xFD);
+    }
+
+    #[test]
+    fn fix_05_mapped_registers_are_unchanged() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFF45, 0x12); // LYC ($FF45) stays plain R/W through the IO file (FIX_05)
+        assert_eq!(bus.read(0xFF45), 0x12);
+        bus.write(0xFF47, 0x1B); // SCY ($FF47) stays plain R/W through the IO file (FIX_05)
+        assert_eq!(bus.read(0xFF47), 0x1B);
     }
 }
