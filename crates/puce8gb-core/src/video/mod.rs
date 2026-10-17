@@ -91,6 +91,8 @@ pub struct Ppu {
     ly: u8,
     /// Current PPU mode, 0-3 (note 04a "STAT bits"); reads as 0 while the LCD is off.
     mode: u8,
+    /// true on line 0 right after the LCD was switched on: STAT reads mode 0 instead of 2 (mooneye stat_lyc_onoff, FIX_08)
+    first_line: bool,
     /// LCD and PPU enable = LCDC ($FF40) bit 7 (E03_09 spec): false stops the dot counter.
     lcd_on: bool,
     /// Mirror of LCDC ($FF40) as written by the CPU (E03_09 spec); bit 2 selects the sprite
@@ -152,8 +154,9 @@ impl Default for Ppu {
             dot_in_line: 0,
             ly: 0,
             mode: 0,
-            lcd_on: true, // post-boot LCDC ($FF40) is $91: bit 7 set (note 08)
-            lcdc: 0x91,   // post-boot LCDC value (E03_09 spec); the machine keeps it current
+            first_line: false, // not on the first line after an LCD off -> on restart (FIX_08)
+            lcd_on: true,      // post-boot LCDC ($FF40) is $91: bit 7 set (note 08)
+            lcdc: 0x91,        // post-boot LCDC value (E03_09 spec); the machine keeps it current
             line_sprites: [0x00; 10],
             line_sprite_count: 0,
             oam_scan_pending: true, // line 0 starts in mode 2 at power-up (E03_01): the scan is due
@@ -213,6 +216,7 @@ impl Ppu {
         self.line_buf.fill(PIXEL_BG_ZERO); // background pixels, color index 0 (E03_04 spec)
         self.dot_in_line = 0;
         self.ly = 0;
+        self.first_line = false; // post-boot is not the first line after an LCD off -> on restart (FIX_08)
         self.mode = Self::mode_for(self.ly, self.dot_in_line, self.pixels_output); // mode 2 at start of line 0
         self.lcd_on = true; // post-boot LCDC ($FF40) is $91: bit 7 set (note 08)
         self.lcdc = 0x91; // post-boot LCDC value (E03_09 spec); the machine keeps it current
@@ -265,6 +269,7 @@ impl Ppu {
             self.dot_in_line = 0;
             self.ly = 0;
             self.mode = Self::mode_for(self.ly, self.dot_in_line, self.pixels_output); // normal line (E03_09 spec)
+            self.first_line = true; // STAT reads mode 0 on this first line (mooneye stat_lyc_onoff, FIX_08)
             self.oam_scan_pending = true; // the restarted line 0 starts in mode 2: its scan is due (E03_02)
             self.reset_pixel_state(); // the restarted line 0 fetches fresh pixels (E03_03)
             self.win_line = 0; // window internal counter restarts with the frame (E03_12 spec)
@@ -272,6 +277,7 @@ impl Ppu {
             self.dot_in_line = 0;
             self.ly = 0;
             self.mode = 0; // STAT mode bits read 0 while the PPU is disabled (note 04a "STAT")
+            self.first_line = false; // no first-line state while the PPU is disabled (FIX_08)
             self.oam_scan_pending = false; // the line whose scan was due no longer exists (E03_02)
             self.frame.fill(PALETTE[0]);
         }
@@ -289,6 +295,7 @@ impl Ppu {
         if next_dot == LINE_DOTS {
             // End of line: wrap to dot 0 and advance LY; after the last line it wraps (note 04a "LY").
             self.dot_in_line = 0;
+            self.first_line = false; // the first line after an LCD on is over (FIX_08)
             let visible_line_ended = u32::from(self.ly) < u32::from(VBLANK_FIRST_LINE);
             let next_ly = u32::from(self.ly).wrapping_add(1);
             self.ly = if next_ly >= u32::from(LINES_PER_FRAME) {
@@ -533,6 +540,15 @@ impl Ppu {
     /// Current PPU mode, 0-3 (E03_01).
     pub fn mode(&self) -> u8 {
         self.mode
+    }
+
+    /// Mode bits as read through STAT: the first line after the LCD is switched on has no OAM scan phase and reads mode 0 (FIX_08; exact length of that phase: see lcdon_timing, UNKNOWN - to confirm).
+    pub fn stat_mode(&self) -> u8 {
+        if self.first_line && self.mode == 2 {
+            0
+        } else {
+            self.mode
+        }
     }
 
     /// True while in VBlank: LY = 144..=153 (note 01_timing.md).

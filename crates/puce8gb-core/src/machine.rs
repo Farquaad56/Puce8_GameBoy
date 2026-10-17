@@ -153,10 +153,12 @@ impl Dmg {
     /// each source contributes only when its select bit in STAT ($FF41) is set, OR'ed into one
     /// shared line (note 04a "Ligne d'interrupt STAT"). The exact dot of the LYC compare and
     /// the STAT write quirk are UNKNOWN - to confirm: not implemented. While the LCD is off
-    /// no VBlank or STAT request exists, so the line stays low (E03_09 spec).
+    /// only the retained LY==LYC coincidence flag can keep the line high when its select bit
+    /// is set (mooneye stat_lyc_onoff, FIX_08).
     fn stat_line(&self) -> bool {
         if !self.ppu.lcd_on() {
-            return false; // LCD off: no PPU mode and no coincidence can be active (E03_09 spec)
+            // LCD off: only the retained coincidence flag keeps the line high, so switching the LCD back on does not create a false rising edge (mooneye stat_lyc_onoff, FIX_08).
+            return self.bus.io[0x41] & 0x40 != 0 && self.bus.lyc_flag();
         }
         let stat = self.bus.io[0x41]; // STAT ($FF41): select bits 6..3 as written (E03_08 spec)
         let mode = self.ppu.mode();
@@ -232,6 +234,8 @@ impl Machine for Dmg {
         let was_vblank = self.ppu.vblank();
         // LCD enable from LCDC ($FF40) bit 7, applied before the PPU advances so a CPU write
         // in this same dot takes effect immediately (decision A_01: CPU first; E03_09 spec).
+        let lcd_was_on = self.ppu.lcd_on();
+        let flag_before = self.bus.ly == self.bus.io[0x45]; // LY==LYC just before a possible LCD switch-off (FIX_08)
         self.ppu.set_lcd_enabled(self.bus.io[0x40]);
         let line_changed = self.ppu.tick();
         if line_changed && self.ppu.ly() == 0 {
@@ -258,7 +262,13 @@ impl Machine for Dmg {
         self.ppu
             .commit_line(self.bus.io[0x47], self.bus.io[0x48], self.bus.io[0x49]); // BGP, OBP0, OBP1 (E03_05 spec)
         self.bus.ly = self.ppu.ly(); // LY ($FF44) mirror (E03_01); the coincidence flag reads it too (E03_08)
-        self.bus.ppu_mode = self.ppu.mode(); // PPU mode mirror for the STAT readback (E03_08 spec, decision A_02)
+        self.bus.ppu_mode = self.ppu.stat_mode(); // PPU mode mirror for the STAT readback (E03_08 spec, decision A_02; FIX_08)
+                                                  // LY==LYC flag: frozen while the LCD is off, recomputed live as soon as it is on (mooneye stat_lyc_onoff, FIX_08).
+        if self.ppu.lcd_on() {
+            self.bus.lyc_frozen = None;
+        } else if lcd_was_on {
+            self.bus.lyc_frozen = Some(flag_before);
+        }
         self.bus
             .set_video_access(self.ppu.vram_accessible(), self.ppu.oam_accessible()); // CPU access gate (E03_10)
         if line_changed && !was_vblank && self.ppu.vblank() {
@@ -778,7 +788,8 @@ mod tests {
     #[test]
     fn e03_09_no_interrupt_while_lcd_off() {
         let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
-        // Turn the LCD off first so the PPU is frozen at line 0 (not in VBlank).
+        dmg.bus.write(0xFF45, 0x05); // LYC != LY(0): the LY==LYC flag frozen at switch-off is false, so enabling the STAT sources raises nothing (FIX_08)
+                                     // Turn the LCD off first so the PPU is frozen at line 0 (not in VBlank).
         dmg.bus.write(0xFF40, 0x11);
         dmg.tick();
         dmg.bus.io[0x0F] &= !0x03; // clear any pending vblank (bit 0) and STAT (bit 1) requests
@@ -801,11 +812,65 @@ mod tests {
         dmg.bus.write(0xFF40, 0x11); // LCD off (E03_09 spec)
         dmg.tick();
         dmg.bus.write(0xFF40, 0x91); // LCDC bit 7 -> 1: the PPU restarts at line 0, dot 0 (E03_09 spec)
-                                     // What is displayed on that first line is UNKNOWN - to confirm (note 04b).
+                                     // The first line after LCD on has no OAM scan phase: STAT reads mode 0 (FIX_08).
         dmg.tick(); // the transition is applied in Machine::tick
         assert_eq!(dmg.bus.read(0xFF44), 0x00); // restarted at line 0
         let stat = dmg.bus.read(0xFF41);
-        assert_eq!(stat & 0x03, 0x02); // normal start-of-line mode: OAM scan (mode 2) (E03_09 spec)
+        assert_eq!(stat & 0x03, 0x00); // first line after LCD on has no OAM scan phase: mode 0 (FIX_08)
+    }
+
+    #[test]
+    fn fix_08_first_line_after_lcd_on_reads_mode_0() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        // LCD off, then on: the PPU restarts at line 0 (E03_09 spec).
+        dmg.bus.write(0xFF40, 0x11);
+        dmg.tick();
+        dmg.bus.write(0xFF40, 0x91);
+        for _ in 0..12 {
+            dmg.tick(); // a few dots into the first line after LCD on (FIX_08)
+        }
+        assert_eq!(dmg.bus.read(0xFF44), 0x00); // still line 0
+        assert_eq!(dmg.bus.read(0xFF41) & 0x03, 0x00); // STAT reads mode 0: no OAM scan phase (FIX_08)
+    }
+
+    #[test]
+    fn fix_08_second_line_after_lcd_on_reads_mode_2_again() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        // LCD off, then on: the PPU restarts at line 0 (E03_09 spec).
+        dmg.bus.write(0xFF40, 0x11);
+        dmg.tick();
+        dmg.bus.write(0xFF40, 0x91);
+        // Advance to line 1.
+        let mut ticks = 0u32;
+        while dmg.ppu.ly() != 1 {
+            dmg.tick();
+            ticks += 1;
+            assert!(ticks <= 600, "line 1 not reached within 600 ticks");
+        }
+        for _ in 0..8 {
+            dmg.tick(); // a few dots into line 1 (FIX_08)
+        }
+        assert_eq!(dmg.bus.read(0xFF41) & 0x03, 0x02); // normal start-of-line mode: OAM scan again (E03_09 spec; FIX_08)
+    }
+
+    #[test]
+    fn fix_08_first_line_mode_3_still_starts_at_dot_80() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        // LCD off, then on: the PPU restarts at line 0 (E03_09 spec).
+        dmg.bus.write(0xFF40, 0x11);
+        dmg.tick();
+        dmg.bus.write(0xFF40, 0x91);
+        // Advance to dot 100 of the first line after LCD on.
+        let mut ticks = 0u32;
+        while !(dmg.ppu.line_dot() == 100 && dmg.ppu.ly() == 0) {
+            dmg.tick();
+            ticks += 1;
+            assert!(
+                ticks <= 600,
+                "dot 100 of line 0 not reached within 600 ticks"
+            );
+        }
+        assert_eq!(dmg.bus.read(0xFF41) & 0x03, 0x03); // mode 3 starts at dot 80 even on the first line (E03_09 spec; FIX_08)
     }
 
     #[test]
@@ -1486,5 +1551,121 @@ mod tests {
         }
         assert_eq!(dmg.ppu.mode(), 2); // mode 2 reached on line 0 of the next frame (FIX_07)
         assert_eq!(dmg.bus.io[0x0F] & 0x02, 0x02); // a later mode-2 request still works (FIX_07)
+    }
+
+    #[test]
+    fn fix_08_lyc_flag_is_retained_while_the_lcd_is_off() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        for _ in 0..FRAME_DOTS {
+            if dmg.ppu.ly() == VBLANK_FIRST_LINE {
+                break;
+            }
+            dmg.tick();
+        }
+        assert_eq!(dmg.ppu.ly(), VBLANK_FIRST_LINE); // reached line 144 within one frame (FIX_08)
+        dmg.bus.write(0xFF45, 0x90); // LYC ($FF45) = LY: coincidence flag live-true
+        for _ in 0..8 {
+            dmg.tick();
+        }
+        dmg.bus.write(0xFF40, 0x00); // LCD off (LCDC bit 7 cleared)
+        for _ in 0..4 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.read(0xFF41) & 0x04, 0x04); // flag retained while the LCD is off (FIX_08)
+        dmg.bus.write(0xFF45, 0x01); // LYC no longer equals LY: a live compare would clear it
+        for _ in 0..4 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.read(0xFF41) & 0x04, 0x04); // flag still retained (FIX_08)
+    }
+
+    #[test]
+    fn fix_08_enabling_the_lcd_recomputes_the_flag() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        for _ in 0..FRAME_DOTS {
+            if dmg.ppu.ly() == VBLANK_FIRST_LINE {
+                break;
+            }
+            dmg.tick();
+        }
+        assert_eq!(dmg.ppu.ly(), VBLANK_FIRST_LINE); // reached line 144 within one frame (FIX_08)
+        dmg.bus.write(0xFF45, 0x90); // LYC ($FF45) = LY: coincidence flag live-true
+        for _ in 0..8 {
+            dmg.tick();
+        }
+        dmg.bus.write(0xFF40, 0x00); // LCD off (LCDC bit 7 cleared)
+        for _ in 0..4 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.read(0xFF41) & 0x04, 0x04); // flag retained while the LCD is off (FIX_08)
+        dmg.bus.write(0xFF45, 0x01); // LYC no longer equals LY: a live compare would clear it
+        for _ in 0..4 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.read(0xFF41) & 0x04, 0x04); // flag still retained (FIX_08)
+        dmg.bus.write(0xFF40, 0x80); // LCD on again: the flag is recomputed live
+        for _ in 0..8 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.read(0xFF41) & 0x04, 0x00); // LY != LYC now, so the flag is clear (FIX_08)
+    }
+
+    #[test]
+    fn fix_08_no_stat_interrupt_when_the_flag_stays_true() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        for _ in 0..FRAME_DOTS {
+            if dmg.ppu.ly() == VBLANK_FIRST_LINE {
+                break;
+            }
+            dmg.tick();
+        }
+        assert_eq!(dmg.ppu.ly(), VBLANK_FIRST_LINE); // reached line 144 within one frame (FIX_08)
+        dmg.bus.write(0xFF41, 0x40); // select bit 6 (LYC coincidence) in STAT ($FF41)
+        dmg.bus.write(0xFF45, 0x90); // LYC ($FF45) = LY: coincidence flag live-true
+        for _ in 0..8 {
+            dmg.tick();
+        }
+        dmg.bus.write(0xFF40, 0x00); // LCD off (LCDC bit 7 cleared): the line stays high via the retained flag
+        for _ in 0..4 {
+            dmg.tick();
+        }
+        dmg.bus.io[0x0F] = 0; // clear all pending requests
+        dmg.bus.write(0xFF45, 0x00); // LYC no longer equals LY: a live compare would fall
+        for _ in 0..4 {
+            dmg.tick();
+        }
+        dmg.bus.write(0xFF40, 0x80); // LCD on again: LY restarts at line 0 and equals LYC
+        for _ in 0..8 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.io[0x0F] & 0x02, 0x00); // no STAT request: the line never fell (FIX_08)
+        assert_eq!(dmg.bus.read(0xFF41) & 0x04, 0x04); // flag recomputed live: LY == LYC again (FIX_08)
+    }
+
+    #[test]
+    fn fix_08_stat_interrupt_when_the_flag_rises_at_lcd_on() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        for _ in 0..FRAME_DOTS {
+            if dmg.ppu.ly() == VBLANK_FIRST_LINE {
+                break;
+            }
+            dmg.tick();
+        }
+        assert_eq!(dmg.ppu.ly(), VBLANK_FIRST_LINE); // reached line 144 within one frame (FIX_08)
+        dmg.bus.write(0xFF41, 0x40); // select bit 6 (LYC coincidence) in STAT ($FF41)
+        dmg.bus.write(0xFF45, 0x00); // LYC ($FF45) = 0: no coincidence while line 144 is shown
+        for _ in 0..8 {
+            dmg.tick();
+        }
+        dmg.bus.write(0xFF40, 0x00); // LCD off (LCDC bit 7 cleared): the retained flag stays false
+        for _ in 0..4 {
+            dmg.tick();
+        }
+        dmg.bus.io[0x0F] = 0; // clear all pending requests
+        dmg.bus.write(0xFF40, 0x80); // LCD on again: LY restarts at line 0 and equals LYC
+        for _ in 0..8 {
+            dmg.tick();
+        }
+        assert_eq!(dmg.bus.io[0x0F] & 0x02, 0x02); // STAT request raised when the flag rises (FIX_08)
     }
 }

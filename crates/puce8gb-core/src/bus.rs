@@ -68,6 +68,8 @@ pub struct Bus {
     /// Current PPU mode 0-3, mirrored from the PPU for the STAT ($FF41) readback so reads stay
     /// side-effect-free (decision A_02, E03_08); updated by Machine::tick.
     pub ppu_mode: u8,
+    /// Value of the STAT LY==LYC flag frozen while the LCD is off (None while the LCD is on: live compare) (mooneye stat_lyc_onoff, FIX_08).
+    pub(crate) lyc_frozen: Option<bool>,
     /// CPU access to VRAM ($8000-$9FFF) allowed (E03_10): mirrored from the PPU by Machine::tick.
     vram_open: bool,
     /// CPU access to OAM ($FE00-$FE9F) allowed (E03_10): mirrored from the PPU by Machine::tick.
@@ -115,6 +117,7 @@ impl Bus {
             serial_len: 0,
             ly: 0,              // LY ($FF44) post-boot value (note 08, C01_15)
             ppu_mode: 2, // PPU mode at the start of line 0 is OAM scan (E03_01); Machine::tick keeps it current
+            lyc_frozen: None, // no frozen coincidence flag while the LCD is on (FIX_08)
             vram_open: true, // VRAM access allowed until Machine::tick mirrors the PPU state (E03_10)
             oam_open: true, // OAM access allowed until Machine::tick mirrors the PPU state (E03_10)
             dma_active: false, // no OAM DMA transfer running at power-up (E03_06 spec)
@@ -163,6 +166,7 @@ impl Bus {
         self.serial_len = 0; // no captured serial bytes at power-up (C01_03)
         self.ly = 0; // LY ($FF44) post-boot value (note 08, C01_15)
         self.ppu_mode = 2; // PPU mode restarts at the start of line 0: OAM scan (E03_01)
+        self.lyc_frozen = None; // no frozen coincidence flag while the LCD is on (FIX_08)
         self.vram_open = true; // VRAM access allowed until Machine::tick mirrors the PPU state (E03_10)
         self.oam_open = true; // OAM access allowed until Machine::tick mirrors the PPU state (E03_10)
         self.dma_active = false; // no OAM DMA transfer running at power-up (E03_06 spec)
@@ -440,13 +444,21 @@ impl Bus {
         self.io[0x0F] &= !(mask & 0x1F);
     }
 
+    /// LY==LYC coincidence flag: frozen while the LCD is off, live otherwise (FIX_08).
+    pub(crate) fn lyc_flag(&self) -> bool {
+        match self.lyc_frozen {
+            Some(f) => f,
+            None => self.ly == self.io[0x45],
+        }
+    }
+
     /// STAT ($FF41) readback (E03_08): bit 7 reads as 1; bits 6..3 are the interrupt select
     /// bits as written; bit 2 is the coincidence flag, set while LY == LYC and updated
     /// continuously (note 04a "LYC"); bits 1..0 report the current PPU mode. The stored byte
     /// holds only the writable select bits, so the readback composes them with the live state.
     pub fn stat_read(&self) -> u8 {
         let mut v = 0x80 | (self.io[0x41] & 0x78); // bit 7 fixed at 1; select bits as written
-        if self.ly == self.io[0x45] {
+        if self.lyc_flag() {
             v |= 0x04; // coincidence flag: LY ($FF44) equals LYC ($FF45) (note 04a "LYC")
         }
         v | (self.ppu_mode & 0x03) // bits 1..0: current PPU mode, mirrored by Machine::tick
