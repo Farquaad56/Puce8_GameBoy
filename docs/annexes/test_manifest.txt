@@ -1,2 +1,122 @@
 # name|dir-pattern|file-prefix|kind|max-cycles|param
-dmg_sound 07|dmg_sound/|07-|serial|100000000|Passed
+cpu_instrs 01 special|cpu_instrs/individual/|01-|serial|100000000|Passed
+cpu_instrs 02 interrupts|cpu_instrs/individual/|02-|serial|100000000|Passed
+cpu_instrs 03 op sp,hl|cpu_instrs/individual/|03-|serial|100000000|Passed
+cpu_instrs 04 op r,imm|cpu_instrs/individual/|04-|serial|100000000|Passed
+cpu_instrs 05 op rp|cpu_instrs/individual/|05-|serial|100000000|Passed
+cpu_instrs 06 ld r,r|cpu_instrs/individual/|06-|serial|100000000|Passed
+cpu_instrs 07 jr,jp,call,ret,rst|cpu_instrs/individual/|07-|serial|100000000|Passed
+cpu_instrs 08 misc instrs|cpu_instrs/individual/|08-|serial|100000000|Passed
+cpu_instrs 09 op r,r|cpu_instrs/individual/|09-|serial|100000000|Passed
+cpu_instrs 10 bit ops|cpu_instrs/individual/|10-|serial|100000000|Passed
+cpu_instrs 11 op a,(hl)|cpu_instrs/individual/|11-|serial|100000000|Passed
+instr_timing|instr_timing/|instr_timing|serial|100000000|Passed
+mem_timing 01 read_timing|mem_timing/individual/|01-|serial|100000000|Passed
+mem_timing 02 write_timing|mem_timing/individual/|02-|serial|100000000|Passed
+mem_timing 03 modify_timing|mem_timing/individual/|03-|serial|100000000|Passed
+dmg_sound 01 registers|dmg_sound/rom_singles/|01-|serial|100000000|Passed
+dmg_sound 02 len ctr|dmg_sound/rom_singles/|02-|serial|100000000|Passed
+dmg_sound 03 trigger|dmg_sound/rom_singles/|03-|serial|100000000|Passed
+dmg_sound 04 sweep|dmg_sound/rom_singles/|04-|serial|100000000|Passed
+dmg_sound 05 sweep details|dmg_sound/rom_singles/|05-|serial|100000000|Passed
+dmg_sound 06 overflow on trigger|dmg_sound/rom_singles/|06-|serial|100000000|Passed
+dmg_sound 07 len sweep period sync|dmg_sound/rom_singles/|07-|serial|100000000|Passed
+dmg_sound 08 len ctr during power|dmg_sound/rom_singles/|08-|serial|100000000|Passed
+dmg_sound 09 wave read while on|dmg_sound/rom_singles/|09-|serial|100000000|Passed
+dmg_sound 10 wave trigger while on|dmg_sound/rom_singles/|10-|serial|100000000|Passed
+dmg_sound 11 regs after power|dmg_sound/rom_singles/|11-|serial|100000000|Passed
+dmg_sound 12 wave write while on|dmg_sound/rom_singles/|12-|serial|100000000|Passed
+mooneye acceptance/add_sp_e_timing|mooneye-test-suite/acceptance/|add_sp_e_timing.gb|mooneye|100000000|-
+mooneye acceptance/boot_div-dmgABCmgb|mooneye-test-suite/acceptance/|boot_div-dmgABCmgb.gb|mooneye|100000000|-
+mooneye acceptance/boot_hwio-dmgABCmgb|mooneye-test-suite/acceptance/|boot_hwio-dmgABCmgb.gb|mooneye|100000000|-
+mooneye acceptance/boot_regs-dmgABC|mooneye-test-suite/acceptance/|boot_regs-dmgABC.gb|mooneye|100000000|-
+mooneye acceptance/call_cc_timing|mooneye-test-suite/acceptance/|call_cc_timing.gb|mooneye|100000000|-
+mooneye acceptance/call_cc_timing2|mooneye-test-suite/acceptance/|call_cc_timing2.gb|mooneye|100000000|-
+mooneye acceptance/call_timing|mooneye-test-suite/acceptance/|call_timing.gb|mooneye|100000000|-
+mooneye acceptance/call_timing2|mooneye-test-suite/acceptance/|call_timing2.gb|mooneye|100000000|-
+mooneye acceptance/di_timing-GS|mooneye-test-suite/acceptance/|di_timing-GS.gb|mooneye|100000000|-
+mooneye acceptance/div_timing|mooneye-test-suite/acceptance/|div_timing.gb|mooneye|100000000|-
+mooneye acceptance/ei_sequence|mooneye-test-suite/acceptance/|ei_sequence.gb|mooneye|100000000|-
+mooneye acceptance/ei_timing|mooneye-test-suite/acceptance/|ei_timing.gb|mooneye|100000000|-
+mooneye acceptance/halt_ime0_ei|mooneye-test-suite/acceptance/|halt_ime0_ei.gb|mooneye|100000000|-
+mooneye acceptance/halt_ime0_nointr_timing|mooneye-test-suite/acceptance/|halt_ime0_nointr_timing.gb|mooneye|100000000|-
+mooneye acceptance/halt_ime1_timing|mooneye-test-suite/acceptance/|halt_ime1_timing.gb|mooneye|100000000|-
+mooneye acceptance/halt_ime1_timing2-GS|mooneye-test-suite/acceptance/|halt_ime1_timing2-GS.gb|mooneye|100000000|-
+mooneye acceptance/if_ie_registers|mooneye-test-suite/acceptance/|if_ie_registers.gb|mooneye|100000000|-
+mooneye acceptance/intr_timing|mooneye-test-suite/acceptance/|intr_timing.gb|mooneye|100000000|-
+mooneye acceptance/jp_cc_timing|mooneye-test-suite/acceptance/|jp_cc_timing.gb|mooneye|100000000|-
+mooneye acceptance/jp_timing|mooneye-test-suite/acceptance/|jp_timing.gb|mooneye|100000000|-
+mooneye acceptance/ld_hl_sp_e_timing|mooneye-test-suite/acceptance/|ld_hl_sp_e_timing.gb|mooneye|100000000|-
+mooneye acceptance/oam_dma_restart|mooneye-test-suite/acceptance/|oam_dma_restart.gb|mooneye|100000000|-
+mooneye acceptance/oam_dma_start|mooneye-test-suite/acceptance/|oam_dma_start.gb|mooneye|100000000|-
+mooneye acceptance/oam_dma_timing|mooneye-test-suite/acceptance/|oam_dma_timing.gb|mooneye|100000000|-
+mooneye acceptance/pop_timing|mooneye-test-suite/acceptance/|pop_timing.gb|mooneye|100000000|-
+mooneye acceptance/push_timing|mooneye-test-suite/acceptance/|push_timing.gb|mooneye|100000000|-
+mooneye acceptance/rapid_di_ei|mooneye-test-suite/acceptance/|rapid_di_ei.gb|mooneye|100000000|-
+mooneye acceptance/ret_cc_timing|mooneye-test-suite/acceptance/|ret_cc_timing.gb|mooneye|100000000|-
+mooneye acceptance/ret_timing|mooneye-test-suite/acceptance/|ret_timing.gb|mooneye|100000000|-
+mooneye acceptance/reti_intr_timing|mooneye-test-suite/acceptance/|reti_intr_timing.gb|mooneye|100000000|-
+mooneye acceptance/reti_timing|mooneye-test-suite/acceptance/|reti_timing.gb|mooneye|100000000|-
+mooneye acceptance/rst_timing|mooneye-test-suite/acceptance/|rst_timing.gb|mooneye|100000000|-
+mooneye acceptance/bits/mem_oam|mooneye-test-suite/acceptance/bits/|mem_oam.gb|mooneye|100000000|-
+mooneye acceptance/bits/reg_f|mooneye-test-suite/acceptance/bits/|reg_f.gb|mooneye|100000000|-
+mooneye acceptance/bits/unused_hwio-GS|mooneye-test-suite/acceptance/bits/|unused_hwio-GS.gb|mooneye|100000000|-
+mooneye acceptance/instr/daa|mooneye-test-suite/acceptance/instr/|daa.gb|mooneye|100000000|-
+mooneye acceptance/interrupts/ie_push|mooneye-test-suite/acceptance/interrupts/|ie_push.gb|mooneye|100000000|-
+mooneye acceptance/oam_dma/basic|mooneye-test-suite/acceptance/oam_dma/|basic.gb|mooneye|100000000|-
+mooneye acceptance/oam_dma/reg_read|mooneye-test-suite/acceptance/oam_dma/|reg_read.gb|mooneye|100000000|-
+mooneye acceptance/oam_dma/sources-GS|mooneye-test-suite/acceptance/oam_dma/|sources-GS.gb|mooneye|100000000|-
+mooneye acceptance/ppu/hblank_ly_scx_timing-GS|mooneye-test-suite/acceptance/ppu/|hblank_ly_scx_timing-GS.gb|mooneye|100000000|-
+mooneye acceptance/ppu/intr_1_2_timing-GS|mooneye-test-suite/acceptance/ppu/|intr_1_2_timing-GS.gb|mooneye|100000000|-
+mooneye acceptance/ppu/intr_2_0_timing|mooneye-test-suite/acceptance/ppu/|intr_2_0_timing.gb|mooneye|100000000|-
+mooneye acceptance/ppu/intr_2_mode0_timing_sprites|mooneye-test-suite/acceptance/ppu/|intr_2_mode0_timing_sprites.gb|mooneye|100000000|-
+mooneye acceptance/ppu/intr_2_mode0_timing|mooneye-test-suite/acceptance/ppu/|intr_2_mode0_timing.gb|mooneye|100000000|-
+mooneye acceptance/ppu/intr_2_mode3_timing|mooneye-test-suite/acceptance/ppu/|intr_2_mode3_timing.gb|mooneye|100000000|-
+mooneye acceptance/ppu/intr_2_oam_ok_timing|mooneye-test-suite/acceptance/ppu/|intr_2_oam_ok_timing.gb|mooneye|100000000|-
+mooneye acceptance/ppu/lcdon_timing-GS|mooneye-test-suite/acceptance/ppu/|lcdon_timing-GS.gb|mooneye|100000000|-
+mooneye acceptance/ppu/lcdon_write_timing-GS|mooneye-test-suite/acceptance/ppu/|lcdon_write_timing-GS.gb|mooneye|100000000|-
+mooneye acceptance/ppu/stat_irq_blocking|mooneye-test-suite/acceptance/ppu/|stat_irq_blocking.gb|mooneye|100000000|-
+mooneye acceptance/ppu/stat_lyc_onoff|mooneye-test-suite/acceptance/ppu/|stat_lyc_onoff.gb|mooneye|100000000|-
+mooneye acceptance/ppu/vblank_stat_intr-GS|mooneye-test-suite/acceptance/ppu/|vblank_stat_intr-GS.gb|mooneye|100000000|-
+mooneye acceptance/serial/boot_sclk_align-dmgABCmgb|mooneye-test-suite/acceptance/serial/|boot_sclk_align-dmgABCmgb.gb|mooneye|100000000|-
+mooneye acceptance/timer/div_write|mooneye-test-suite/acceptance/timer/|div_write.gb|mooneye|100000000|-
+mooneye acceptance/timer/rapid_toggle|mooneye-test-suite/acceptance/timer/|rapid_toggle.gb|mooneye|100000000|-
+mooneye acceptance/timer/tim00_div_trigger|mooneye-test-suite/acceptance/timer/|tim00_div_trigger.gb|mooneye|100000000|-
+mooneye acceptance/timer/tim00|mooneye-test-suite/acceptance/timer/|tim00.gb|mooneye|100000000|-
+mooneye acceptance/timer/tim01_div_trigger|mooneye-test-suite/acceptance/timer/|tim01_div_trigger.gb|mooneye|100000000|-
+mooneye acceptance/timer/tim01|mooneye-test-suite/acceptance/timer/|tim01.gb|mooneye|100000000|-
+mooneye acceptance/timer/tim10_div_trigger|mooneye-test-suite/acceptance/timer/|tim10_div_trigger.gb|mooneye|100000000|-
+mooneye acceptance/timer/tim10|mooneye-test-suite/acceptance/timer/|tim10.gb|mooneye|100000000|-
+mooneye acceptance/timer/tim11_div_trigger|mooneye-test-suite/acceptance/timer/|tim11_div_trigger.gb|mooneye|100000000|-
+mooneye acceptance/timer/tim11|mooneye-test-suite/acceptance/timer/|tim11.gb|mooneye|100000000|-
+mooneye acceptance/timer/tima_reload|mooneye-test-suite/acceptance/timer/|tima_reload.gb|mooneye|100000000|-
+mooneye acceptance/timer/tima_write_reloading|mooneye-test-suite/acceptance/timer/|tima_write_reloading.gb|mooneye|100000000|-
+mooneye acceptance/timer/tma_write_reloading|mooneye-test-suite/acceptance/timer/|tma_write_reloading.gb|mooneye|100000000|-
+mooneye emulator-only/mbc1/bits_bank1|mooneye-test-suite/emulator-only/mbc1/|bits_bank1.gb|mooneye|100000000|-
+mooneye emulator-only/mbc1/bits_bank2|mooneye-test-suite/emulator-only/mbc1/|bits_bank2.gb|mooneye|100000000|-
+mooneye emulator-only/mbc1/bits_mode|mooneye-test-suite/emulator-only/mbc1/|bits_mode.gb|mooneye|100000000|-
+mooneye emulator-only/mbc1/bits_ramg|mooneye-test-suite/emulator-only/mbc1/|bits_ramg.gb|mooneye|100000000|-
+mooneye emulator-only/mbc1/multicart_rom_8Mb|mooneye-test-suite/emulator-only/mbc1/|multicart_rom_8Mb.gb|mooneye|100000000|-
+mooneye emulator-only/mbc1/ram_256kb|mooneye-test-suite/emulator-only/mbc1/|ram_256kb.gb|mooneye|100000000|-
+mooneye emulator-only/mbc1/ram_64kb|mooneye-test-suite/emulator-only/mbc1/|ram_64kb.gb|mooneye|100000000|-
+mooneye emulator-only/mbc1/rom_16Mb|mooneye-test-suite/emulator-only/mbc1/|rom_16Mb.gb|mooneye|100000000|-
+mooneye emulator-only/mbc1/rom_1Mb|mooneye-test-suite/emulator-only/mbc1/|rom_1Mb.gb|mooneye|100000000|-
+mooneye emulator-only/mbc1/rom_2Mb|mooneye-test-suite/emulator-only/mbc1/|rom_2Mb.gb|mooneye|100000000|-
+mooneye emulator-only/mbc1/rom_4Mb|mooneye-test-suite/emulator-only/mbc1/|rom_4Mb.gb|mooneye|100000000|-
+mooneye emulator-only/mbc1/rom_512kb|mooneye-test-suite/emulator-only/mbc1/|rom_512kb.gb|mooneye|100000000|-
+mooneye emulator-only/mbc1/rom_8Mb|mooneye-test-suite/emulator-only/mbc1/|rom_8Mb.gb|mooneye|100000000|-
+mooneye emulator-only/mbc2/bits_ramg|mooneye-test-suite/emulator-only/mbc2/|bits_ramg.gb|mooneye|100000000|-
+mooneye emulator-only/mbc2/bits_romb|mooneye-test-suite/emulator-only/mbc2/|bits_romb.gb|mooneye|100000000|-
+mooneye emulator-only/mbc2/bits_unused|mooneye-test-suite/emulator-only/mbc2/|bits_unused.gb|mooneye|100000000|-
+mooneye emulator-only/mbc2/ram|mooneye-test-suite/emulator-only/mbc2/|ram.gb|mooneye|100000000|-
+mooneye emulator-only/mbc2/rom_1Mb|mooneye-test-suite/emulator-only/mbc2/|rom_1Mb.gb|mooneye|100000000|-
+mooneye emulator-only/mbc2/rom_2Mb|mooneye-test-suite/emulator-only/mbc2/|rom_2Mb.gb|mooneye|100000000|-
+mooneye emulator-only/mbc2/rom_512kb|mooneye-test-suite/emulator-only/mbc2/|rom_512kb.gb|mooneye|100000000|-
+mooneye emulator-only/mbc5/rom_16Mb|mooneye-test-suite/emulator-only/mbc5/|rom_16Mb.gb|mooneye|100000000|-
+mooneye emulator-only/mbc5/rom_1Mb|mooneye-test-suite/emulator-only/mbc5/|rom_1Mb.gb|mooneye|100000000|-
+mooneye emulator-only/mbc5/rom_2Mb|mooneye-test-suite/emulator-only/mbc5/|rom_2Mb.gb|mooneye|100000000|-
+mooneye emulator-only/mbc5/rom_32Mb|mooneye-test-suite/emulator-only/mbc5/|rom_32Mb.gb|mooneye|100000000|-
+mooneye emulator-only/mbc5/rom_4Mb|mooneye-test-suite/emulator-only/mbc5/|rom_4Mb.gb|mooneye|100000000|-
+mooneye emulator-only/mbc5/rom_512kb|mooneye-test-suite/emulator-only/mbc5/|rom_512kb.gb|mooneye|100000000|-
+mooneye emulator-only/mbc5/rom_64Mb|mooneye-test-suite/emulator-only/mbc5/|rom_64Mb.gb|mooneye|100000000|-
+mooneye emulator-only/mbc5/rom_8Mb|mooneye-test-suite/emulator-only/mbc5/|rom_8Mb.gb|mooneye|100000000|-
