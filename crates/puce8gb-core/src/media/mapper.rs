@@ -99,6 +99,19 @@ impl Mapper {
             Mapper::Mbc5(m) => m.load_battery_payload(data),
         }
     }
+
+    /// The cartridge RAM bytes at A000-BFFF (E05_07): all banks for the banked mappers, empty
+    /// when there is no RAM. ROM-only carts report an empty slice; used by `Bus::cart_result`
+    /// to find the Blargg result block.
+    pub fn ram_bytes(&self) -> &[u8] {
+        match self {
+            Mapper::RomOnly(_) => &[],
+            Mapper::Mbc1(m) => m.ram(),
+            Mapper::Mbc2(m) => m.ram(),
+            Mapper::Mbc3(m) => m.ram(),
+            Mapper::Mbc5(m) => m.ram(),
+        }
+    }
 }
 
 /// True when the cartridge type at $0147 carries a battery, for the types the `Mapper` supports:

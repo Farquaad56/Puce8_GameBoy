@@ -291,6 +291,11 @@ impl Mbc3 {
         }
     }
 
+    /// The external RAM, all banks (empty when the header declares none).
+    pub fn ram(&self) -> &[u8] {
+        &self.ram
+    }
+
     /// Persistent bytes of the cartridge (E05_06, decision A_05): the external RAM, then the RTC
     /// block: running clock (7 bytes), latched clock (7 bytes), sub-second dots (u64 little-endian).
     /// The payload has no header or version: UNKNOWN - to confirm.

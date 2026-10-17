@@ -6,7 +6,7 @@ use crate::bus::{Bus, ROM_HEADER_CHECKSUM};
 use crate::cpu::Cpu;
 use crate::input::Input;
 use crate::media::mapper::cartridge_has_battery;
-use crate::media::Media;
+use crate::media::{BatteryError, Media};
 use crate::savestate::StateError;
 use crate::video::Ppu;
 
@@ -93,13 +93,12 @@ impl Dmg {
     /// Minimum ROM length: the header occupies $0100-$014F of bank 0 (note 07a).
     pub const MIN_ROM_LEN: usize = 0x150;
 
-    /// Battery-backed cartridge RAM for the frontend to save (E05_06). Interim: this is the Bus
-    /// SRAM shortcut (type $03 with 8 KiB), replaced when the mappers are wired to the bus. None
-    /// when the cartridge type has no battery or no RAM is present. File access stays in the
-    /// frontends.
-    pub fn battery_ram(&self) -> Option<&[u8]> {
-        if cartridge_has_battery(self.bus.peek(0x0147)) && !self.bus.sram.is_empty() {
-            Some(self.bus.sram.as_slice())
+    /// Battery-backed cartridge RAM for the frontend to save (E05_06): the persistent bytes of
+    /// the mapper's RAM. None when the cartridge type has no battery or no RAM is present. File
+    /// access stays in the frontends.
+    pub fn battery_ram(&self) -> Option<Vec<u8>> {
+        if cartridge_has_battery(self.bus.peek(0x0147)) {
+            self.bus.mapper.battery_payload()
         } else {
             None
         }
@@ -109,17 +108,18 @@ impl Dmg {
     /// cartridge has none and with `BatteryRamSizeMismatch` when the length differs; the RAM is
     /// left untouched on error.
     pub fn load_battery_ram(&mut self, data: &[u8]) -> Result<(), LoadError> {
-        if !cartridge_has_battery(self.bus.peek(0x0147)) || self.bus.sram.is_empty() {
+        if !cartridge_has_battery(self.bus.peek(0x0147))
+            || self.bus.mapper.battery_payload().is_none()
+        {
             return Err(LoadError::NoBatteryRam);
         }
-        if data.len() != self.bus.sram.len() {
-            return Err(LoadError::BatteryRamSizeMismatch {
-                expected: self.bus.sram.len(),
-                actual: data.len(),
-            });
+        match self.bus.mapper.load_battery_payload(data) {
+            Ok(()) => Ok(()),
+            Err(BatteryError::NoBatteryData) => Err(LoadError::NoBatteryRam),
+            Err(BatteryError::SizeMismatch { expected, actual }) => {
+                Err(LoadError::BatteryRamSizeMismatch { expected, actual })
+            }
         }
-        self.bus.sram.copy_from_slice(data);
-        Ok(())
     }
 
     /// Load a ROM image and build the machine in its post-boot state.
@@ -223,6 +223,7 @@ impl Machine for Dmg {
             self.bus.wave_access = self.audio.apu.wave.access(); // wave RAM access rule (E04_07)
             let (nr50, nr51) = self.bus.audio_pan();
             self.audio.mix_tick(nr50, nr51);
+            self.bus.mapper.tick(4); // cartridge clock: one M-cycle = 4 dots (E05_07)
         }
         // PPU advances one dot per Machine::tick() (decision A_01, E03_01). LY is mirrored
         // into the bus so $FF44 reads are side-effect-free; entry into VBlank (LY 143 -> 144)
@@ -1343,7 +1344,8 @@ mod tests {
     fn e05_06_battery_ram_round_trips() {
         let image = battery_rom(0x03, 0x02);
         let mut dmg = Dmg::new(&image).expect("ROM loads");
-        assert_eq!(dmg.battery_ram().map(<[u8]>::len), Some(8192));
+        assert_eq!(dmg.battery_ram().map(|v| v.len()), Some(8192));
+        dmg.bus.write(0x0000, 0x0A); // enable the MBC1 RAM (note 07b)
         dmg.bus.write(0xA000, 0x5A);
         dmg.bus.write(0xBFFF, 0x77);
         let saved = dmg.battery_ram().expect("battery").to_vec();
@@ -1352,6 +1354,7 @@ mod tests {
         let mut fresh = Dmg::new(&image).expect("ROM loads");
         assert_eq!(fresh.battery_ram().expect("battery")[0], 0x00);
         assert_eq!(fresh.load_battery_ram(&saved), Ok(()));
+        fresh.bus.write(0x0000, 0x0A); // enable the MBC1 RAM (note 07b)
         assert_eq!(fresh.bus.read(0xA000), 0x5A);
         assert_eq!(fresh.bus.read(0xBFFF), 0x77);
     }
@@ -1359,6 +1362,7 @@ mod tests {
     #[test]
     fn e05_06_load_battery_ram_rejects_a_size_mismatch_and_keeps_the_ram() {
         let mut dmg = Dmg::new(&battery_rom(0x03, 0x02)).expect("ROM loads");
+        dmg.bus.write(0x0000, 0x0A); // enable the MBC1 RAM (note 07b)
         dmg.bus.write(0xA000, 0x11);
         assert_eq!(
             dmg.load_battery_ram(&[0u8; 100]),
@@ -1375,5 +1379,54 @@ mod tests {
             })
         );
         assert_eq!(dmg.bus.read(0xA000), 0x11);
+    }
+
+    /// ROM image with the cartridge header fields set for mapper selection (E05_07): type at
+    /// $0147, ROM size code at $0148, RAM size code at $0149 and a valid checksum at $014D.
+    fn e05_07_rom(cart_type: u8, rom_size_code: u8, ram_code: u8, banks: usize) -> Vec<u8> {
+        let mut rom = vec![0x00u8; banks * 0x4000];
+        rom[0x147] = cart_type;
+        rom[0x148] = rom_size_code;
+        rom[0x149] = ram_code;
+        let mut x = 0u8;
+        for &b in &rom[0x134..=0x14C] {
+            x = x.wrapping_sub(b).wrapping_sub(1);
+        }
+        rom[0x14D] = x; // header checksum (note 07a)
+        rom
+    }
+
+    #[test]
+    fn e05_07_battery_ram_round_trips_through_the_mapper() {
+        let mut dmg = Dmg::new(&e05_07_rom(0x03, 0x00, 0x02, 2)).expect("ROM loads");
+        dmg.bus.write(0x0000, 0x0A); // enable the MBC1 RAM (note 07b)
+        dmg.bus.write(0xA000, 0x5A);
+        let saved = dmg.battery_ram().expect("battery");
+        assert_eq!(saved[0], 0x5A);
+        let mut fresh = Dmg::new(&e05_07_rom(0x03, 0x00, 0x02, 2)).expect("ROM loads");
+        assert_eq!(fresh.load_battery_ram(&saved), Ok(()));
+        fresh.bus.write(0x0000, 0x0A); // enable the MBC1 RAM (note 07b)
+        assert_eq!(fresh.bus.read(0xA000), 0x5A);
+    }
+
+    #[test]
+    fn e05_07_mbc3_clock_advances_with_dmg_tick() {
+        // All-zero ROM: the CPU loops on BR $0100 and never touches the cartridge.
+        let mut dmg = Dmg::new(&e05_07_rom(0x13, 0x00, 0x02, 2)).expect("ROM loads");
+        let mut p = dmg.battery_ram().expect("battery");
+        let start = p.len() - 8; // dot_acc: last 8 bytes of the payload, u64 little-endian (media/mbc3.rs)
+        p[start..].copy_from_slice(&(4_194_304u64 - 100).to_le_bytes());
+        dmg.load_battery_ram(&p).unwrap();
+        dmg.bus.write(0x0000, 0x0A); // enable the MBC3 RAM/RTC (note 07b)
+        dmg.bus.write(0x4000, 0x08); // select the seconds register
+        dmg.bus.write(0x6000, 0x00); // arm the latch
+        dmg.bus.write(0x6000, 0x01); // latch: seconds is still 0 (99 dots short of a second)
+        assert_eq!(dmg.bus.read(0xA000), 0);
+        for _ in 0..128 {
+            dmg.tick(); // one dot each; 32 M-cycles x 4 dots = 128 >= 100 (E05_07)
+        }
+        dmg.bus.write(0x6000, 0x00); // arm the latch again
+        dmg.bus.write(0x6000, 0x01); // latch: the seconds counter has advanced by one
+        assert_eq!(dmg.bus.read(0xA000), 1);
     }
 }

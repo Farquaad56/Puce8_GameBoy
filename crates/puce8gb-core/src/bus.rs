@@ -4,6 +4,8 @@
 
 use crate::audio::wave::WaveAccess;
 use crate::input::{p1_read, Input};
+use crate::media::header::Header;
+use crate::media::mapper::{Mapper, RomOnly};
 use crate::timer::Timer;
 
 /// IO register file FF00-FFFF size, including IF ($FF0F) and IE ($FFFF) (decision A_02).
@@ -55,9 +57,9 @@ pub struct Bus {
     dma_index: u8,
     /// Last accepted APU register write (address, value), drained by the machine each M-cycle (E04_02).
     pub apu_write: Option<(u16, u8)>,
-    /// Cartridge RAM A000-BFFF (8 KiB) of an MBC1+RAM cartridge; empty otherwise.
-    /// Interim shortcut before the E05 mapper work: no banking, no RAM-enable gate.
-    pub sram: Vec<u8>,
+    /// Cartridge mapper for the loaded ROM (decision A_06): ROM banking, RAM and RTC;
+    /// RomOnly fallback when the header is missing or unsupported (E05_07).
+    pub mapper: Mapper,
     /// CPU access rule for wave RAM $FF30-$FF3F, mirrored from the wave channel by Machine::tick (E04_07).
     pub wave_access: WaveAccess,
     /// Debug tool for trace comparison, task C01_49: when Some(v), every read of $FF44
@@ -74,10 +76,7 @@ pub struct Bus {
 impl Bus {
     /// Build a bus around the cartridge ROM image, all RAM zeroed.
     pub fn new(rom: Vec<u8>) -> Self {
-        let sram = match (rom.get(0x147).copied(), rom.get(0x149).copied()) {
-            (Some(0x02 | 0x03), Some(0x02)) => vec![0x00; 0x2000],
-            _ => Vec::new(),
-        };
+        let mapper = Self::build_mapper(&rom);
         Bus {
             rom,
             vram: [0x00; 0x2000],
@@ -95,13 +94,31 @@ impl Bus {
             dma_src: 0,     // source base set by a write to $FF46 (E03_06 spec)
             dma_index: 0,   // next destination index of the running transfer (E03_06 spec)
             apu_write: None, // no pending APU register write at power-up (E04_02)
-            sram,
+            mapper,
             wave_access: WaveAccess::Free,
             ly_override: None,       // no debug override by default (C01_49)
             timer: Timer::default(), // DIV/TIMA/TMA/TAC are set in reset() (note 08)
             input: Input::default(), // no button pressed at power-up (E05_01)
             p1_prev: 0x0F,           // P1 low nibble before the first check (E05_01)
         }
+    }
+
+    /// Build the cartridge mapper for a ROM image (E05_07): the header at $0134-$014F selects
+    /// the type; a missing or unsupported header falls back to ROM-only so any image loads.
+    fn build_mapper(rom: &[u8]) -> Mapper {
+        match Header::parse(rom) {
+            Ok(header) => {
+                Mapper::new(rom.to_vec(), &header).unwrap_or_else(|_| Self::rom_only_fallback(rom))
+            }
+            Err(_) => Self::rom_only_fallback(rom),
+        }
+    }
+
+    /// ROM-only fallback mapper: RAM size code $00 (no RAM) is always valid, so this never fails.
+    fn rom_only_fallback(rom: &[u8]) -> Mapper {
+        Mapper::RomOnly(
+            RomOnly::new(rom.to_vec(), 0x00).expect("no-RAM ROM-only mapper always loads"),
+        )
     }
 
     /// Post-boot state of the memory owned by the Bus (note 08, decision A_06).
@@ -111,7 +128,9 @@ impl Bus {
         // so it carries no separate state.
         self.wram.fill(0x00);
         self.hram.fill(0x00);
-        self.sram.fill(0x00);
+        // Cartridge RAM is NOT kept across reset (E05_07): rebuild the mapper from the ROM;
+        // the frontend reloads battery RAM with load_battery_ram.
+        self.mapper = Self::build_mapper(&self.rom);
         self.serial_len = 0; // no captured serial bytes at power-up (C01_03)
         self.ly = 0; // LY ($FF44) post-boot value (note 08, C01_15)
         self.ppu_mode = 2; // PPU mode restarts at the start of line 0: OAM scan (E03_01)
@@ -181,7 +200,7 @@ impl Bus {
             return 0xFF; // OAM DMA running: the CPU sees $FF outside HRAM, I/O and IE (E03_15 spec); I/O registers stay accessible: UNKNOWN - to confirm
         }
         match addr {
-            0x0000..=0x7FFF => self.rom.get(addr as usize).copied().unwrap_or(0xFF), // ROM-only cart (decision A_06): past the image is open bus
+            0x0000..=0x7FFF => self.mapper.read(addr), // cartridge ROM region through the mapper (E05_07); past the image reads $FF
             0x8000..=0x9FFF => {
                 if self.vram_open {
                     self.vram[(addr - 0x8000) as usize]
@@ -189,11 +208,7 @@ impl Bus {
                     0xFF // blocked by the PPU mode: reads $FF (E03_10 spec)
                 }
             }
-            0xA000..=0xBFFF => self
-                .sram
-                .get((addr - 0xA000) as usize)
-                .copied()
-                .unwrap_or(0xFF), // cartridge SRAM (E04_06); empty on a ROM-only cart reads $FF (decision A_06)
+            0xA000..=0xBFFF => self.mapper.read(addr), // cartridge RAM region through the mapper (E05_07); absent or disabled RAM reads $FF
             0xC000..=0xDFFF => {
                 // WRAM: lower 14 bits of the address index into the 8 KiB array.
                 self.wram[((addr - 0xC000) as usize) & 0x3FFF]
@@ -256,17 +271,13 @@ impl Bus {
             return; // OAM DMA running: writes outside HRAM, I/O and IE are ignored (E03_15 spec)
         }
         match addr {
-            0x0000..=0x7FFF => {} // ROM is read-only (note 03a "Adresse bus")
+            0x0000..=0x7FFF => self.mapper.write(addr, val), // cartridge registers through the mapper (E05_07)
             0x8000..=0x9FFF => {
                 if self.vram_open {
                     self.vram[(addr - 0x8000) as usize] = val;
                 } // blocked by the PPU mode: writes are ignored (E03_10 spec)
             }
-            0xA000..=0xBFFF => {
-                if let Some(b) = self.sram.get_mut((addr - 0xA000) as usize) {
-                    *b = val;
-                } // cartridge SRAM (E04_06); writes are ignored on a ROM-only cart (decision A_06)
-            }
+            0xA000..=0xBFFF => self.mapper.write(addr, val), // cartridge RAM through the mapper; absent or disabled RAM ignores it (E05_07)
             0xC000..=0xDFFF => self.wram[(addr - 0xC000) as usize] = val,
             0xE000..=0xFDFF => {
                 // Echo RAM: only the lower 13 bits of the address are connected, so it wraps onto
@@ -452,13 +463,9 @@ impl Bus {
     /// for debuggers and viewers. PPU-mode blocking and OAM DMA gating: E03_15.
     pub fn peek(&self, addr: u16) -> u8 {
         match addr {
-            0x0000..=0x7FFF => self.rom.get(addr as usize).copied().unwrap_or(0xFF), // ROM-only cart (decision A_06): past the image is open bus
+            0x0000..=0x7FFF => self.mapper.read(addr), // cartridge ROM region through the mapper (E05_07); past the image reads $FF
             0x8000..=0x9FFF => self.vram[(addr - 0x8000) as usize],
-            0xA000..=0xBFFF => self
-                .sram
-                .get((addr - 0xA000) as usize)
-                .copied()
-                .unwrap_or(0xFF), // cartridge SRAM (E04_06); empty on a ROM-only cart reads $FF (decision A_06)
+            0xA000..=0xBFFF => self.mapper.read(addr), // cartridge RAM region through the mapper (E05_07); absent or disabled RAM reads $FF
             0xC000..=0xDFFF => self.wram[(addr - 0xC000) as usize],
             0xE000..=0xFDFF => {
                 // Echo RAM: only the lower 13 bits of the address are connected, so it wraps onto
@@ -486,7 +493,7 @@ impl Bus {
     /// zero-terminated text that starts at $A004 into `out` and return its length.
     /// Returns 0 when there is no SRAM, no signature, or the ROM is still running.
     pub fn cart_result(&self, out: &mut [u8]) -> usize {
-        let s = &self.sram;
+        let s = self.mapper.ram_bytes(); // cartridge RAM through the mapper (E05_07); empty on a ROM-only cart
         if s.len() < 4 || s[1] != 0xDE || s[2] != 0xB0 || s[3] != 0x61 || s[0] == 0x80 {
             return 0;
         }
@@ -1294,6 +1301,7 @@ mod tests {
         r[0x147] = 0x03;
         r[0x149] = 0x02;
         let mut bus = Bus::new(r);
+        bus.write(0x0000, 0x0A); // enable the MBC1 RAM (note 07b)
         bus.write(0xA000, 0x5A);
         bus.write(0xBFFF, 0x3C);
         assert_eq!(bus.read(0xA000), 0x5A);
@@ -1310,6 +1318,7 @@ mod tests {
         r[0x147] = 0x03;
         r[0x149] = 0x02;
         let mut bus = Bus::new(r);
+        bus.write(0x0000, 0x0A); // enable the MBC1 RAM (note 07b)
         let mut out = [0u8; 16];
         for (i, b) in b"Passed\0".iter().enumerate() {
             bus.write(0xA004 + i as u16, *b);
@@ -1457,5 +1466,79 @@ mod tests {
         bus.write(0xFF00, 0x10);
         assert_eq!(bus.read(0xFF00), 0xDE);
         assert_eq!(bus.io[0x0F] & 0x10, 0x10);
+    }
+
+    /// ROM image with the cartridge header fields set for mapper selection (E05_07): type at
+    /// $0147, ROM size code at $0148, RAM size code at $0149 and a valid checksum at $014D.
+    fn e05_07_rom(cart_type: u8, rom_size_code: u8, ram_code: u8, banks: usize) -> Vec<u8> {
+        let mut rom = vec![0x00u8; banks * 0x4000];
+        rom[0x147] = cart_type;
+        rom[0x148] = rom_size_code;
+        rom[0x149] = ram_code;
+        let mut x = 0u8;
+        for &b in &rom[0x134..=0x14C] {
+            x = x.wrapping_sub(b).wrapping_sub(1);
+        }
+        rom[0x14D] = x; // header checksum (note 07a)
+        rom
+    }
+
+    #[test]
+    fn e05_07_mbc1_rom_bank_switch_is_visible_on_the_bus() {
+        let mut rom = e05_07_rom(0x01, 0x01, 0x00, 4);
+        for n in 1..=3 {
+            rom[0x4000 * n] = 0x10 + n as u8; // bank marker (note 07b)
+        }
+        let mut bus = Bus::new(rom);
+        bus.write(0x2000, 2);
+        assert_eq!(bus.read(0x4000), 0x12);
+        bus.write(0x2000, 3);
+        assert_eq!(bus.read(0x4000), 0x13);
+        bus.write(0x2000, 0); // register value 0 maps to bank 1 (note 07b)
+        assert_eq!(bus.read(0x4000), 0x11);
+    }
+
+    #[test]
+    fn e05_07_mbc1_ram_is_gated_by_the_enable_register() {
+        let mut bus = Bus::new(e05_07_rom(0x03, 0x00, 0x02, 2));
+        assert_eq!(bus.read(0xA000), 0xFF); // RAM closed at power-up (note 07b)
+        bus.write(0x0000, 0x0A); // enable the RAM
+        bus.write(0xA000, 0x42);
+        assert_eq!(bus.read(0xA000), 0x42);
+        bus.write(0x0000, 0x00); // close the RAM again
+        assert_eq!(bus.read(0xA000), 0xFF);
+        bus.write(0x0000, 0x0A); // reopen: the byte survives (note 07b)
+        assert_eq!(bus.read(0xA000), 0x42);
+    }
+
+    #[test]
+    fn e05_07_rom_only_has_no_cartridge_ram() {
+        let mut bus = Bus::new(e05_07_rom(0x00, 0x00, 0x00, 2));
+        bus.write(0xA000, 0x42); // ignored: no RAM on a ROM-only cart (note 07b)
+        assert_eq!(bus.read(0xA000), 0xFF);
+    }
+
+    #[test]
+    fn e05_07_mbc5_ninth_bank_bit_reaches_the_bus() {
+        let mut rom = e05_07_rom(0x19, 0x08, 0x00, 512); // 8 MiB (note 07b)
+        rom[0x4000 * 256] = 0xAB;
+        rom[0x4000] = 0x77; // bank 1 marker (note 07b)
+        let mut bus = Bus::new(rom);
+        bus.write(0x2000, 0x00);
+        bus.write(0x3000, 0x01); // bit 8: bank 256 (note 07b)
+        assert_eq!(bus.read(0x4000), 0xAB);
+        bus.write(0x3000, 0x00);
+        bus.write(0x2000, 0x01); // bank 1
+        assert_eq!(bus.read(0x4000), 0x77);
+    }
+
+    #[test]
+    fn e05_07_unsupported_cartridge_type_falls_back_to_rom_only() {
+        let mut rom = e05_07_rom(0x20, 0x00, 0x00, 2); // type $20 is unsupported (E05_07)
+        rom[0x4000] = 0x99;
+        rom[0x0200] = 0x55;
+        let bus = Bus::new(rom); // must not panic: ROM-only fallback
+        assert_eq!(bus.read(0x0200), 0x55);
+        assert_eq!(bus.read(0xA000), 0xFF); // no cartridge RAM in the fallback
     }
 }

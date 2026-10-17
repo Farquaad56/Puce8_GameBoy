@@ -106,6 +106,11 @@ impl Mbc2 {
         }
     }
 
+    /// The built-in RAM: 512 cells, one low nibble each.
+    pub fn ram(&self) -> &[u8] {
+        &self.ram
+    }
+
     /// Persistent bytes of the cartridge (E05_06): the 512 built-in RAM cells, one low nibble each.
     pub fn battery_payload(&self) -> Option<Vec<u8>> {
         Some(self.ram.clone())

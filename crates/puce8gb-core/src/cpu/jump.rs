@@ -185,7 +185,7 @@ fn y_of(op: u8) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use crate::cpu::{testutil, Cpu};
+    use crate::cpu::{testutil, Bus, Cpu};
 
     // ---- Family 1: JP a16 ($C3; note 02c seed Opcodes.json: [16 T = 4 M], no flags) ----
 
@@ -535,10 +535,11 @@ mod tests {
     fn c01_10_jr_e8_wraps_past_bottom_of_memory() {
         // Edge case: the target wraps below $0000. Place the instruction at $0002 so that
         // PC after the two bytes is $0004, and e8 = $F8 (-8) gives $FFFF... wait: $0004 - 8 = $FFFC.
-        let mut bus = testutil::new_bus();
-        // $0002/$0003 are ROM (read-only via bus.write), so set the image bytes directly.
-        bus.rom[2] = 0x18; // JR e8 at $0002
-        bus.rom[3] = 0xF8; // e8 = -$08 at $0003
+        let mut rom = vec![0x00; 32 * 1024]; // same image as testutil::new_bus
+                                             // $0002/$0003 are ROM (read-only via bus.write), so set the image bytes directly.
+        rom[2] = 0x18; // JR e8 at $0002
+        rom[3] = 0xF8; // e8 = -$08 at $0003
+        let mut bus = Bus::new(rom);
         let mut cpu = Cpu {
             pc: 0x0002,
             ..Cpu::default()

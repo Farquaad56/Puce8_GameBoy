@@ -151,6 +151,11 @@ impl Mbc1 {
         }
     }
 
+    /// The external RAM, all banks (empty when the header declares none).
+    pub fn ram(&self) -> &[u8] {
+        &self.ram
+    }
+
     /// Persistent bytes of the cartridge (E05_06): the external RAM, or None when there is none.
     pub fn battery_payload(&self) -> Option<Vec<u8>> {
         if self.ram.is_empty() {
