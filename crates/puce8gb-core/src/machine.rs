@@ -180,9 +180,13 @@ impl Machine for Dmg {
             if let Some((addr, v)) = self.bus.apu_write.take() {
                 self.audio.apu.write_reg(addr, v);
             }
+            if let Some(i) = self.audio.apu.wave.pending_corruption.take() {
+                self.bus.corrupt_wave_ram(i); // DMG retrigger corruption (E04_07)
+            }
             self.audio.apu.wave.ram = self.bus.wave_ram();
             self.audio.apu.tick(self.bus.timer.div());
             self.bus.set_apu_status(self.audio.apu.status());
+            self.bus.wave_access = self.audio.apu.wave.access(); // wave RAM access rule (E04_07)
             let (nr50, nr51) = self.bus.audio_pan();
             self.audio.mix_tick(nr50, nr51);
         }
@@ -274,6 +278,7 @@ impl Machine for Dmg {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::wave::WaveAccess;
 
     /// ROM image of `len` bytes, all zero except the header checksum byte $014D.
     fn rom(len: usize, checksum: u8) -> Vec<u8> {
@@ -1216,5 +1221,35 @@ mod tests {
             dmg.tick();
         }
         assert_eq!(drain_all(&mut dmg).len(), 0);
+    }
+
+    #[test]
+    fn e04_07_length_written_while_off_survives_power_cycle() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        apu_write(&mut dmg, 0xFF26, 0x00);
+        apu_write(&mut dmg, 0xFF11, 0x3E);
+        apu_write(&mut dmg, 0xFF26, 0x80);
+        assert_eq!(dmg.audio.apu.pulse1.length, 2);
+    }
+
+    #[test]
+    fn e04_07_machine_mirrors_wave_access_to_the_bus() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        apu_write(&mut dmg, 0xFF1A, 0x80);
+        apu_write(&mut dmg, 0xFF1D, 0xFD);
+        apu_write(&mut dmg, 0xFF1E, 0x87);
+        let mut seen_open = false;
+        for _ in 0..16 {
+            for _ in 0..4 {
+                dmg.tick();
+            }
+            if matches!(dmg.bus.wave_access, WaveAccess::Open(_)) {
+                seen_open = true;
+            }
+        }
+        assert!(seen_open);
+        apu_write(&mut dmg, 0xFF26, 0x00);
+        apu_write(&mut dmg, 0xFF26, 0x00);
+        assert_eq!(dmg.bus.wave_access, WaveAccess::Free);
     }
 }

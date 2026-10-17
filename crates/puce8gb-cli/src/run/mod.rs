@@ -110,7 +110,7 @@ pub fn run_machine(dmg: &mut Dmg, args: &RunArgs) -> Outcome {
     let mut collected = String::new();
     let mut buf = [0u8; 64];
     // Blargg cart-RAM result block (dmg_sound ROMs): bytes already scanned.
-    let mut cart_buf = [0u8; 256];
+    let mut cart_buf = [0u8; 8192];
     let mut cart_len = 0usize;
     // Remaining traced instructions (task C01_47); 0 disables tracing.
     let mut trace_left = args.trace;

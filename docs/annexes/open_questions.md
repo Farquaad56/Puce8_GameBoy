@@ -94,3 +94,5 @@ Voir docs/annexes/notes/09_test_roms.md.
 - C01_41 blocked: halt_bug.gb is screen-only: needs PPU and E03_16
 - E03_04 blocked after 5 failed checks - needs human review
 - E04_06 blocked after 5 failed checks - needs human review
+E04_07: Pan Docs Audio Details does not state the APU power-on/power-off effects. Rules taken from the gbdev wiki 'Gameboy sound hardware' (DMG): length counters survive power-off and can be written while off; power-on restarts the frame sequencer at step 0. To confirm with dmg_sound 07, 08, 11. CGB behaviour: UNKNOWN - to confirm.
+- E04_07: wave channel DMG timing constants (access window 1..1 step, trigger delay 2 steps, corruption window 0..0) were found by sweeping against dmg_sound 09, 10, 12; the exact hardware window ("a couple of clocks") stays UNKNOWN. Other windows also pass 09 and 12: access max 2 or 3.

@@ -2,6 +2,7 @@
 //! read/write dispatch and side-effect-free peek() per decision A_02; PPU-mode blocking
 //! and OAM DMA gating arrive with E03.
 
+use crate::audio::wave::WaveAccess;
 use crate::timer::Timer;
 
 /// IO register file FF00-FFFF size, including IF ($FF0F) and IE ($FFFF) (decision A_02).
@@ -56,6 +57,8 @@ pub struct Bus {
     /// Cartridge RAM A000-BFFF (8 KiB) of an MBC1+RAM cartridge; empty otherwise.
     /// Interim shortcut before the E05 mapper work: no banking, no RAM-enable gate.
     pub sram: Vec<u8>,
+    /// CPU access rule for wave RAM $FF30-$FF3F, mirrored from the wave channel by Machine::tick (E04_07).
+    pub wave_access: WaveAccess,
     /// Debug tool for trace comparison, task C01_49: when Some(v), every read of $FF44
     /// returns v instead of the PPU scanline; None (default) keeps normal behaviour.
     ly_override: Option<u8>,
@@ -88,6 +91,7 @@ impl Bus {
             dma_index: 0,   // next destination index of the running transfer (E03_06 spec)
             apu_write: None, // no pending APU register write at power-up (E04_02)
             sram,
+            wave_access: WaveAccess::Free,
             ly_override: None,       // no debug override by default (C01_49)
             timer: Timer::default(), // DIV/TIMA/TMA/TAC are set in reset() (note 08)
         }
@@ -211,6 +215,11 @@ impl Bus {
             } // APU registers with read masks (E04_01 spec)
             // Unassigned I/O $FF27-$FF2F: always read $FF (dmg_sound 01-registers test 2).
             0xFF27..=0xFF2F => 0xFF,
+            0xFF30..=0xFF3F => match self.wave_access {
+                WaveAccess::Free => self.io[(addr - 0xFF00) as usize],
+                WaveAccess::Closed => 0xFF,
+                WaveAccess::Open(i) => self.io[0x30 + usize::from(i & 15)],
+            },
             0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.io[IO_SIZE - 1], // IE (decision A_02)
@@ -287,6 +296,13 @@ impl Bus {
                 }
                 self.apu_write = Some((addr, val));
             }
+            0xFF11 | 0xFF16 | 0xFF1B | 0xFF20 if self.io[0x26] & 0x80 == 0 => {
+                // DMG: length counters can still be written while the APU is off; the register
+                // itself stays cleared and the duty bits are not applied (gbdev wiki "Gameboy sound
+                // hardware"). Only the length part is relayed to the APU.
+                let length_part = if addr == 0xFF1B { val } else { val & 0x3F };
+                self.apu_write = Some((addr, length_part));
+            }
             0xFF10..=0xFF25 => {
                 if self.io[0x26] & 0x80 != 0 {
                     self.io[(addr - 0xFF00) as usize] = val; // APU registers are read-only while the APU is off (E04_01 spec, note 05b)
@@ -295,6 +311,11 @@ impl Bus {
             }
             // Unassigned I/O $FF27-$FF2F: writes are ignored (dmg_sound 01-registers test 2).
             0xFF27..=0xFF2F => {}
+            0xFF30..=0xFF3F => match self.wave_access {
+                WaveAccess::Free => self.io[(addr - 0xFF00) as usize] = val,
+                WaveAccess::Closed => {}
+                WaveAccess::Open(i) => self.io[0x30 + usize::from(i & 15)] = val,
+            },
             0xFF00..=0xFF7F => {
                 self.io[(addr - 0xFF00) as usize] = val;
                 // SC ($FF02): a transfer started with the internal clock (bit7 + bit0 set,
@@ -365,6 +386,13 @@ impl Bus {
         let mut ram = [0u8; 16];
         ram.copy_from_slice(&self.io[0x30..0x40]);
         ram
+    }
+
+    /// DMG retrigger corruption of wave RAM (E04_07): see audio::wave::corrupt_ram.
+    pub fn corrupt_wave_ram(&mut self, index: u8) {
+        let mut ram = self.wave_ram();
+        crate::audio::wave::corrupt_ram(&mut ram, index);
+        self.io[0x30..0x40].copy_from_slice(&ram);
     }
 
     /// Raw NR50 (master volume) and NR51 (panning) for the mixer. Both read 0 while the APU is off.
@@ -1129,6 +1157,27 @@ mod tests {
     }
 
     #[test]
+    fn e04_07_length_registers_are_relayed_while_apu_is_off() {
+        let mut bus = Bus::new(vec![0u8; 0x8000]);
+        bus.reset();
+        bus.write(0xFF26, 0x00);
+        bus.apu_write = None;
+        bus.write(0xFF11, 0xFE);
+        assert_eq!(bus.apu_write.take(), Some((0xFF11, 0x3E)));
+        assert_eq!(bus.read(0xFF11), 0x3F);
+        bus.write(0xFF16, 0xC5);
+        assert_eq!(bus.apu_write.take(), Some((0xFF16, 0x05)));
+        bus.write(0xFF1B, 0xF0);
+        assert_eq!(bus.apu_write.take(), Some((0xFF1B, 0xF0)));
+        assert_eq!(bus.read(0xFF1B), 0xFF);
+        bus.write(0xFF20, 0xFF);
+        assert_eq!(bus.apu_write.take(), Some((0xFF20, 0x3F)));
+        assert_eq!(bus.read(0xFF20), 0xFF);
+        bus.write(0xFF12, 0x77);
+        assert_eq!(bus.apu_write, None);
+    }
+
+    #[test]
     fn e04_02_bus_status_bits_follow_set_apu_status() {
         let mut bus = Bus::new(vec![0u8; 0x8000]);
         bus.reset();
@@ -1241,5 +1290,55 @@ mod tests {
         assert_eq!(&out[..6], b"Passed");
         let mut small = [0u8; 3];
         assert_eq!(bus.cart_result(&mut small), 3); // truncated to the buffer
+    }
+
+    #[test]
+    fn e04_07_wave_ram_is_free_when_channel_is_off() {
+        let mut bus = Bus::new(vec![0u8; 0x8000]);
+        bus.reset();
+        bus.write(0xFF30, 0x5A);
+        assert_eq!(bus.read(0xFF30), 0x5A);
+    }
+
+    #[test]
+    fn e04_07_wave_ram_reads_ff_and_ignores_writes_outside_the_window() {
+        let mut bus = Bus::new(vec![0u8; 0x8000]);
+        bus.reset();
+        bus.write(0xFF31, 0x12);
+        bus.wave_access = WaveAccess::Closed;
+        assert_eq!(bus.read(0xFF31), 0xFF);
+        bus.write(0xFF31, 0x34);
+        bus.wave_access = WaveAccess::Free;
+        assert_eq!(bus.read(0xFF31), 0x12);
+    }
+
+    #[test]
+    fn e04_07_wave_ram_access_goes_to_the_current_byte_inside_the_window() {
+        let mut bus = Bus::new(vec![0u8; 0x8000]);
+        bus.reset();
+        bus.write(0xFF35, 0xAB);
+        let before = bus.read(0xFF3A);
+        bus.wave_access = WaveAccess::Open(5);
+        assert_eq!(bus.read(0xFF30), 0xAB);
+        assert_eq!(bus.read(0xFF3F), 0xAB);
+        bus.write(0xFF3A, 0xCD);
+        bus.wave_access = WaveAccess::Free;
+        assert_eq!(bus.read(0xFF35), 0xCD);
+        assert_eq!(bus.read(0xFF3A), before);
+    }
+
+    #[test]
+    fn e04_07_corrupt_wave_ram_rewrites_first_bytes() {
+        let mut bus = Bus::new(vec![0u8; 0x8000]);
+        bus.reset();
+        for i in 0..16u16 {
+            bus.write(0xFF30 + i, (i as u8) * 0x11);
+        }
+        bus.corrupt_wave_ram(9);
+        assert_eq!(bus.read(0xFF30), 0x88);
+        assert_eq!(bus.read(0xFF31), 0x99);
+        assert_eq!(bus.read(0xFF32), 0xAA);
+        assert_eq!(bus.read(0xFF33), 0xBB);
+        assert_eq!(bus.read(0xFF34), 0x44);
     }
 }

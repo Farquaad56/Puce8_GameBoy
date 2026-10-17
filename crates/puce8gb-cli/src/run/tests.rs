@@ -248,6 +248,27 @@ fn e04_06_cart_ram_result_text_is_scanned_like_serial() {
 }
 
 #[test]
+fn e04_07_cart_ram_text_longer_than_256_bytes_is_scanned() {
+    let mut dmg = Dmg::new(&test_rom(&[])).expect("valid ROM");
+    let args = args(400, Some("Passed"));
+    // Blargg cart-RAM result block: signature $DE $B0 $61 at $A001-$A003, status not
+    // running ($A000 != $80), zero-terminated text starting at $A004 (E04_07). The text
+    // is longer than the old 256-byte buffer: the verdict must still be scanned.
+    dmg.bus.sram = vec![0u8; 0x2000];
+    dmg.bus.sram[1] = 0xDE;
+    dmg.bus.sram[2] = 0xB0;
+    dmg.bus.sram[3] = 0x61;
+    let mut text = vec![b'A'; 300];
+    text.extend_from_slice(b"Passed\0");
+    dmg.bus.sram[4..4 + text.len()].copy_from_slice(&text);
+    dmg.bus.sram[0] = 0x00;
+    match run_machine(&mut dmg, &args) {
+        Outcome::Found(s) => assert!(s.ends_with("Passed")),
+        other => panic!("unexpected outcome {other:?}"),
+    }
+}
+
+#[test]
 fn e04_06_cart_ram_failure_text_is_reported() {
     let mut dmg = Dmg::new(&test_rom(&[])).expect("valid ROM");
     let args = args(400, Some("Passed"));

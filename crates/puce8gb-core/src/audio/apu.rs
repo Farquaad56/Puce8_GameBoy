@@ -23,6 +23,8 @@ const DIV_APU_BIT: u8 = 0x10;
 pub struct Apu {
     /// Index 0..=7 of the NEXT step to run.
     pub step: u8,
+    /// APU power state (NR52 bit 7), tracked to detect power-on / power-off transitions (E04_07).
+    powered: bool,
     /// Bit 4 of DIV as seen on the previous tick; a falling edge runs one step.
     prev_div_bit: bool,
     pub pulse1: Pulse,
@@ -34,6 +36,7 @@ pub struct Apu {
 impl Apu {
     /// Synchronize with the current DIV value at power-up (E04_01).
     pub fn reset(&mut self, div: u8) {
+        self.powered = true;
         self.step = 0;
         self.prev_div_bit = div & DIV_APU_BIT != 0;
         self.pulse1 = Pulse::post_boot();
@@ -110,8 +113,8 @@ impl Apu {
         }
     }
 
-    /// Accepted register write (NR10-NR25 only while powered; NR52 always). Behaviour of length
-    /// registers while powered off and of NRx2 writes while a channel plays: UNKNOWN - to confirm.
+    /// Accepted register write (NR10-NR25 only while powered; NR52 always). Behaviour of NRx2
+    /// writes while a channel plays: UNKNOWN - to confirm.
     /// Wave RAM access while channel 3 plays: UNKNOWN - to confirm (note 03b).
     pub fn write_reg(&mut self, addr: u16, v: u8) {
         let skips_length = self.step & 1 == 1;
@@ -139,6 +142,9 @@ impl Apu {
                 self.wave
                     .write_length_enable(v & 0x40 != 0, skips_length, trigger);
                 if trigger {
+                    if let Some(i) = self.wave.corruption_index() {
+                        self.wave.pending_corruption = Some(i);
+                    }
                     self.wave.trigger_with(skips_length);
                 }
             }
@@ -154,10 +160,28 @@ impl Apu {
                 }
             }
             0xFF26 if v & 0x80 == 0 => {
+                // DMG: length counters are unaffected by power (gbdev wiki "Gameboy sound hardware").
+                let (l1, l2, l3, l4) = (
+                    self.pulse1.length,
+                    self.pulse2.length,
+                    self.wave.length,
+                    self.noise.length,
+                );
                 self.pulse1 = Pulse::default();
                 self.pulse2 = Pulse::default();
                 self.wave = Wave::default();
                 self.noise = Noise::default();
+                self.pulse1.length = l1;
+                self.pulse2.length = l2;
+                self.wave.length = l3;
+                self.noise.length = l4;
+                self.powered = false;
+            }
+            // Power on: the frame sequencer restarts so that the next step is 0; the 512 Hz
+            // divider is unaffected (gbdev wiki "Gameboy sound hardware").
+            0xFF26 if !self.powered => {
+                self.powered = true;
+                self.step = 0;
             }
             _ => {}
         }
@@ -366,6 +390,8 @@ mod tests {
         apu.write_reg(0xFF1D, 0xFF);
         apu.write_reg(0xFF1E, 0x87);
         apu.tick(0x00);
+        assert_eq!(apu.wave.pos, 0);
+        apu.tick(0x00);
         assert_eq!(apu.wave.pos, 2);
         assert_eq!(apu.wave.sample, 3);
     }
@@ -468,5 +494,63 @@ mod tests {
         apu.write_reg(0xFF14, 0x40); // length enable without trigger in the skipping phase
         assert_eq!(apu.pulse1.length, 0);
         assert_eq!(apu.status() & 1, 0);
+    }
+
+    #[test]
+    fn e04_07_power_on_restarts_frame_sequencer_at_step_0() {
+        let mut apu = Apu {
+            step: 5,
+            ..Default::default()
+        };
+        apu.write_reg(0xFF26, 0x80);
+        assert_eq!(apu.step, 0);
+        apu.step = 5;
+        apu.write_reg(0xFF26, 0x80);
+        assert_eq!(apu.step, 5); // already on: no restart
+    }
+
+    #[test]
+    fn e04_07_power_off_keeps_length_counters_and_clears_the_rest() {
+        let mut apu = Apu::default();
+        apu.write_reg(0xFF26, 0x80);
+        apu.write_reg(0xFF11, 0xFE); // duty 3, length 64 - 0x3E = 2
+        apu.write_reg(0xFF16, 0x30); // length 16
+        apu.write_reg(0xFF1B, 0xF0); // length 256 - 240 = 16
+        apu.write_reg(0xFF20, 0x38); // length 64 - 56 = 8
+        apu.write_reg(0xFF14, 0x40); // pulse1 length enable
+        apu.write_reg(0xFF26, 0x00);
+        assert_eq!(apu.pulse1.length, 2);
+        assert_eq!(apu.pulse2.length, 16);
+        assert_eq!(apu.wave.length, 16);
+        assert_eq!(apu.noise.length, 8);
+        assert!(!apu.pulse1.length_enable);
+        assert_eq!(apu.pulse1.duty, 0);
+        assert_eq!(apu.status(), 0);
+    }
+
+    #[test]
+    fn e04_07_retrigger_inside_the_read_window_records_corruption() {
+        let mut apu = Apu::default();
+        apu.write_reg(0xFF26, 0x80);
+        apu.write_reg(0xFF1A, 0x80);
+        apu.write_reg(0xFF1D, 0xFD);
+        apu.write_reg(0xFF1E, 0x87);
+        assert_eq!(apu.wave.pending_corruption, None);
+        for _ in 0..4 {
+            apu.tick(0);
+        }
+        apu.write_reg(0xFF1E, 0x87);
+        assert_eq!(apu.wave.pending_corruption, Some(1));
+    }
+
+    #[test]
+    fn e04_07_retrigger_outside_the_read_window_records_nothing() {
+        let mut apu = Apu::default();
+        apu.write_reg(0xFF26, 0x80);
+        apu.write_reg(0xFF1A, 0x80);
+        apu.write_reg(0xFF1E, 0x80);
+        apu.tick(0);
+        apu.write_reg(0xFF1E, 0x80);
+        assert_eq!(apu.wave.pending_corruption, None);
     }
 }
