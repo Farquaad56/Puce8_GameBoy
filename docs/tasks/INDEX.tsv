@@ -111,6 +111,7 @@ E05_03	CODE	0	docs/tasks/E05/E05_03.md	MBC2
 E05_04	CODE	0	docs/tasks/E05/E05_04.md	MBC3 with RTC
 E05_05	CODE	0	docs/tasks/E05/E05_05.md	MBC5
 E05_06	CODE	1	docs/tasks/E05/E05_06.md	Battery RAM API
+E05_07	CODE	0	docs/tasks/E05/E05_07.md	Wire mappers into the bus
 E06_01	CODE	0	docs/tasks/E06/E06_01.md	CLI suite runner
 E06_02	TEST	0	docs/tasks/E06/E06_02.md	Fill the manifest
 E06_03	TEST	1	docs/tasks/E06/E06_03.md	Baseline and regression rule
