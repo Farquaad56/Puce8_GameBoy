@@ -225,7 +225,7 @@ impl Bus {
         self.p1_prev = p1_read(self.io[0x00], &self.input) & 0x0F; // P1 low nibble at power-up (E05_01)
     }
 
-    /// CPU accesses that collide with the OAM DMA: OAM and the bus of the DMA source. Hardware-verified by mooneye call_timing (DMA from VRAM leaves WRAM/echo usable). The value a colliding read returns is the DMA byte on a real DMG: UNKNOWN - to confirm, $FF is used. DMA sources $E0-$FF: UNKNOWN - to confirm.
+    /// CPU accesses that collide with the OAM DMA: OAM and the bus of the DMA source. Hardware-verified by mooneye call_timing (DMA from VRAM leaves WRAM/echo usable). The value a colliding read returns is the DMA byte on a real DMG: UNKNOWN - to confirm, $FF is used. DMA sources $E0-$FF map to $C0-$DF (FIX_06).
     fn dma_blocks(&self, addr: u16) -> bool {
         if !self.dma_active {
             return false;
@@ -347,7 +347,9 @@ impl Bus {
             0xFF07 => self.timer.write_tac(val), // TAC ($FF07, note 01b)
             0xFF46 => {
                 self.io[0x46] = val; // DMA reads back the last written value (E03_06 spec)
-                self.dma_pending_src = u16::from(val) << 8; // source base of the next transfer, V * 0x100 (FIX_02); sources above 0xDF: UNKNOWN - to confirm (note 03a)
+                                     // Sources $E0-$FF read the echo of WRAM: the high byte is mapped to $C0-$DF (mooneye oam_dma/sources-GS, FIX_06). The register keeps the written value.
+                let src_hi = if val >= 0xE0 { val - 0x20 } else { val };
+                self.dma_pending_src = u16::from(src_hi) << 8; // source base of the next transfer, V * 0x100 (FIX_02)
                 self.dma_start_delay = DMA_START_DELAY_STEPS; // start delay after the write cycle (FIX_02); an earlier transfer keeps running until the new one starts
             }
             0xFF26 => {
@@ -1722,5 +1724,50 @@ mod tests {
         assert_eq!(bus.read(0xFF45), 0x12);
         bus.write(0xFF47, 0x1B); // SCY ($FF47) stays plain R/W through the IO file (FIX_05)
         assert_eq!(bus.read(0xFF47), 0x1B);
+    }
+
+    fn fix_06_run(bus: &mut Bus, v: u8) {
+        bus.write(0xFF46, v); // start the OAM DMA from V * 0x100 (E03_06 spec)
+        for _ in 0..162 {
+            bus.dma_step(); // two M-cycles of start delay plus the 160-byte transfer (FIX_02)
+        }
+    }
+
+    #[test]
+    fn fix_06_source_e0_is_the_echo_of_c000() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xC000, 0x11); // WRAM byte at $C000 (mooneye oam_dma/sources-GS)
+        bus.write(0xC09F, 0x22); // WRAM byte at $C09F
+        fix_06_run(&mut bus, 0xE0); // source $E0 reads the echo of $C000 (FIX_06)
+        assert_eq!(bus.oam[0], 0x11);
+        assert_eq!(bus.oam[159], 0x22);
+    }
+
+    #[test]
+    fn fix_06_source_fe_is_the_echo_of_de00() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xDE00, 0x33); // WRAM byte at $DE00 (mooneye oam_dma/sources-GS)
+        fix_06_run(&mut bus, 0xFE); // source $FE reads the echo of $DE00 (FIX_06)
+        assert_eq!(bus.oam[0], 0x33);
+    }
+
+    #[test]
+    fn fix_06_source_ff_is_the_echo_of_df00() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xDF00, 0x44); // WRAM byte at $DF00 (mooneye oam_dma/sources-GS)
+        fix_06_run(&mut bus, 0xFF); // source $FF reads the echo of $DF00 (FIX_06)
+        assert_eq!(bus.oam[0], 0x44);
+        assert_eq!(bus.read(0xFF46), 0xFF); // the register keeps the written value (E03_06 spec)
+    }
+
+    #[test]
+    fn fix_06_source_ff_blocks_the_external_bus() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xC000, 0x55); // WRAM byte before the transfer starts (mooneye oam_dma/sources-GS)
+        bus.write(0xFF46, 0xFF); // start the transfer from the echo of $DF00 (FIX_06)
+        bus.dma_step(); // M-cycle 1 of the start delay after the write cycle (FIX_02)
+        bus.dma_step(); // M-cycle 2: the transfer is now running (FIX_02)
+        assert_eq!(bus.read(0xC000), 0xFF); // WRAM is blocked: same external bus as the DMA source (E03_15 spec)
+        assert!(bus.dma_active());
     }
 }
