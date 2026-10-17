@@ -109,6 +109,9 @@ pub fn run_frames(rom: &[u8], args: &RunArgs, frames: u64) -> (Outcome, Vec<u32>
 pub fn run_machine(dmg: &mut Dmg, args: &RunArgs) -> Outcome {
     let mut collected = String::new();
     let mut buf = [0u8; 64];
+    // Blargg cart-RAM result block (dmg_sound ROMs): bytes already scanned.
+    let mut cart_buf = [0u8; 256];
+    let mut cart_len = 0usize;
     // Remaining traced instructions (task C01_47); 0 disables tracing.
     let mut trace_left = args.trace;
     // One M-cycle is 4 dots; the CPU runs every 4th dot (task C01_02).
@@ -144,6 +147,23 @@ pub fn run_machine(dmg: &mut Dmg, args: &RunArgs) -> Outcome {
                 Scan::Failed => return Outcome::Failed(collected),
                 Scan::Continue => {}
             }
+        }
+        // Blargg cart-RAM result block (dmg_sound ROMs): feed the newly appeared bytes
+        // into the same serial scan as $FF01 output (E04_06).
+        let cn = dmg.bus.cart_result(&mut cart_buf);
+        if cn > cart_len {
+            print!("{}", String::from_utf8_lossy(&cart_buf[cart_len..cn]));
+            let _ = std::io::stdout().flush();
+            match scan_serial(
+                &mut collected,
+                &cart_buf[cart_len..cn],
+                args.expect_serial.as_deref(),
+            ) {
+                Scan::Found => return Outcome::Found(collected),
+                Scan::Failed => return Outcome::Failed(collected),
+                Scan::Continue => {}
+            }
+            cart_len = cn;
         }
         // Once per M-cycle after the ticks: stop on an unimplemented opcode (C01_46).
         if let Some(outcome) = check_unimplemented(dmg.cpu.unimplemented()) {

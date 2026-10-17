@@ -93,3 +93,4 @@ Voir docs/annexes/notes/09_test_roms.md.
 - C01_16 blocked: ROM 06 reaches opcode 0xCB at PC=0xC06A which is outside the LIST of C01_16
 - C01_41 blocked: halt_bug.gb is screen-only: needs PPU and E03_16
 - E03_04 blocked after 5 failed checks - needs human review
+- E04_06 blocked after 5 failed checks - needs human review

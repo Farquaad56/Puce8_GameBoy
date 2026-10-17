@@ -100,12 +100,13 @@ impl Apu {
         p.set_freq(f);
     }
 
-    fn write_nrx4(p: &mut Pulse, v: u8) {
+    fn write_nrx4(p: &mut Pulse, v: u8, skips_length: bool) {
         let f = (p.freq & 0x00FF) | (u16::from(v & 0x07) << 8);
         p.set_freq(f);
-        p.length_enable = v & 0x40 != 0;
-        if v & 0x80 != 0 {
-            p.trigger();
+        let trigger = v & 0x80 != 0;
+        p.write_length_enable(v & 0x40 != 0, skips_length, trigger);
+        if trigger {
+            p.trigger_with(skips_length);
         }
     }
 
@@ -113,16 +114,17 @@ impl Apu {
     /// registers while powered off and of NRx2 writes while a channel plays: UNKNOWN - to confirm.
     /// Wave RAM access while channel 3 plays: UNKNOWN - to confirm (note 03b).
     pub fn write_reg(&mut self, addr: u16, v: u8) {
+        let skips_length = self.step & 1 == 1;
         match addr {
             0xFF10 => self.pulse1.write_nr10(v),
             0xFF11 => self.pulse1.write_nrx1(v),
             0xFF12 => self.pulse1.write_nrx2(v),
             0xFF13 => Self::write_nrx3(&mut self.pulse1, v),
-            0xFF14 => Self::write_nrx4(&mut self.pulse1, v),
+            0xFF14 => Self::write_nrx4(&mut self.pulse1, v, skips_length),
             0xFF16 => self.pulse2.write_nrx1(v),
             0xFF17 => self.pulse2.write_nrx2(v),
             0xFF18 => Self::write_nrx3(&mut self.pulse2, v),
-            0xFF19 => Self::write_nrx4(&mut self.pulse2, v),
+            0xFF19 => Self::write_nrx4(&mut self.pulse2, v, skips_length),
             0xFF1A => self.wave.write_nr30(v),
             0xFF1B => self.wave.write_nr31(v),
             0xFF1C => self.wave.write_nr32(v),
@@ -133,18 +135,22 @@ impl Apu {
             0xFF1E => {
                 let f = (self.wave.freq & 0x00FF) | (u16::from(v & 0x07) << 8);
                 self.wave.set_freq(f);
-                self.wave.length_enable = v & 0x40 != 0;
-                if v & 0x80 != 0 {
-                    self.wave.trigger();
+                let trigger = v & 0x80 != 0;
+                self.wave
+                    .write_length_enable(v & 0x40 != 0, skips_length, trigger);
+                if trigger {
+                    self.wave.trigger_with(skips_length);
                 }
             }
             0xFF20 => self.noise.write_nr41(v),
             0xFF21 => self.noise.write_nr42(v),
             0xFF22 => self.noise.write_nr43(v),
             0xFF23 => {
-                self.noise.length_enable = v & 0x40 != 0;
-                if v & 0x80 != 0 {
-                    self.noise.trigger();
+                let trigger = v & 0x80 != 0;
+                self.noise
+                    .write_length_enable(v & 0x40 != 0, skips_length, trigger);
+                if trigger {
+                    self.noise.trigger_with(skips_length);
                 }
             }
             0xFF26 if v & 0x80 == 0 => {
@@ -422,5 +428,45 @@ mod tests {
         assert_eq!(apu.noise.lfsr, 0);
         apu.tick(0x00);
         assert_eq!(apu.noise.lfsr, 0x8000);
+    }
+
+    #[test]
+    fn e04_06_nrx4_trigger_in_skipping_phase_reloads_63() {
+        let mut apu = Apu {
+            step: 1, // the next frame sequencer step does not clock length
+            ..Default::default()
+        };
+        apu.write_reg(0xFF12, 0xF3); // DAC on
+        apu.write_reg(0xFF11, 0x3F); // length = 1
+        apu.write_reg(0xFF14, 0xC0); // trigger with length enable in the skipping phase
+        assert_eq!(apu.pulse1.length, 63);
+        assert!(apu.pulse1.enabled);
+        assert!(apu.pulse1.length_enable);
+    }
+
+    #[test]
+    fn e04_06_nrx4_trigger_in_clocking_phase_keeps_length() {
+        let mut apu = Apu {
+            step: 0, // the next frame sequencer step clocks length
+            ..Default::default()
+        };
+        apu.write_reg(0xFF12, 0xF3); // DAC on
+        apu.write_reg(0xFF11, 0x3F); // length = 1
+        apu.write_reg(0xFF14, 0xC0); // trigger with length enable in the clocking phase
+        assert_eq!(apu.pulse1.length, 1);
+        assert!(apu.pulse1.enabled);
+    }
+
+    #[test]
+    fn e04_06_nrx4_length_enable_in_skipping_phase_can_disable_channel() {
+        let mut apu = Apu {
+            step: 1, // the next frame sequencer step does not clock length
+            ..Default::default()
+        };
+        apu.pulse1.enabled = true;
+        apu.write_reg(0xFF11, 0x3F); // length = 1
+        apu.write_reg(0xFF14, 0x40); // length enable without trigger in the skipping phase
+        assert_eq!(apu.pulse1.length, 0);
+        assert_eq!(apu.status() & 1, 0);
     }
 }

@@ -228,3 +228,38 @@ fn e03_07_hash_is_deterministic_across_two_runs() {
     let (_, f2) = run_frames(&rom, &args(0, None), 2);
     assert_eq!(crate::hash::hash_line(&f1), crate::hash::hash_line(&f2));
 }
+
+#[test]
+fn e04_06_cart_ram_result_text_is_scanned_like_serial() {
+    let mut dmg = Dmg::new(&test_rom(&[])).expect("valid ROM");
+    let args = args(400, Some("Passed"));
+    // Blargg cart-RAM result block: signature $DE $B0 $61 at $A001-$A003, status not
+    // running ($A000 != $80), zero-terminated text starting at $A004 (E04_06).
+    dmg.bus.sram = vec![0u8; 0x2000];
+    dmg.bus.sram[1] = 0xDE;
+    dmg.bus.sram[2] = 0xB0;
+    dmg.bus.sram[3] = 0x61;
+    dmg.bus.sram[4..11].copy_from_slice(b"Passed\0");
+    dmg.bus.sram[0] = 0x00;
+    assert_eq!(
+        run_machine(&mut dmg, &args),
+        Outcome::Found("Passed".to_string())
+    );
+}
+
+#[test]
+fn e04_06_cart_ram_failure_text_is_reported() {
+    let mut dmg = Dmg::new(&test_rom(&[])).expect("valid ROM");
+    let args = args(400, Some("Passed"));
+    // Same cart-RAM result block carrying the failure marker text (E04_06).
+    dmg.bus.sram = vec![0u8; 0x2000];
+    dmg.bus.sram[1] = 0xDE;
+    dmg.bus.sram[2] = 0xB0;
+    dmg.bus.sram[3] = 0x61;
+    dmg.bus.sram[4..14].copy_from_slice(b"Failed #3\0");
+    dmg.bus.sram[0] = 0x03;
+    assert_eq!(
+        run_machine(&mut dmg, &args),
+        Outcome::Failed("Failed #3".to_string())
+    );
+}

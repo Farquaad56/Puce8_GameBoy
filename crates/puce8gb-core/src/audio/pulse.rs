@@ -30,6 +30,7 @@ pub struct Pulse {
     sweep_timer: u8,
     sweep_enabled: bool,
     shadow: u16,
+    sweep_negate_used: bool,
 }
 
 impl Pulse {
@@ -64,14 +65,19 @@ impl Pulse {
 
     /// NR10 (channel 1 only): pace bits 6-4, direction bit 3 (1 = decrease), shift bits 2-0.
     pub fn write_nr10(&mut self, v: u8) {
+        let negate = v & 0x08 != 0;
+        if self.sweep_negate && !negate && self.sweep_negate_used {
+            self.enabled = false;
+        }
         self.sweep_pace = (v >> 4) & 0x07;
-        self.sweep_negate = v & 0x08 != 0;
+        self.sweep_negate = negate;
         self.sweep_shift = v & 0x07;
     }
 
-    fn sweep_calc(&self) -> u16 {
+    fn sweep_calc(&mut self) -> u16 {
         let delta = self.shadow >> self.sweep_shift;
         if self.sweep_negate {
+            self.sweep_negate_used = true;
             self.shadow - delta
         } else {
             self.shadow + delta
@@ -116,9 +122,18 @@ impl Pulse {
 
     /// Trigger (NRx4 bit 7).
     pub fn trigger(&mut self) {
+        self.trigger_with(false);
+    }
+
+    /// Trigger; `early_length_clock` is true when the next frame sequencer step does not clock length.
+    pub fn trigger_with(&mut self, early_length_clock: bool) {
         self.enabled = self.dac_on;
         if self.length == 0 {
-            self.length = 64;
+            self.length = if early_length_clock && self.length_enable {
+                63
+            } else {
+                64
+            };
         }
         self.timer = self.period();
         self.env_timer = if self.env_period == 0 {
@@ -127,6 +142,7 @@ impl Pulse {
             self.env_period
         };
         self.volume = self.env_initial;
+        self.sweep_negate_used = false;
         self.shadow = self.freq;
         self.sweep_timer = if self.sweep_pace == 0 {
             8
@@ -145,6 +161,19 @@ impl Pulse {
         if self.timer == 0 {
             self.timer = self.period();
             self.duty_pos = (self.duty_pos + 1) & 7;
+        }
+    }
+
+    /// NRx4 bit 6 written; `skips_length` is true when the next frame sequencer step does not clock
+    /// length; `trigger` is the NRx4 bit 7 of the same write.
+    pub fn write_length_enable(&mut self, enable: bool, skips_length: bool, trigger: bool) {
+        let was = self.length_enable;
+        self.length_enable = enable;
+        if skips_length && enable && !was && self.length > 0 {
+            self.length -= 1;
+            if self.length == 0 && !trigger {
+                self.enabled = false;
+            }
         }
     }
 
@@ -382,5 +411,124 @@ mod tests {
         assert_eq!(p.freq, 800);
         p.clock_sweep();
         assert_eq!(p.freq, 1200);
+    }
+
+    #[test]
+    fn e04_06_clearing_negate_after_a_negate_calculation_disables_channel() {
+        let mut p = loud();
+        p.set_freq(800);
+        p.write_nr10(0x19);
+        p.trigger();
+        assert!(p.enabled);
+        p.write_nr10(0x11);
+        assert!(!p.enabled);
+    }
+
+    #[test]
+    fn e04_06_clearing_negate_without_a_calculation_keeps_channel() {
+        let mut p = loud();
+        p.set_freq(800);
+        p.write_nr10(0x18);
+        p.trigger();
+        p.write_nr10(0x10);
+        assert!(p.enabled);
+    }
+
+    #[test]
+    fn e04_06_sweep_clock_counts_as_a_negate_calculation() {
+        let mut p = loud();
+        p.set_freq(800);
+        p.write_nr10(0x18);
+        p.trigger();
+        p.clock_sweep();
+        assert!(p.enabled);
+        p.write_nr10(0x10);
+        assert!(!p.enabled);
+    }
+
+    #[test]
+    fn e04_06_trigger_forgets_earlier_negate_calculations() {
+        let mut p = loud();
+        p.set_freq(800);
+        p.write_nr10(0x19);
+        p.trigger();
+        p.write_nr10(0x11);
+        assert!(!p.enabled);
+        p.write_nr10(0x18);
+        p.trigger();
+        assert!(p.enabled);
+        p.write_nr10(0x10);
+        assert!(p.enabled);
+    }
+
+    #[test]
+    fn e04_06_length_enable_in_skipping_phase_clocks_length() {
+        let mut p = Pulse::default();
+        p.write_nrx1(0x3E); // length = 2
+        p.enabled = true;
+        p.write_length_enable(true, true, false);
+        assert_eq!(p.length, 1);
+        assert!(p.enabled);
+        assert!(p.length_enable);
+    }
+
+    #[test]
+    fn e04_06_length_enable_extra_clock_to_zero_disables_channel() {
+        let mut p = Pulse::default();
+        p.write_nrx1(0x3F); // length = 1
+        p.enabled = true;
+        p.write_length_enable(true, true, false);
+        assert_eq!(p.length, 0);
+        assert!(!p.enabled);
+    }
+
+    #[test]
+    fn e04_06_length_enable_extra_clock_to_zero_keeps_channel_when_triggering() {
+        let mut p = Pulse::default();
+        p.write_nrx1(0x3F); // length = 1
+        p.enabled = true;
+        p.write_length_enable(true, true, true);
+        assert_eq!(p.length, 0);
+        assert!(p.enabled);
+    }
+
+    #[test]
+    fn e04_06_length_enable_without_skipping_phase_does_not_clock() {
+        let mut p = Pulse::default();
+        p.write_nrx1(0x3E); // length = 2
+        p.write_length_enable(true, false, false);
+        assert_eq!(p.length, 2);
+    }
+
+    #[test]
+    fn e04_06_length_enable_already_set_does_not_clock() {
+        let mut p = Pulse::default();
+        p.write_nrx1(0x3E); // length = 2
+        p.length_enable = true;
+        p.write_length_enable(true, true, false);
+        assert_eq!(p.length, 2);
+    }
+
+    #[test]
+    fn e04_06_trigger_reload_is_63_in_skipping_phase_with_length_enabled() {
+        let mut p = Pulse::default();
+        p.write_nrx2(0xF3); // DAC on
+        p.length_enable = true;
+        p.trigger_with(true);
+        assert_eq!(p.length, 63);
+        assert!(p.enabled);
+    }
+
+    #[test]
+    fn e04_06_trigger_reload_is_64_otherwise() {
+        let mut p1 = Pulse::default();
+        p1.write_nrx2(0xF3); // DAC on
+        p1.length_enable = true;
+        p1.trigger_with(false);
+        assert_eq!(p1.length, 64);
+        let mut p2 = Pulse::default();
+        p2.write_nrx2(0xF3); // DAC on, length enable off
+        p2.trigger_with(true);
+        assert_eq!(p2.length, 64);
     }
 }

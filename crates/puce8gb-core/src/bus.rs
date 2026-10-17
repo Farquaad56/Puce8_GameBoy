@@ -53,6 +53,9 @@ pub struct Bus {
     dma_index: u8,
     /// Last accepted APU register write (address, value), drained by the machine each M-cycle (E04_02).
     pub apu_write: Option<(u16, u8)>,
+    /// Cartridge RAM A000-BFFF (8 KiB) of an MBC1+RAM cartridge; empty otherwise.
+    /// Interim shortcut before the E05 mapper work: no banking, no RAM-enable gate.
+    pub sram: Vec<u8>,
     /// Debug tool for trace comparison, task C01_49: when Some(v), every read of $FF44
     /// returns v instead of the PPU scanline; None (default) keeps normal behaviour.
     ly_override: Option<u8>,
@@ -63,6 +66,10 @@ pub struct Bus {
 impl Bus {
     /// Build a bus around the cartridge ROM image, all RAM zeroed.
     pub fn new(rom: Vec<u8>) -> Self {
+        let sram = match (rom.get(0x147).copied(), rom.get(0x149).copied()) {
+            (Some(0x02 | 0x03), Some(0x02)) => vec![0x00; 0x2000],
+            _ => Vec::new(),
+        };
         Bus {
             rom,
             vram: [0x00; 0x2000],
@@ -72,7 +79,7 @@ impl Bus {
             io: [0xFF; IO_SIZE],
             serial: [0x00; 256],
             serial_len: 0,
-            ly: 0,                   // LY ($FF44) post-boot value (note 08, C01_15)
+            ly: 0,             // LY ($FF44) post-boot value (note 08, C01_15)
             ppu_mode: 2, // PPU mode at the start of line 0 is OAM scan (E03_01); Machine::tick keeps it current
             vram_open: true, // VRAM access allowed until Machine::tick mirrors the PPU state (E03_10)
             oam_open: true, // OAM access allowed until Machine::tick mirrors the PPU state (E03_10)
@@ -80,7 +87,8 @@ impl Bus {
             dma_src: 0,     // source base set by a write to $FF46 (E03_06 spec)
             dma_index: 0,   // next destination index of the running transfer (E03_06 spec)
             apu_write: None, // no pending APU register write at power-up (E04_02)
-            ly_override: None, // no debug override by default (C01_49)
+            sram,
+            ly_override: None,       // no debug override by default (C01_49)
             timer: Timer::default(), // DIV/TIMA/TMA/TAC are set in reset() (note 08)
         }
     }
@@ -92,6 +100,7 @@ impl Bus {
         // so it carries no separate state.
         self.wram.fill(0x00);
         self.hram.fill(0x00);
+        self.sram.fill(0x00);
         self.serial_len = 0; // no captured serial bytes at power-up (C01_03)
         self.ly = 0; // LY ($FF44) post-boot value (note 08, C01_15)
         self.ppu_mode = 2; // PPU mode restarts at the start of line 0: OAM scan (E03_01)
@@ -168,7 +177,11 @@ impl Bus {
                     0xFF // blocked by the PPU mode: reads $FF (E03_10 spec)
                 }
             }
-            0xA000..=0xBFFF => 0xFF, // cartridge SRAM: unmapped on a ROM-only cart (decision A_06)
+            0xA000..=0xBFFF => self
+                .sram
+                .get((addr - 0xA000) as usize)
+                .copied()
+                .unwrap_or(0xFF), // cartridge SRAM (E04_06); empty on a ROM-only cart reads $FF (decision A_06)
             0xC000..=0xDFFF => {
                 // WRAM: lower 14 bits of the address index into the 8 KiB array.
                 self.wram[((addr - 0xC000) as usize) & 0x3FFF]
@@ -196,6 +209,8 @@ impl Bus {
             0xFF10..=0xFF26 => {
                 self.io[(addr - 0xFF00) as usize] | APU_READ_MASK[(addr - 0xFF10) as usize]
             } // APU registers with read masks (E04_01 spec)
+            // Unassigned I/O $FF27-$FF2F: always read $FF (dmg_sound 01-registers test 2).
+            0xFF27..=0xFF2F => 0xFF,
             0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.io[IO_SIZE - 1], // IE (decision A_02)
@@ -229,7 +244,11 @@ impl Bus {
                     self.vram[(addr - 0x8000) as usize] = val;
                 } // blocked by the PPU mode: writes are ignored (E03_10 spec)
             }
-            0xA000..=0xBFFF => {} // cartridge SRAM: unmapped on a ROM-only cart (decision A_06)
+            0xA000..=0xBFFF => {
+                if let Some(b) = self.sram.get_mut((addr - 0xA000) as usize) {
+                    *b = val;
+                } // cartridge SRAM (E04_06); writes are ignored on a ROM-only cart (decision A_06)
+            }
             0xC000..=0xDFFF => self.wram[(addr - 0xC000) as usize] = val,
             0xE000..=0xFDFF => {
                 // Echo RAM: only the lower 13 bits of the address are connected, so it wraps onto
@@ -274,6 +293,8 @@ impl Bus {
                     self.apu_write = Some((addr, val));
                 }
             }
+            // Unassigned I/O $FF27-$FF2F: writes are ignored (dmg_sound 01-registers test 2).
+            0xFF27..=0xFF2F => {}
             0xFF00..=0xFF7F => {
                 self.io[(addr - 0xFF00) as usize] = val;
                 // SC ($FF02): a transfer started with the internal clock (bit7 + bit0 set,
@@ -371,7 +392,11 @@ impl Bus {
         match addr {
             0x0000..=0x7FFF => self.rom.get(addr as usize).copied().unwrap_or(0xFF), // ROM-only cart (decision A_06): past the image is open bus
             0x8000..=0x9FFF => self.vram[(addr - 0x8000) as usize],
-            0xA000..=0xBFFF => 0xFF, // cartridge SRAM: unmapped on a ROM-only cart (decision A_06)
+            0xA000..=0xBFFF => self
+                .sram
+                .get((addr - 0xA000) as usize)
+                .copied()
+                .unwrap_or(0xFF), // cartridge SRAM (E04_06); empty on a ROM-only cart reads $FF (decision A_06)
             0xC000..=0xDFFF => self.wram[(addr - 0xC000) as usize],
             0xE000..=0xFDFF => {
                 // Echo RAM: only the lower 13 bits of the address are connected, so it wraps onto
@@ -391,6 +416,26 @@ impl Bus {
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.io[IO_SIZE - 1], // IE (decision A_02)
         }
+    }
+
+    /// Blargg result block in cartridge RAM (dmg_sound ROMs): when $A001-$A003 hold
+    /// $DE $B0 $61 and the status byte $A000 is not $80 (still running), copy the
+    /// zero-terminated text that starts at $A004 into `out` and return its length.
+    /// Returns 0 when there is no SRAM, no signature, or the ROM is still running.
+    pub fn cart_result(&self, out: &mut [u8]) -> usize {
+        let s = &self.sram;
+        if s.len() < 4 || s[1] != 0xDE || s[2] != 0xB0 || s[3] != 0x61 || s[0] == 0x80 {
+            return 0;
+        }
+        let mut n = 0;
+        for &b in &s[4..] {
+            if b == 0 || n == out.len() {
+                break;
+            }
+            out[n] = b;
+            n += 1;
+        }
+        n
     }
 }
 
@@ -1131,5 +1176,70 @@ mod tests {
         bus.write(0xFF24, 0x5A);
         bus.write(0xFF25, 0xA5);
         assert_eq!(bus.audio_pan(), (0x5A, 0xA5));
+    }
+
+    #[test]
+    fn e04_06_registers_read_back_written_value_or_mask() {
+        let mut bus = Bus::new(vec![0u8; 0x8000]);
+        bus.reset();
+        let masks: [u8; 22] = [
+            0x80, 0x3F, 0x00, 0xFF, 0xBF, 0xFF, 0x3F, 0x00, 0xFF, 0xBF, 0x7F, 0xFF, 0x9F, 0xFF,
+            0xBF, 0xFF, 0xFF, 0x00, 0x00, 0xBF, 0x00, 0x00,
+        ];
+        for d in 0..=255u8 {
+            for addr in 0xFF10u16..=0xFF3F {
+                if addr == 0xFF26 {
+                    continue;
+                }
+                let mask = match addr {
+                    0xFF10..=0xFF25 => masks[usize::from(addr - 0xFF10)],
+                    0xFF27..=0xFF2F => 0xFF,
+                    _ => 0x00,
+                };
+                bus.write(addr, d);
+                assert_eq!(bus.read(addr), d | mask, "addr {addr:04X} value {d:02X}");
+                bus.write(0xFF25, 0x00);
+                bus.write(0xFF1A, 0x00);
+            }
+        }
+    }
+
+    #[test]
+    fn e04_06_sram_exists_only_on_mbc1_ram_cart() {
+        let mut r = test_rom(32 * 1024);
+        r[0x147] = 0x03;
+        r[0x149] = 0x02;
+        let mut bus = Bus::new(r);
+        bus.write(0xA000, 0x5A);
+        bus.write(0xBFFF, 0x3C);
+        assert_eq!(bus.read(0xA000), 0x5A);
+        assert_eq!(bus.read(0xBFFF), 0x3C);
+        assert_eq!(bus.peek(0xA000), 0x5A);
+        let mut plain = Bus::new(test_rom(32 * 1024));
+        plain.write(0xA000, 0x5A);
+        assert_eq!(plain.read(0xA000), 0xFF);
+    }
+
+    #[test]
+    fn e04_06_cart_result_needs_signature_and_finished_status() {
+        let mut r = test_rom(32 * 1024);
+        r[0x147] = 0x03;
+        r[0x149] = 0x02;
+        let mut bus = Bus::new(r);
+        let mut out = [0u8; 16];
+        for (i, b) in b"Passed\0".iter().enumerate() {
+            bus.write(0xA004 + i as u16, *b);
+        }
+        assert_eq!(bus.cart_result(&mut out), 0); // no signature yet
+        bus.write(0xA001, 0xDE);
+        bus.write(0xA002, 0xB0);
+        bus.write(0xA003, 0x61);
+        bus.write(0xA000, 0x80);
+        assert_eq!(bus.cart_result(&mut out), 0); // still running
+        bus.write(0xA000, 0x00);
+        assert_eq!(bus.cart_result(&mut out), 6);
+        assert_eq!(&out[..6], b"Passed");
+        let mut small = [0u8; 3];
+        assert_eq!(bus.cart_result(&mut small), 3); // truncated to the buffer
     }
 }

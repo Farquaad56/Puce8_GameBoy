@@ -57,9 +57,18 @@ impl Noise {
 
     /// Trigger (NR44 bit 7): the LFSR is reset to zero.
     pub fn trigger(&mut self) {
+        self.trigger_with(false);
+    }
+
+    /// `early_length_clock` is true when the next frame sequencer step does not clock length.
+    pub fn trigger_with(&mut self, early_length_clock: bool) {
         self.enabled = self.dac_on;
         if self.length == 0 {
-            self.length = 64;
+            self.length = if early_length_clock && self.length_enable {
+                63
+            } else {
+                64
+            };
         }
         self.lfsr = 0;
         self.timer = self.period().unwrap_or(0);
@@ -94,6 +103,19 @@ impl Noise {
             if self.timer == 0 {
                 self.timer = p;
                 self.step_lfsr();
+            }
+        }
+    }
+
+    /// NR44 bit 6 written; `skips_length` is true when the next frame sequencer step does not clock
+    /// length; `trigger` is the NR44 bit 7 of the same write.
+    pub fn write_length_enable(&mut self, enable: bool, skips_length: bool, trigger: bool) {
+        let was = self.length_enable;
+        self.length_enable = enable;
+        if skips_length && enable && !was && self.length > 0 {
+            self.length -= 1;
+            if self.length == 0 && !trigger {
+                self.enabled = false;
             }
         }
     }
@@ -270,5 +292,28 @@ mod tests {
         assert!(!n.enabled);
         n.trigger();
         assert!(!n.enabled);
+    }
+
+    #[test]
+    fn e04_06_noise_length_enable_extra_clock_to_zero_disables_channel() {
+        let mut n = Noise::default();
+        n.write_nr41(0x3F); // length = 1
+        n.enabled = true;
+        n.write_length_enable(true, true, false);
+        assert_eq!(n.length, 0);
+        assert!(!n.enabled);
+    }
+
+    #[test]
+    fn e04_06_noise_trigger_reload_is_63_in_skipping_phase_with_length_enabled() {
+        let mut n1 = Noise {
+            length_enable: true,
+            ..Default::default()
+        };
+        n1.trigger_with(true);
+        assert_eq!(n1.length, 63);
+        let mut n2 = Noise::default();
+        n2.trigger_with(true); // length enable off: reload stays 64
+        assert_eq!(n2.length, 64);
     }
 }

@@ -44,12 +44,22 @@ impl Wave {
         2048 - self.freq
     }
 
-    /// Trigger (NR34 bit 7). The sample buffer is not reloaded here.
-    /// Extra start-up delay of the first sample: UNKNOWN - to confirm.
+    /// Trigger (NR34 bit 7).
     pub fn trigger(&mut self) {
+        self.trigger_with(false);
+    }
+
+    /// The sample buffer is not reloaded here. Extra start-up delay of the first sample:
+    /// UNKNOWN - to confirm. `early_length_clock` is true when the next frame sequencer step does
+    /// not clock length.
+    pub fn trigger_with(&mut self, early_length_clock: bool) {
         self.enabled = self.dac_on;
         if self.length == 0 {
-            self.length = 256;
+            self.length = if early_length_clock && self.length_enable {
+                255
+            } else {
+                256
+            };
         }
         self.timer = self.period();
         self.pos = 0;
@@ -78,6 +88,19 @@ impl Wave {
     pub fn tick(&mut self) {
         self.step_timer();
         self.step_timer();
+    }
+
+    /// NR34 bit 6 written; `skips_length` is true when the next frame sequencer step does not clock
+    /// length; `trigger` is the NR34 bit 7 of the same write.
+    pub fn write_length_enable(&mut self, enable: bool, skips_length: bool, trigger: bool) {
+        let was = self.length_enable;
+        self.length_enable = enable;
+        if skips_length && enable && !was && self.length > 0 {
+            self.length -= 1;
+            if self.length == 0 && !trigger {
+                self.enabled = false;
+            }
+        }
     }
 
     /// Length clock (frame sequencer EV_LENGTH): expiry disables the channel.
@@ -200,5 +223,28 @@ mod tests {
         w.pos = 5;
         w.trigger();
         assert_eq!(w.pos, 0);
+    }
+
+    #[test]
+    fn e04_06_wave_length_enable_extra_clock_to_zero_disables_channel() {
+        let mut w = Wave::default();
+        w.write_nr31(0xFF); // length = 1
+        w.enabled = true;
+        w.write_length_enable(true, true, false);
+        assert_eq!(w.length, 0);
+        assert!(!w.enabled);
+    }
+
+    #[test]
+    fn e04_06_wave_trigger_reload_is_255_in_skipping_phase_with_length_enabled() {
+        let mut w1 = Wave {
+            length_enable: true,
+            ..Default::default()
+        };
+        w1.trigger_with(true);
+        assert_eq!(w1.length, 255);
+        let mut w2 = Wave::default();
+        w2.trigger_with(true); // length enable off: reload stays 256
+        assert_eq!(w2.length, 256);
     }
 }
