@@ -5,6 +5,7 @@ use crate::audio::Audio;
 use crate::bus::{Bus, ROM_HEADER_CHECKSUM};
 use crate::cpu::Cpu;
 use crate::input::Input;
+use crate::media::mapper::cartridge_has_battery;
 use crate::media::Media;
 use crate::savestate::StateError;
 use crate::video::Ppu;
@@ -24,6 +25,10 @@ pub const AUDIO_RING_SAMPLES: usize = 2 * 4096;
 pub enum LoadError {
     /// The ROM is empty or shorter than the cartridge header ($0100-$014F, note 07a).
     TooShort,
+    /// The cartridge has no battery-backed RAM to load into (E05_06).
+    NoBatteryRam,
+    /// The battery RAM data length differs from the RAM size (E05_06).
+    BatteryRamSizeMismatch { expected: usize, actual: usize },
 }
 
 /// Core machine interface (decisions A_01/A_04/A_05).
@@ -87,6 +92,35 @@ pub struct Dmg {
 impl Dmg {
     /// Minimum ROM length: the header occupies $0100-$014F of bank 0 (note 07a).
     pub const MIN_ROM_LEN: usize = 0x150;
+
+    /// Battery-backed cartridge RAM for the frontend to save (E05_06). Interim: this is the Bus
+    /// SRAM shortcut (type $03 with 8 KiB), replaced when the mappers are wired to the bus. None
+    /// when the cartridge type has no battery or no RAM is present. File access stays in the
+    /// frontends.
+    pub fn battery_ram(&self) -> Option<&[u8]> {
+        if cartridge_has_battery(self.bus.peek(0x0147)) && !self.bus.sram.is_empty() {
+            Some(self.bus.sram.as_slice())
+        } else {
+            None
+        }
+    }
+
+    /// Load battery-backed RAM saved earlier (E05_06). Fails with `NoBatteryRam` when the
+    /// cartridge has none and with `BatteryRamSizeMismatch` when the length differs; the RAM is
+    /// left untouched on error.
+    pub fn load_battery_ram(&mut self, data: &[u8]) -> Result<(), LoadError> {
+        if !cartridge_has_battery(self.bus.peek(0x0147)) || self.bus.sram.is_empty() {
+            return Err(LoadError::NoBatteryRam);
+        }
+        if data.len() != self.bus.sram.len() {
+            return Err(LoadError::BatteryRamSizeMismatch {
+                expected: self.bus.sram.len(),
+                actual: data.len(),
+            });
+        }
+        self.bus.sram.copy_from_slice(data);
+        Ok(())
+    }
 
     /// Load a ROM image and build the machine in its post-boot state.
     pub fn new(rom: &[u8]) -> Result<Dmg, LoadError> {
@@ -1265,5 +1299,81 @@ mod tests {
         });
         assert_eq!(dmg.bus.read(0xFF00), 0xC7);
         assert_eq!(dmg.bus.io[0x0F] & 0x10, 0x10);
+    }
+
+    /// A 32 KiB ROM with the cartridge type at $0147 and the RAM size code at $0149.
+    fn battery_rom(cart_type: u8, ram_code: u8) -> Vec<u8> {
+        let mut r = rom(32 * 1024, 0x00);
+        r[0x147] = cart_type;
+        r[0x149] = ram_code;
+        r
+    }
+
+    #[test]
+    fn e05_06_rom_only_cartridge_has_no_battery_ram() {
+        let mut dmg = Dmg::new(&battery_rom(0x00, 0x00)).expect("ROM loads");
+        assert!(dmg.battery_ram().is_none());
+        assert_eq!(
+            dmg.load_battery_ram(&[0u8; 8192]),
+            Err(LoadError::NoBatteryRam)
+        );
+    }
+
+    #[test]
+    fn e05_06_ram_without_battery_is_not_exposed() {
+        let mut dmg = Dmg::new(&battery_rom(0x02, 0x02)).expect("ROM loads");
+        assert!(dmg.battery_ram().is_none());
+        assert_eq!(
+            dmg.load_battery_ram(&[0u8; 8192]),
+            Err(LoadError::NoBatteryRam)
+        );
+    }
+
+    #[test]
+    fn e05_06_battery_type_without_ram_reports_none() {
+        let mut dmg = Dmg::new(&battery_rom(0x03, 0x00)).expect("ROM loads");
+        assert!(dmg.battery_ram().is_none());
+        assert_eq!(
+            dmg.load_battery_ram(&[0u8; 8192]),
+            Err(LoadError::NoBatteryRam)
+        );
+    }
+
+    #[test]
+    fn e05_06_battery_ram_round_trips() {
+        let image = battery_rom(0x03, 0x02);
+        let mut dmg = Dmg::new(&image).expect("ROM loads");
+        assert_eq!(dmg.battery_ram().map(<[u8]>::len), Some(8192));
+        dmg.bus.write(0xA000, 0x5A);
+        dmg.bus.write(0xBFFF, 0x77);
+        let saved = dmg.battery_ram().expect("battery").to_vec();
+        assert_eq!(saved[0], 0x5A);
+        assert_eq!(saved[8191], 0x77);
+        let mut fresh = Dmg::new(&image).expect("ROM loads");
+        assert_eq!(fresh.battery_ram().expect("battery")[0], 0x00);
+        assert_eq!(fresh.load_battery_ram(&saved), Ok(()));
+        assert_eq!(fresh.bus.read(0xA000), 0x5A);
+        assert_eq!(fresh.bus.read(0xBFFF), 0x77);
+    }
+
+    #[test]
+    fn e05_06_load_battery_ram_rejects_a_size_mismatch_and_keeps_the_ram() {
+        let mut dmg = Dmg::new(&battery_rom(0x03, 0x02)).expect("ROM loads");
+        dmg.bus.write(0xA000, 0x11);
+        assert_eq!(
+            dmg.load_battery_ram(&[0u8; 100]),
+            Err(LoadError::BatteryRamSizeMismatch {
+                expected: 8192,
+                actual: 100
+            })
+        );
+        assert_eq!(
+            dmg.load_battery_ram(&vec![0u8; 8193]),
+            Err(LoadError::BatteryRamSizeMismatch {
+                expected: 8192,
+                actual: 8193
+            })
+        );
+        assert_eq!(dmg.bus.read(0xA000), 0x11);
     }
 }
