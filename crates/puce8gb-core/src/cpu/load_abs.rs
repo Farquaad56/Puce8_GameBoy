@@ -213,9 +213,9 @@ mod tests {
         let mut bus = testutil::new_bus();
         // a8 = $46; the target is $FF00+$46 = $FF46 (LCDC). Seed it.
         bus.write(0xFF46, 0x91);
-        for _ in 0..160 {
+        for _ in 0..162 {
             bus.dma_step();
-        } // finish the OAM DMA started by the $FF46 seed so WRAM is usable again (E03_15)
+        } // finish the OAM DMA started by the $FF46 seed (2 start steps + 160 copy steps) so WRAM is usable again (E03_15, FIX_02)
         let mut cpu = Cpu {
             a: 0x00,
             f: 0x80, // Z set
@@ -234,9 +234,9 @@ mod tests {
     fn c01_07_ldh_a8_a_writes_memory() {
         let mut bus = testutil::new_bus();
         bus.write(0xFF46, 0x00); // start with a known zero at $FF46
-        for _ in 0..160 {
+        for _ in 0..162 {
             bus.dma_step();
-        } // finish the OAM DMA started by the $FF46 seed so WRAM is usable again (E03_15)
+        } // finish the OAM DMA started by the $FF46 seed (2 start steps + 160 copy steps) so WRAM is usable again (E03_15, FIX_02)
         let mut cpu = Cpu {
             a: 0xC5,
             f: 0x30, // H and C set
@@ -272,9 +272,9 @@ mod tests {
         // Flag boundary: a dirty low nibble of F is re-masked at instruction end.
         let mut bus = testutil::new_bus();
         bus.write(0xFF46, 0x5A);
-        for _ in 0..160 {
+        for _ in 0..162 {
             bus.dma_step();
-        } // finish the OAM DMA started by the $FF46 seed so WRAM is usable again (E03_15)
+        } // finish the OAM DMA started by the $FF46 seed (2 start steps + 160 copy steps) so WRAM is usable again (E03_15, FIX_02)
         let mut cpu = Cpu {
             a: 0x00,
             f: 0xFF, // all four flags set plus a dirty low nibble
@@ -295,9 +295,9 @@ mod tests {
         let mut bus = testutil::new_bus();
         // C = $46; the target is $FF00+$46 = $FF46 (LCDC). Seed it.
         bus.write(0xFF46, 0x9D);
-        for _ in 0..160 {
+        for _ in 0..162 {
             bus.dma_step();
-        } // finish the OAM DMA started by the $FF46 seed so WRAM is usable again (E03_15)
+        } // finish the OAM DMA started by the $FF46 seed (2 start steps + 160 copy steps) so WRAM is usable again (E03_15, FIX_02)
         let mut cpu = Cpu {
             c: 0x46,
             a: 0x00,
@@ -317,9 +317,9 @@ mod tests {
     fn c01_07_ldh_c_a_writes_memory() {
         let mut bus = testutil::new_bus();
         bus.write(0xFF46, 0x00); // start with a known zero at $FF46
-        for _ in 0..160 {
+        for _ in 0..162 {
             bus.dma_step();
-        } // finish the OAM DMA started by the $FF46 seed so WRAM is usable again (E03_15)
+        } // finish the OAM DMA started by the $FF46 seed (2 start steps + 160 copy steps) so WRAM is usable again (E03_15, FIX_02)
         let mut cpu = Cpu {
             c: 0x46,
             a: 0xE1,
@@ -357,9 +357,9 @@ mod tests {
         // Flag boundary: a dirty low nibble of F is re-masked at instruction end.
         let mut bus = testutil::new_bus();
         bus.write(0xFF46, 0x37);
-        for _ in 0..160 {
+        for _ in 0..162 {
             bus.dma_step();
-        } // finish the OAM DMA started by the $FF46 seed so WRAM is usable again (E03_15)
+        } // finish the OAM DMA started by the $FF46 seed (2 start steps + 160 copy steps) so WRAM is usable again (E03_15, FIX_02)
         let mut cpu = Cpu {
             c: 0x46,
             a: 0xD9,

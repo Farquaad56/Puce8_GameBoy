@@ -20,6 +20,29 @@ const APU_READ_MASK: [u8; 23] = [
     0xFF, 0x00, 0x00, 0xBF, 0x00, 0x00, 0x70,
 ]; // index = address - 0xFF10: NR10..NR52 with the unused $FF15 and $FF1F slots (E04_01 spec)
 
+/// M-cycles (dma_step calls, counting the one of the write cycle) between a write to $FF46 and the first blocked CPU access; mooneye oam_dma_start: write at M=0, nothing at M=1, DMA active at M=2 (FIX_02).
+const DMA_START_DELAY_STEPS: u8 = 2;
+
+/// Bus segment an OAM DMA source address belongs to, for CPU access collision checks (E03_15 spec, FIX_02).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DmaBus {
+    /// ROM and cartridge RAM segments ($0000-$7FFF, $A000-$FDFF including echo RAM).
+    External,
+    /// VRAM segment ($8000-$9FFF).
+    Video,
+    /// Everything else (HRAM, I/O, IE): never blocked by the DMA.
+    Other,
+}
+
+/// Bus segment of an address for OAM DMA collision checks (E03_15 spec, FIX_02).
+fn dma_bus(addr: u16) -> DmaBus {
+    match addr {
+        0x0000..=0x7FFF | 0xA000..=0xFDFF => DmaBus::External,
+        0x8000..=0x9FFF => DmaBus::Video,
+        _ => DmaBus::Other,
+    }
+}
+
 /// Every memory region of the DMG bus (decision A_02, note 03a "Adresse bus").
 #[derive(Debug)]
 pub struct Bus {
@@ -55,6 +78,10 @@ pub struct Bus {
     dma_src: u16,
     /// Next destination index of the running OAM DMA transfer, 0..=159 (E03_06 spec).
     dma_index: u8,
+    /// Source base pending for the next OAM DMA start, V << 8 from the last write to $FF46 (FIX_02).
+    dma_pending_src: u16,
+    /// M-cycles remaining until a new OAM DMA transfer starts after a write to $FF46 (FIX_02).
+    dma_start_delay: u8,
     /// Last accepted APU register write (address, value), drained by the machine each M-cycle (E04_02).
     pub apu_write: Option<(u16, u8)>,
     /// Cartridge mapper for the loaded ROM (decision A_06): ROM banking, RAM and RTC;
@@ -86,13 +113,15 @@ impl Bus {
             io: [0xFF; IO_SIZE],
             serial: [0x00; 256],
             serial_len: 0,
-            ly: 0,             // LY ($FF44) post-boot value (note 08, C01_15)
+            ly: 0,              // LY ($FF44) post-boot value (note 08, C01_15)
             ppu_mode: 2, // PPU mode at the start of line 0 is OAM scan (E03_01); Machine::tick keeps it current
             vram_open: true, // VRAM access allowed until Machine::tick mirrors the PPU state (E03_10)
             oam_open: true, // OAM access allowed until Machine::tick mirrors the PPU state (E03_10)
             dma_active: false, // no OAM DMA transfer running at power-up (E03_06 spec)
             dma_src: 0,     // source base set by a write to $FF46 (E03_06 spec)
             dma_index: 0,   // next destination index of the running transfer (E03_06 spec)
+            dma_pending_src: 0, // no pending OAM DMA source at power-up (FIX_02)
+            dma_start_delay: 0, // no start delay pending at power-up (FIX_02)
             apu_write: None, // no pending APU register write at power-up (E04_02)
             mapper,
             wave_access: WaveAccess::Free,
@@ -139,6 +168,8 @@ impl Bus {
         self.dma_active = false; // no OAM DMA transfer running at power-up (E03_06 spec)
         self.apu_write = None; // no pending APU register write at power-up (E04_02)
         self.dma_index = 0; // next destination index of the running transfer (E03_06 spec)
+        self.dma_pending_src = 0; // no pending OAM DMA source at power-up (FIX_02)
+        self.dma_start_delay = 0; // no start delay pending at power-up (FIX_02)
         self.timer.reset(); // DIV/TIMA/TMA/TAC post-boot values (note 08, note 01b)
 
         // Unassigned IO reads $FF by default (decision A_02), then the documented
@@ -194,10 +225,21 @@ impl Bus {
         self.p1_prev = p1_read(self.io[0x00], &self.input) & 0x0F; // P1 low nibble at power-up (E05_01)
     }
 
+    /// CPU accesses that collide with the OAM DMA: OAM and the bus of the DMA source. Hardware-verified by mooneye call_timing (DMA from VRAM leaves WRAM/echo usable). The value a colliding read returns is the DMA byte on a real DMG: UNKNOWN - to confirm, $FF is used. DMA sources $E0-$FF: UNKNOWN - to confirm.
+    fn dma_blocks(&self, addr: u16) -> bool {
+        if !self.dma_active {
+            return false;
+        }
+        if (0xFE00..=0xFE9F).contains(&addr) {
+            return true; // OAM is never readable during a DMA (E03_15 spec)
+        }
+        dma_bus(addr) != DmaBus::Other && dma_bus(addr) == dma_bus(self.dma_src)
+    }
+
     /// Read a byte from the bus (decision A_02). PPU-mode blocking and OAM DMA gating: E03_15.
     pub fn read(&self, addr: u16) -> u8 {
-        if self.dma_active && addr < 0xFF00 {
-            return 0xFF; // OAM DMA running: the CPU sees $FF outside HRAM, I/O and IE (E03_15 spec); I/O registers stay accessible: UNKNOWN - to confirm
+        if self.dma_blocks(addr) {
+            return 0xFF; // OAM DMA collision: reads $FF (E03_15 spec, FIX_02); HRAM/I/O/IE stay accessible
         }
         match addr {
             0x0000..=0x7FFF => self.mapper.read(addr), // cartridge ROM region through the mapper (E05_07); past the image reads $FF
@@ -267,8 +309,8 @@ impl Bus {
     /// Write a byte to the bus (decision A_02). ROM and unmapped/unusable ranges are
     /// ignored; PPU-mode blocking and OAM DMA gating: E03_15.
     pub fn write(&mut self, addr: u16, val: u8) {
-        if self.dma_active && addr < 0xFF00 {
-            return; // OAM DMA running: writes outside HRAM, I/O and IE are ignored (E03_15 spec)
+        if self.dma_blocks(addr) {
+            return; // OAM DMA collision: writes are ignored (E03_15 spec, FIX_02)
         }
         match addr {
             0x0000..=0x7FFF => self.mapper.write(addr, val), // cartridge registers through the mapper (E05_07)
@@ -303,9 +345,8 @@ impl Bus {
             0xFF07 => self.timer.write_tac(val), // TAC ($FF07, note 01b)
             0xFF46 => {
                 self.io[0x46] = val; // DMA reads back the last written value (E03_06 spec)
-                self.dma_src = u16::from(val) << 8; // source = V * 0x100; sources above 0xDF: UNKNOWN - to confirm (note 03a)
-                self.dma_index = 0; // a write during a transfer restarts it: UNKNOWN - to confirm (A_02 is silent)
-                self.dma_active = true;
+                self.dma_pending_src = u16::from(val) << 8; // source base of the next transfer, V * 0x100 (FIX_02); sources above 0xDF: UNKNOWN - to confirm (note 03a)
+                self.dma_start_delay = DMA_START_DELAY_STEPS; // start delay after the write cycle (FIX_02); an earlier transfer keeps running until the new one starts
             }
             0xFF26 => {
                 // NR52: bit 7 = APU power; bits 3-0 are read-only channel status, a write never changes them (E04_01 spec, note 05a/05b)
@@ -446,16 +487,23 @@ impl Bus {
     }
 
     /// One M-cycle of the OAM DMA (E03_06 spec): copy source byte `dma_index` into OAM, not blocked by
-    /// the PPU mode. 160 steps in total. Start delay: UNKNOWN - to confirm (A_02 gives none), so 0 here.
+    /// the PPU mode. 160 steps in total. Start delay after a write to $FF46: DMA_START_DELAY_STEPS (FIX_02).
     pub fn dma_step(&mut self) {
-        if !self.dma_active {
-            return;
+        if self.dma_active {
+            let byte = self.peek(self.dma_src.wrapping_add(u16::from(self.dma_index)));
+            self.oam[usize::from(self.dma_index)] = byte;
+            self.dma_index += 1;
+            if self.dma_index == 160 {
+                self.dma_active = false;
+            }
         }
-        let byte = self.peek(self.dma_src.wrapping_add(u16::from(self.dma_index)));
-        self.oam[usize::from(self.dma_index)] = byte;
-        self.dma_index += 1;
-        if self.dma_index == 160 {
-            self.dma_active = false;
+        if self.dma_start_delay > 0 {
+            self.dma_start_delay -= 1;
+            if self.dma_start_delay == 0 {
+                self.dma_src = self.dma_pending_src; // the pending source starts now (FIX_02)
+                self.dma_index = 0;
+                self.dma_active = true;
+            }
         }
     }
 
@@ -1001,8 +1049,8 @@ mod tests {
             bus.write(0xC100 + i, (i as u8) ^ 0x5A); // source pattern in WRAM at $C100-$C19F
         }
         bus.write(0xFF46, 0xC1); // start the transfer from $C100 (E03_06 spec)
-        for _ in 0..160 {
-            bus.dma_step(); // one byte per M-cycle: 160 steps total
+        for _ in 0..162 {
+            bus.dma_step(); // two start-delay steps plus one byte per M-cycle: 160 copy steps (FIX_02)
         }
         assert!(!bus.dma_active()); // the transfer is complete after exactly 160 steps
         for i in 0..160usize {
@@ -1015,13 +1063,17 @@ mod tests {
     fn e03_06_takes_exactly_160_steps() {
         let mut bus = Bus::new(test_rom(32 * 1024));
         bus.write(0xFF46, 0xC0); // start the transfer from $C000 (E03_06 spec)
-        assert!(bus.dma_active()); // active immediately after the write: no start delay here
+        assert!(!bus.dma_active()); // not active yet: the start delay is pending (FIX_02)
+        bus.dma_step(); // M-cycle 1 of the start delay after the write cycle
+        assert!(!bus.dma_active());
+        bus.dma_step(); // M-cycle 2: the transfer starts here (mooneye oam_dma_start, FIX_02)
+        assert!(bus.dma_active());
         for _ in 0..159 {
             bus.dma_step();
         }
-        assert!(bus.dma_active()); // still running on step 159 of 160
-        bus.dma_step(); // the 160th and final step
-        assert!(!bus.dma_active()); // inactive after exactly 160 steps
+        assert!(bus.dma_active()); // still running on step 159 of 160 copy steps
+        bus.dma_step(); // the 160th and final copy step
+        assert!(!bus.dma_active()); // inactive after exactly 160 copy steps (FIX_02)
     }
 
     #[test]
@@ -1030,6 +1082,8 @@ mod tests {
         bus.write(0xC000, 0x42); // WRAM byte before the transfer starts
         assert_eq!(bus.read(0xC000), 0x42); // normal read outside HRAM
         bus.write(0xFF46, 0xC1); // start the OAM DMA (E03_06 spec)
+        bus.dma_step(); // M-cycle 1 of the start delay after the write cycle (FIX_02)
+        bus.dma_step(); // M-cycle 2: the transfer is now running (FIX_02)
         assert_eq!(bus.read(0xC000), 0xFF); // during the transfer: reads $FF (E03_15 spec)
     }
 
@@ -1048,6 +1102,8 @@ mod tests {
         let mut bus = Bus::new(test_rom(32 * 1024));
         bus.write(0xC000, 0x42); // WRAM byte before the transfer starts
         bus.write(0xFF46, 0xC1); // start the OAM DMA (E03_06 spec)
+        bus.dma_step(); // M-cycle 1 of the start delay after the write cycle (FIX_02)
+        bus.dma_step(); // M-cycle 2: the transfer is now running (FIX_02)
         bus.write(0xC000, 0x99); // ignored while the transfer runs (E03_15 spec)
         for _ in 0..160 {
             bus.dma_step(); // run the whole transfer to completion
@@ -1062,6 +1118,8 @@ mod tests {
         let mut bus = Bus::new(test_rom(32 * 1024));
         bus.write(0xC000, 0x42); // WRAM byte before the transfer starts
         bus.write(0xFF46, 0xC0); // start the OAM DMA (E03_06 spec)
+        bus.dma_step(); // M-cycle 1 of the start delay after the write cycle (FIX_02)
+        bus.dma_step(); // M-cycle 2: the transfer is now running (FIX_02)
         for _ in 0..159 {
             bus.dma_step(); // all but the final step: still active
         }
@@ -1540,5 +1598,84 @@ mod tests {
         let bus = Bus::new(rom); // must not panic: ROM-only fallback
         assert_eq!(bus.read(0x0200), 0x55);
         assert_eq!(bus.read(0xA000), 0xFF); // no cartridge RAM in the fallback
+    }
+
+    #[test]
+    fn fix_02_dma_starts_two_steps_after_the_ff46_write() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFF46, 0xC0); // start the transfer from $C000 (E03_06 spec)
+        assert!(!bus.dma_active()); // not active yet: the start delay is pending (FIX_02)
+        bus.dma_step(); // M-cycle 1 of the start delay after the write cycle
+        assert!(!bus.dma_active());
+        bus.dma_step(); // M-cycle 2: the transfer starts here (mooneye oam_dma_start, FIX_02)
+        assert!(bus.dma_active());
+    }
+
+    #[test]
+    fn fix_02_oam_is_readable_until_the_dma_starts() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.oam[0] = 0x33; // OAM byte before the transfer starts
+        bus.write(0xFF46, 0xC0); // start the transfer from $C000 (E03_06 spec)
+        assert_eq!(bus.read(0xFE00), 0x33); // OAM stays readable during the start delay (FIX_02)
+        bus.dma_step(); // M-cycle 1 of the start delay after the write cycle
+        assert_eq!(bus.read(0xFE00), 0x33);
+        bus.dma_step(); // M-cycle 2: the transfer starts here (FIX_02)
+        assert_eq!(bus.read(0xFE00), 0xFF); // OAM is never readable during a DMA (E03_15 spec)
+    }
+
+    #[test]
+    fn fix_02_dma_from_vram_leaves_wram_usable() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xC000, 0x42); // WRAM byte before the transfer starts
+        bus.write(0xFF46, 0x80); // start the transfer from VRAM $8000 (E03_06 spec)
+        bus.dma_step(); // M-cycle 1 of the start delay after the write cycle (FIX_02)
+        bus.dma_step(); // M-cycle 2: the transfer is now running (FIX_02)
+        assert_eq!(bus.read(0xC000), 0x42); // WRAM stays usable: the DMA source is VRAM, not WRAM (mooneye call_timing)
+        assert_eq!(bus.read(0xFE00), 0xFF); // OAM is blocked during the transfer (E03_15 spec)
+        bus.write(0xC000, 0x43); // writes to WRAM work too
+        assert_eq!(bus.read(0xC000), 0x43);
+    }
+
+    #[test]
+    fn fix_02_dma_from_wram_leaves_vram_usable() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFF46, 0xC0); // start the transfer from WRAM $C000 (E03_06 spec)
+        bus.dma_step(); // M-cycle 1 of the start delay after the write cycle (FIX_02)
+        bus.dma_step(); // M-cycle 2: the transfer is now running (FIX_02)
+        bus.write(0x8000, 0x55); // VRAM stays usable: the DMA source is WRAM, not VRAM (mooneye call_timing)
+        assert_eq!(bus.read(0x8000), 0x55);
+        assert_eq!(bus.read(0xC000), 0xFF); // WRAM is blocked during the transfer (E03_15 spec)
+    }
+
+    #[test]
+    fn fix_02_dma_from_vram_blocks_vram() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFF46, 0x80); // start the transfer from VRAM $8000 (E03_06 spec)
+        bus.dma_step(); // M-cycle 1 of the start delay after the write cycle (FIX_02)
+        bus.dma_step(); // M-cycle 2: the transfer is now running (FIX_02)
+        assert_eq!(bus.read(0x8000), 0xFF); // VRAM is blocked: same bus segment as the DMA source (mooneye call_timing)
+    }
+
+    #[test]
+    fn fix_02_restart_keeps_the_old_transfer_until_the_new_one_starts() {
+        let mut bus = Bus::new(test_rom(32 * 1024));
+        bus.write(0xFF46, 0xC0); // start the transfer from $C000 (E03_06 spec)
+        bus.dma_step(); // M-cycle 1 of the start delay after the write cycle (FIX_02)
+        bus.dma_step(); // M-cycle 2: the transfer is now running (FIX_02)
+        for _ in 0..10 {
+            bus.dma_step(); // ten bytes copied from $C000
+        }
+        bus.write(0xFF46, 0xC1); // restart request: source $C100 pending (E03_06 spec)
+        assert!(bus.dma_active()); // the old transfer keeps running until the new one starts (FIX_02)
+        bus.dma_step(); // M-cycle 1 of the start delay: the old transfer continues
+        assert!(bus.dma_active());
+        bus.dma_step(); // M-cycle 2: the new transfer from $C100 starts at index 0 (FIX_02)
+        assert!(bus.dma_active());
+        for _ in 0..159 {
+            bus.dma_step(); // the new transfer runs to completion
+            assert!(bus.dma_active());
+        }
+        bus.dma_step(); // the final step ends the transfer (E03_06 spec)
+        assert!(!bus.dma_active());
     }
 }

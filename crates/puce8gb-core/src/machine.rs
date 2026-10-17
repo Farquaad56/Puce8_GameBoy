@@ -1009,20 +1009,25 @@ mod tests {
             dmg.bus.write(0xC100 + i, (i as u8) ^ 0x5A); // source pattern in WRAM at $C100-$C19F
         }
         dmg.bus.write(0xFF46, 0xC1); // start the transfer from $C100 (E03_06 spec)
-        for _ in 0..4 {
-            dmg.tick(); // one M-cycle every 4 dots: after 4 dots exactly one byte is copied
+        for _ in 0..8 {
+            dmg.tick(); // 2 M-cycles: the DMA start delay (mooneye oam_dma_start, FIX_02)
         }
-        assert_eq!(dmg.bus.oam[0], 0x5A); // first OAM byte copied on the first M-cycle
+        assert_eq!(dmg.bus.oam[0], 0); // nothing copied yet during the start delay
+        assert!(dmg.bus.dma_active()); // the transfer is active from the 2nd M-cycle
+        for _ in 0..4 {
+            dmg.tick(); // 3rd M-cycle: the first byte is copied
+        }
+        assert_eq!(dmg.bus.oam[0], 0x5A); // first OAM byte copied on the 3rd M-cycle
         assert_eq!(dmg.bus.oam[1], 0); // second byte not copied yet: one byte per M-cycle (E03_06 spec)
-        assert!(dmg.bus.dma_active()); // transfer still running after 4 dots
+        assert!(dmg.bus.dma_active()); // transfer still running
 
         for _ in 0..632 {
-            dmg.tick(); // 636 dots total = 159 M-cycles: the transfer is still running
+            dmg.tick(); // 644 dots total = 161 M-cycles: 159 bytes copied, still running
         }
         assert!(dmg.bus.dma_active()); // 159 of 160 bytes copied: one step left
 
         for _ in 0..4 {
-            dmg.tick(); // 640 dots total = 160 M-cycles: the final byte is copied
+            dmg.tick(); // 648 dots total = 162 M-cycles: the final byte is copied
         }
         assert!(!dmg.bus.dma_active()); // transfer complete after exactly 160 M-cycles (E03_06 spec)
         for i in 0..160usize {
