@@ -1,6 +1,7 @@
 //! Emulation thread: owns the core, paced by the audio ring when a device is open, else by the clock (E07_02, E07_03).
-use crate::audio::{pacing_decision, push_budget, target_fill, AudioOut, Pace, Resampler};
+use crate::audio::{pacing_decision, push_budget, target_fill, AudioOut, Pace};
 use crate::pacing::{clamp_owed, Pacer, MAX_BACKLOG_FRAMES};
+use crate::resample::Resampler;
 use puce8gb_core::machine::{AUDIO_RING_SAMPLES, FRAME_DOTS};
 use puce8gb_core::{Dmg, Input, Machine};
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TryRecvError};

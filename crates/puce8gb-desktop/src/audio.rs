@@ -4,8 +4,6 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use puce8gb_core::machine::FRAME_DOTS;
 use rtrb::{Producer, RingBuffer};
 
-/// Native sample rate of the core output (decision A_04): one stereo pair every 128 dots.
-pub const SRC_RATE: u32 = 32_768;
 /// Silence written when the ring runs dry (underrun policy).
 pub const SILENCE: [f32; 2] = [0.0, 0.0];
 /// Fill level to keep in the ring, in emulated frames.
@@ -51,51 +49,6 @@ pub fn push_budget(free: usize, produced: usize) -> usize {
 /// Underrun policy: a missing pair becomes silence.
 pub fn fill_frame(popped: Option<[f32; 2]>) -> [f32; 2] {
     popped.unwrap_or(SILENCE)
-}
-
-/// Integer linear interpolation from `a` (num = 0) towards `b` (num = den).
-pub fn lerp_i16(a: i16, b: i16, num: u32, den: u32) -> i16 {
-    if den == 0 {
-        return b;
-    }
-    let a = i64::from(a);
-    let b = i64::from(b);
-    let v = a + (b - a) * i64::from(num) / i64::from(den);
-    i16::try_from(v).unwrap_or(if v < 0 { i16::MIN } else { i16::MAX })
-}
-
-fn to_f32(sample: i16) -> f32 {
-    f32::from(sample) / 32768.0
-}
-
-/// Converts the 32768 Hz core stream to the device rate with an integer phase accumulator.
-#[derive(Debug)]
-pub struct Resampler {
-    dst_rate: u32,
-    phase: u32,
-    prev: [i16; 2],
-}
-
-impl Resampler {
-    pub fn new(dst_rate: u32) -> Self {
-        Resampler {
-            dst_rate: dst_rate.max(1),
-            phase: 0,
-            prev: [0, 0],
-        }
-    }
-
-    /// Feeds one input pair and appends the output pairs it produces.
-    pub fn push(&mut self, cur: [i16; 2], out: &mut Vec<[f32; 2]>) {
-        while self.phase < self.dst_rate {
-            let l = lerp_i16(self.prev[0], cur[0], self.phase, self.dst_rate);
-            let r = lerp_i16(self.prev[1], cur[1], self.phase, self.dst_rate);
-            out.push([to_f32(l), to_f32(r)]);
-            self.phase += SRC_RATE;
-        }
-        self.phase -= self.dst_rate;
-        self.prev = cur;
-    }
 }
 
 /// Open output stream; the producer side of the ring stays with the emulation thread.
@@ -196,44 +149,5 @@ mod tests {
     fn e07_03_underrun_is_silence() {
         assert_eq!(fill_frame(None), [0.0, 0.0]);
         assert_eq!(fill_frame(Some([0.25, -0.5])), [0.25, -0.5]);
-    }
-
-    #[test]
-    fn e07_03_lerp_is_integer_and_exact_at_the_ends() {
-        assert_eq!(lerp_i16(0, 100, 1, 4), 25);
-        assert_eq!(lerp_i16(0, -100, 1, 4), -25);
-        assert_eq!(lerp_i16(10, 20, 0, 5), 10);
-        assert_eq!(lerp_i16(10, 20, 5, 5), 20);
-        assert_eq!(lerp_i16(7, 9, 1, 0), 9);
-    }
-
-    #[test]
-    fn e07_03_resampler_same_rate_is_one_to_one() {
-        let mut resampler = Resampler::new(32_768);
-        let mut out = Vec::new();
-        for _ in 0..100 {
-            resampler.push([5, -5], &mut out);
-        }
-        assert_eq!(out.len(), 100);
-    }
-
-    #[test]
-    fn e07_03_resampler_double_rate_interpolates() {
-        let mut resampler = Resampler::new(65_536);
-        let mut out = Vec::new();
-        resampler.push([1000, -1000], &mut out);
-        assert_eq!(out, vec![[0.0, 0.0], [500.0 / 32768.0, -500.0 / 32768.0]]);
-    }
-
-    #[test]
-    fn e07_03_resampler_one_second_gives_device_rate() {
-        for rate in [48_000u32, 44_100] {
-            let mut resampler = Resampler::new(rate);
-            let mut out = Vec::new();
-            for _ in 0..32_768 {
-                resampler.push([i16::MAX, i16::MIN], &mut out);
-            }
-            assert_eq!(out.len(), usize::try_from(rate).unwrap());
-        }
     }
 }

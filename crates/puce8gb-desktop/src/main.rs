@@ -2,6 +2,7 @@
 mod audio;
 mod emu;
 mod pacing;
+mod resample;
 mod scale;
 
 use eframe::egui;
