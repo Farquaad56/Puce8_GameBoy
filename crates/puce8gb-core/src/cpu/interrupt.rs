@@ -34,7 +34,11 @@ impl Cpu {
             // d'une instruction"): done() decrements ei_delay at the end of each following
             // instruction and sets IME when it reaches 0. No flag affected; the fetch is the
             // whole instruction (decision C_00), so this handler calls done() itself.
-            self.ei_delay = 2;
+            // Only arm the delay when none is pending: an EI executed while a previous EI is
+            // still pending does not postpone IME (mooneye ei_sequence, FIX_03).
+            if self.ei_delay == 0 {
+                self.ei_delay = 2;
+            }
             self.done();
             return true;
         }
@@ -386,5 +390,55 @@ mod tests {
             assert!(!cpu.ime); // IME cleared by the service of the interrupt
             assert_eq!(bus.io[0x0F] & 0x1F, 0); // the served IF bit is acknowledged
         }
+    }
+
+    // ---- FIX_03: an EI executed while a previous EI is still pending does not postpone IME (mooneye ei_sequence) ----
+
+    #[test]
+    fn fix_03_two_consecutive_ei_enable_ime_after_the_second() {
+        let mut bus = testutil::new_bus();
+        let mut cpu = Cpu::default();
+
+        testutil::exec(&mut cpu, &mut bus, &[0xFB]); // EI at $C000: IME not set yet (one-instruction delay)
+        assert!(!cpu.ime);
+
+        testutil::exec(&mut cpu, &mut bus, &[0xFB]); // second EI while the first is still pending
+        assert!(cpu.ime); // IME set as soon as the second EI completes; no extra postponement (FIX_03)
+    }
+
+    #[test]
+    fn fix_03_single_ei_still_delays_by_one_instruction() {
+        let mut bus = testutil::new_bus();
+        let mut cpu = Cpu::default();
+
+        testutil::exec(&mut cpu, &mut bus, &[0xFB]); // EI at $C000
+        assert!(!cpu.ime); // IME not set until the next instruction completes (note 02b)
+
+        testutil::exec(&mut cpu, &mut bus, &[0x00]); // NOP: the delayed effect lands here
+        assert!(cpu.ime);
+    }
+
+    #[test]
+    fn fix_03_ei_chain_dispatches_after_the_second_ei() {
+        let mut bus = testutil::new_bus();
+        bus.write(0xFFFF, 0x08); // IE: serial transfer end enabled
+        bus.write(0xFF0F, 0x08); // IF: request pending (bit $08)
+        let mut cpu = Cpu {
+            sp: 0xDFFE,
+            ..Cpu::default()
+        };
+
+        testutil::exec(&mut cpu, &mut bus, &[0xFB, 0xFB]); // EI at $C000 and $C001: the first one runs here
+        assert!(!cpu.ime); // still pending after the first EI
+        cpu.tick(&mut bus); // second EI at $C001 completes: IME set immediately (FIX_03)
+        assert!(cpu.ime);
+
+        for _ in 0..5 {
+            cpu.tick(&mut bus); // five M-cycles of interrupt entry (note 02b)
+        }
+
+        assert_eq!(cpu.pc, 0x0058); // serial transfer end vector
+        assert_eq!(bus.read(0xDFFC), 0x02); // pushed PC low byte ($C002 at sp - 2)
+        assert_eq!(bus.read(0xDFFD), 0xC0); // pushed PC high byte (at sp - 1)
     }
 }
