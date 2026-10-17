@@ -97,3 +97,38 @@ Voir docs/annexes/notes/09_test_roms.md.
 E04_07: Pan Docs Audio Details does not state the APU power-on/power-off effects. Rules taken from the gbdev wiki 'Gameboy sound hardware' (DMG): length counters survive power-off and can be written while off; power-on restarts the frame sequencer at step 0. To confirm with dmg_sound 07, 08, 11. CGB behaviour: UNKNOWN - to confirm.
 - E04_07: wave channel DMG timing constants (access window 1..1 step, trigger delay 2 steps, corruption window 0..0) were found by sweeping against dmg_sound 09, 10, 12; the exact hardware window ("a couple of clocks") stays UNKNOWN. Other windows also pass 09 and 12: access max 2 or 3.
 - UNKNOWN - to confirm: per-ROM max-cycles for the mooneye entries of test_manifest.txt (note 09 gives only 120 s max = 503316480 cycles); 100000000 used as the safe default (E06_02). dmg-acid2 left out until the user approves its hash.
+- E06_03 baseline: TIMEOUT call_timing: area = jump/call instruction cycle timing, never reaches LD B,B; probable cause UNKNOWN - to confirm
+- E06_03 baseline: TIMEOUT call_cc_timing: area = conditional call cycle timing, never reaches LD B,B; probable cause UNKNOWN - to confirm
+- E06_03 baseline: TIMEOUT jp_timing: area = jump cycle timing, never reaches LD B,B; probable cause UNKNOWN - to confirm
+- E06_03 baseline: TIMEOUT jp_cc_timing: area = conditional jump cycle timing, never reaches LD B,B; probable cause UNKNOWN - to confirm
+- E06_03 baseline: TIMEOUT ret_timing: area = return cycle timing, never reaches LD B,B; probable cause UNKNOWN - to confirm
+- E06_03 baseline: TIMEOUT ret_cc_timing: area = conditional return cycle timing, never reaches LD B,B; probable cause UNKNOWN - to confirm
+- E06_03 baseline: TIMEOUT reti_timing: area = RETI cycle timing, never reaches LD B,B; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL call_timing2: area = call memory access order within the instruction; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL call_cc_timing2: area = conditional call memory access order within the instruction; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL add_sp_e_timing: area = ADD SP,e8 internal cycle timing; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL ld_hl_sp_e_timing: area = LD HL,SP+e8 internal cycle timing; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL push_timing: area = PUSH internal cycle timing; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL rst_timing: area = RST internal cycle timing; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL ei_sequence: area = EI delay sequence with interrupts; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL ie_push: area = interrupt dispatch when the pushed PC byte overwrites IE; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL oam_dma_start: area = OAM DMA start delay; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL oam_dma_restart: area = OAM DMA restart while a transfer runs; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL oam_dma_timing: area = OAM DMA transfer timing; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL sources-GS: area = OAM DMA source address ranges; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL rapid_toggle: area = TAC rapid enable/disable edge behaviour; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL tim00_div_trigger: area = timer TAC=00 falling edge on DIV write; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL tim01_div_trigger: area = timer TAC=01 falling edge on DIV write; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL tim10_div_trigger: area = timer TAC=10 falling edge on DIV write; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL tim11_div_trigger: area = timer TAC=11 falling edge on DIV write; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL lcdon_timing-GS: area = PPU timing right after LCD on; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL lcdon_write_timing-GS: area = PPU register write timing right after LCD on; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL stat_lyc_onoff: area = STAT/LYC interrupt with LCD off and on; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL vblank_stat_intr-GS: area = STAT interrupt around VBlank; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL hblank_ly_scx_timing-GS: area = HBlank length with SCX and LY reads; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL intr_2_mode0_timing_sprites: area = mode 0 interrupt timing with sprites; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL unused_hwio-GS: area = unused I/O register bits; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL boot_div-dmgABCmgb: area = DIV value right after the boot ROM; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL boot_hwio-dmgABCmgb: area = I/O register values right after the boot ROM; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL boot_sclk_align-dmgABCmgb: area = serial clock alignment right after the boot ROM; probable cause UNKNOWN - to confirm
+- E06_03 baseline: FAIL multicart_rom_8Mb: area = MBC1 multicart (MBC1M) wiring not modelled; probable cause UNKNOWN - to confirm
