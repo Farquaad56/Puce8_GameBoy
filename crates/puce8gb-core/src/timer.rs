@@ -54,12 +54,17 @@ impl Timer {
     }
 
     /// Writing any value to DIV resets the system counter; the written value is ignored
-    /// (note 01b "FF04 DIV").
+    /// (note 01b "FF04 DIV"). A write that drops the selected bit is a falling edge and
+    /// increments TIMA (UNKNOWN - exact M-cycle timing to confirm with the mooneye
+    /// tim*_div_trigger ROMs).
     pub fn write_div(&mut self, _val: u8) {
-        // The written value is ignored (note 01b); the falling-edge detector follows the
-        // reset counter so no spurious tick fires on the next M-cycle.
+        let before = self.signal();
         self.sysclk = 0;
-        self.prev_signal = self.signal();
+        let after = self.signal();
+        if before && !after {
+            self.increment_tima(); // falling edge of the selected bit (note 01b)
+        }
+        self.prev_signal = after; // no spurious tick fires on the next M-cycle
     }
 
     /// TIMA ($FF05): timer counter.
@@ -102,11 +107,16 @@ impl Timer {
     }
 
     /// Write TAC ($FF07); only bit 2 (enable) and bits 1-0 (clock select) affect the timer
-    /// (note 01b "FF07 TAC").
+    /// (note 01b "FF07 TAC"). Disabling the timer or changing the clock select while the
+    /// selected bit is 1 is a falling edge and increments TIMA.
     pub fn write_tac(&mut self, val: u8) {
+        let before = self.signal();
         self.tac = val;
-        // The selected bit (or the enable) changed: keep the falling-edge detector in sync.
-        self.prev_signal = self.signal();
+        let after = self.signal();
+        if before && !after {
+            self.increment_tima(); // falling edge of the selected bit (note 01b)
+        }
+        self.prev_signal = after; // keep the falling-edge detector in sync
     }
 
     /// Advance one M-cycle (decision A_01): the system counter gains 4 dots and a falling
@@ -133,11 +143,7 @@ impl Timer {
         if self.prev_signal && !signal {
             // Falling edge: TIMA increments (note 01b). On overflow it wraps to $00 and the
             // reload plus interrupt request are scheduled for one M-cycle later.
-            let (value, overflow) = self.tima.overflowing_add(1);
-            self.tima = value;
-            if overflow {
-                self.reload_pending = true;
-            }
+            self.increment_tima();
         }
         self.prev_signal = signal;
         request_interrupt
@@ -151,6 +157,16 @@ impl Timer {
         }
         let bit = SELECTED_BIT[(self.tac & 0x03) as usize];
         (self.sysclk >> bit) & 1 == 1
+    }
+
+    /// Increment TIMA by one; on overflow it wraps to $00 and the reload plus interrupt
+    /// request are scheduled for one M-cycle later (note 01b).
+    fn increment_tima(&mut self) {
+        let (v, overflow) = self.tima.overflowing_add(1);
+        self.tima = v;
+        if overflow {
+            self.reload_pending = true;
+        }
     }
 }
 
@@ -312,5 +328,74 @@ mod tests {
         assert!(t.mcycle()); // M-cycle N+1: the delayed request lands; TIMA = TMA, reload window open
         t.write_tima(0x99); // a CPU write to TIMA on M-cycle N+2 is ignored (note 01b point 2)
         assert_eq!(t.tima(), 0x23); // TIMA stays equal to TMA; the written $99 is lost
+    }
+
+    /// Common setup for fix_01: system counter zeroed, timer enabled with clock select 01
+    /// (bit 3 of the system counter), TIMA at $00.
+    fn fix_01_setup() -> Timer {
+        let mut t = post_boot();
+        t.write_div(0x00); // zero the system counter: every selected bit starts at 0
+        t.write_tac(0x05); // timer enabled, clock select 01 (bit 3)
+        assert_eq!(t.tima(), 0);
+        t
+    }
+
+    #[test]
+    fn fix_01_div_write_with_selected_bit_high_increments_tima() {
+        let mut t = fix_01_setup();
+        t.mcycle(); // system counter 4, bit 3 low
+        t.mcycle(); // system counter 8, bit 3 high
+        t.write_div(0x00); // the reset drops the selected bit: a falling edge increments TIMA
+        assert_eq!(t.tima(), 1);
+        t.mcycle(); // system counter 4, bit 3 low again: no further increment
+        assert_eq!(t.tima(), 1);
+    }
+
+    #[test]
+    fn fix_01_div_write_with_selected_bit_low_does_not_increment() {
+        let mut t = fix_01_setup();
+        t.mcycle(); // system counter 4, bit 3 low
+        t.write_div(0x00); // the selected bit stays low: no falling edge, no increment
+        assert_eq!(t.tima(), 0);
+    }
+
+    #[test]
+    fn fix_01_tac_disable_with_selected_bit_high_increments_tima() {
+        let mut t = fix_01_setup();
+        t.mcycle(); // system counter 4, bit 3 low
+        t.mcycle(); // system counter 8, bit 3 high
+        t.write_tac(0x01); // disabling the timer drops the signal: a falling edge increments TIMA
+        assert_eq!(t.tima(), 1);
+    }
+
+    #[test]
+    fn fix_01_tac_clock_select_change_to_a_low_bit_increments_tima() {
+        let mut t = fix_01_setup();
+        t.mcycle(); // system counter 4, bit 3 low
+        t.mcycle(); // system counter 8, bit 3 high
+        t.write_tac(0x06); // clock select 10 (bit 5), which is 0 at counter 8: falling edge
+        assert_eq!(t.tima(), 1);
+    }
+
+    #[test]
+    fn fix_01_tac_write_that_keeps_the_signal_high_does_not_increment() {
+        let mut t = fix_01_setup();
+        t.mcycle(); // system counter 4, bit 3 low
+        t.mcycle(); // system counter 8, bit 3 high
+        t.write_tac(0x05); // same enable and clock select: the signal stays high, no increment
+        assert_eq!(t.tima(), 0);
+    }
+
+    #[test]
+    fn fix_01_div_write_overflow_schedules_the_reload() {
+        let mut t = fix_01_setup();
+        t.write_tma(0x42); // reload value
+        t.write_tima(0xFF); // the next increment overflows
+        t.mcycle(); // system counter 4, bit 3 low
+        t.mcycle(); // system counter 8, bit 3 high
+        t.write_div(0x00); // falling edge: TIMA wraps to $00 and schedules the reload
+        assert_eq!(t.tima(), 0x00);
+        assert!(t.mcycle()); // one M-cycle later the delayed request lands; IF bit 2 set
+        assert_eq!(t.tima(), 0x42); // reloaded with TMA
     }
 }
