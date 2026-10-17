@@ -525,6 +525,11 @@ impl Ppu {
         self.ly
     }
 
+    /// Dot position inside the current line (0..455) (FIX_07).
+    pub(crate) fn line_dot(&self) -> u32 {
+        self.dot_in_line
+    }
+
     /// Current PPU mode, 0-3 (E03_01).
     pub fn mode(&self) -> u8 {
         self.mode

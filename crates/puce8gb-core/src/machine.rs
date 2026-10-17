@@ -8,7 +8,7 @@ use crate::input::Input;
 use crate::media::mapper::cartridge_has_battery;
 use crate::media::{BatteryError, Media};
 use crate::savestate::StateError;
-use crate::video::Ppu;
+use crate::video::{Ppu, VBLANK_FIRST_LINE};
 
 /// Dots per frame: 70224 (note 01_timing.md, decision A_01).
 pub const FRAME_DOTS: u32 = 70224;
@@ -162,6 +162,7 @@ impl Dmg {
         let mode = self.ppu.mode();
         (stat & 0x40 != 0 && self.ppu.ly() == self.bus.io[0x45]) // bit 6: LYC == LY coincidence
             || (stat & 0x20 != 0 && mode == 2) // bit 5: OAM scan
+            || (stat & 0x20 != 0 && self.ppu.ly() == VBLANK_FIRST_LINE && self.ppu.line_dot() < 4) // bit 5 also fires at the very start of line 144, together with vblank (mooneye vblank_stat_intr-GS, FIX_07); how long the line stays high: UNKNOWN - to confirm, 4 dots used
             || (stat & 0x10 != 0 && mode == 1) // bit 4: VBlank
             || (stat & 0x08 != 0 && mode == 0) // bit 3: HBlank
     }
@@ -1433,5 +1434,57 @@ mod tests {
         dmg.bus.write(0x6000, 0x00); // arm the latch again
         dmg.bus.write(0x6000, 0x01); // latch: the seconds counter has advanced by one
         assert_eq!(dmg.bus.read(0xA000), 1);
+    }
+
+    #[test]
+    fn fix_07_mode2_select_raises_stat_at_the_start_of_line_144() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        dmg.bus.write(0xFF41, 0x20); // select bit 5 (OAM scan) in STAT ($FF41)
+        dmg.bus.io[0x0F] = 0; // clear all pending requests
+        for _ in 0..FRAME_DOTS {
+            if dmg.ppu.ly() == VBLANK_FIRST_LINE {
+                break;
+            }
+            dmg.tick();
+        }
+        assert_eq!(dmg.ppu.ly(), VBLANK_FIRST_LINE); // reached line 144 within one frame (FIX_07)
+        assert_eq!(dmg.bus.io[0x0F] & 0x03, 0x03); // vblank and STAT requested on the same dot (FIX_07)
+    }
+
+    #[test]
+    fn fix_07_without_the_select_bit_only_vblank_is_raised() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        dmg.bus.write(0xFF41, 0x00); // no STAT select bits: only vblank can request (FIX_07)
+        dmg.bus.io[0x0F] = 0; // clear all pending requests
+        for _ in 0..FRAME_DOTS {
+            if dmg.ppu.ly() == VBLANK_FIRST_LINE {
+                break;
+            }
+            dmg.tick();
+        }
+        assert_eq!(dmg.ppu.ly(), VBLANK_FIRST_LINE); // reached line 144 within one frame (FIX_07)
+        assert_eq!(dmg.bus.io[0x0F] & 0x03, 0x01); // only the vblank request is raised (FIX_07)
+    }
+
+    #[test]
+    fn fix_07_line_144_start_does_not_block_a_later_mode2_request() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        dmg.bus.write(0xFF41, 0x20); // select bit 5 (OAM scan) in STAT ($FF41)
+        for _ in 0..FRAME_DOTS {
+            if dmg.ppu.ly() == VBLANK_FIRST_LINE {
+                break;
+            }
+            dmg.tick();
+        }
+        assert_eq!(dmg.ppu.ly(), VBLANK_FIRST_LINE); // reached line 144 within one frame (FIX_07)
+        dmg.bus.io[0x0F] = 0; // clear all pending requests at the start of line 144
+        for _ in 0..10_000 {
+            if dmg.ppu.mode() == 2 && dmg.ppu.ly() == 0 {
+                break;
+            }
+            dmg.tick();
+        }
+        assert_eq!(dmg.ppu.mode(), 2); // mode 2 reached on line 0 of the next frame (FIX_07)
+        assert_eq!(dmg.bus.io[0x0F] & 0x02, 0x02); // a later mode-2 request still works (FIX_07)
     }
 }
