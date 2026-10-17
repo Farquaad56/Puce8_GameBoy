@@ -116,6 +116,7 @@ E06_01	CODE	0	docs/tasks/E06/E06_01.md	CLI suite runner
 E06_02	TEST	0	docs/tasks/E06/E06_02.md	Fill the manifest
 E06_03	TEST	1	docs/tasks/E06/E06_03.md	Baseline and regression rule
 FIX_01	TEST	0	docs/tasks/FIX/FIX_01.md	Fix test mooneye acceptance/timer/tim00_div_trigger
+FIX_02	TEST	0	docs/tasks/FIX/FIX_02.md	Fix test mooneye acceptance/call_timing
 E07_01	CODE	0	docs/tasks/E07/E07_01.md	eframe window and texture
 E07_02	CODE	0	docs/tasks/E07/E07_02.md	Emulation thread and pacing
 E07_03	CODE	0	docs/tasks/E07/E07_03.md	cpal output and lock-free ring buffer
