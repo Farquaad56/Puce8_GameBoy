@@ -30,6 +30,7 @@ fn args(max_cycles: u64, expect_serial: Option<&str>) -> RunArgs {
         frames: None,
         dump_ppm: None,
         hash: false,
+        quiet: false,
     }
 }
 

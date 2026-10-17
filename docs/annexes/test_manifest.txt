@@ -1,0 +1,2 @@
+# name|dir-pattern|file-prefix|kind|max-cycles|param
+dmg_sound 07|dmg_sound/|07-|serial|100000000|Passed

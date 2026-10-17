@@ -8,6 +8,8 @@ mod ppm;
 mod run;
 mod run_args;
 mod serial_scan;
+mod suite;
+mod suite_cmd;
 
 use std::process::ExitCode;
 
@@ -29,11 +31,13 @@ fn main() -> ExitCode {
                 ExitCode::from(EXIT_BAD_RUN_ARGS)
             }
         },
+        Some("suite") => suite_cmd::execute(&args[1..]),
         _ => {
             eprintln!(
                 "usage: puce8gb-cli [info <rom> | run <rom> [--max-cycles N] \
                  [--expect-serial TEXT] [--trace N] [--ly-fixed HEX] \
-                 [--frames N] [--dump-ppm FILE] [--hash]]"
+                 [--frames N] [--dump-ppm FILE] [--hash] | \
+                 suite [--only NAME] [--baseline FILE] [--manifest FILE]]"
             );
             ExitCode::from(2)
         }

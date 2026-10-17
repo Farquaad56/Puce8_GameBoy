@@ -24,6 +24,8 @@ pub struct RunArgs {
     pub dump_ppm: Option<String>,
     /// Print the framebuffer hash after `frames` frames (`--hash`, E03_07).
     pub hash: bool,
+    /// Suppress the serial echo on stdout; set by the suite runner, not a CLI flag (E06_01).
+    pub quiet: bool,
 }
 
 /// Parse the arguments that follow the word `run`. The first positional argument is the
@@ -75,6 +77,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
         frames,
         dump_ppm,
         hash,
+        quiet: false,
     })
 }
 

@@ -140,8 +140,11 @@ pub fn run_machine(dmg: &mut Dmg, args: &RunArgs) -> Outcome {
         }
         let n = dmg.take_serial_output(&mut buf);
         if n > 0 {
-            print!("{}", String::from_utf8_lossy(&buf[..n]));
-            let _ = std::io::stdout().flush();
+            // The serial echo is suppressed by `quiet` (E06_01); the scan still runs.
+            if !args.quiet {
+                print!("{}", String::from_utf8_lossy(&buf[..n]));
+                let _ = std::io::stdout().flush();
+            }
             match scan_serial(&mut collected, &buf[..n], args.expect_serial.as_deref()) {
                 Scan::Found => return Outcome::Found(collected),
                 Scan::Failed => return Outcome::Failed(collected),
@@ -152,8 +155,11 @@ pub fn run_machine(dmg: &mut Dmg, args: &RunArgs) -> Outcome {
         // into the same serial scan as $FF01 output (E04_06).
         let cn = dmg.bus.cart_result(&mut cart_buf);
         if cn > cart_len {
-            print!("{}", String::from_utf8_lossy(&cart_buf[cart_len..cn]));
-            let _ = std::io::stdout().flush();
+            // Cart-RAM echo suppressed by `quiet` too (E06_01); the scan still runs.
+            if !args.quiet {
+                print!("{}", String::from_utf8_lossy(&cart_buf[cart_len..cn]));
+                let _ = std::io::stdout().flush();
+            }
             match scan_serial(
                 &mut collected,
                 &cart_buf[cart_len..cn],
