@@ -1,12 +1,16 @@
 //! Desktop frontend: an eframe window showing the core framebuffer (E07_01).
 mod audio;
 mod emu;
+mod input_map;
 mod pacing;
+mod pads;
 mod resample;
 mod scale;
 
 use eframe::egui;
 use emu::{Command, EmuHandle};
+use input_map::{merge, state_from, KeyMap};
+use pads::Pads;
 use puce8gb_core::Input;
 
 const SCREEN_W: usize = 160;
@@ -19,6 +23,7 @@ struct App {
     last_input: Input,
     texture: Option<egui::TextureHandle>,
     status: String,
+    pads: Pads,
 }
 
 impl App {
@@ -30,6 +35,7 @@ impl App {
             last_input: Input::default(),
             texture: None,
             status: String::from("Drop a ROM file on the window"),
+            pads: Pads::default(),
         };
         if let Some(path) = rom_path {
             app.load_rom(std::path::Path::new(&path));
@@ -75,16 +81,15 @@ impl eframe::App for App {
         while let Ok(message) = self.emu.status.try_recv() {
             self.status = message;
         }
-        let input = ctx.input(|i| Input {
-            up: i.key_down(egui::Key::ArrowUp),
-            down: i.key_down(egui::Key::ArrowDown),
-            left: i.key_down(egui::Key::ArrowLeft),
-            right: i.key_down(egui::Key::ArrowRight),
-            a: i.key_down(egui::Key::W),
-            b: i.key_down(egui::Key::X),
-            start: i.key_down(egui::Key::Enter),
-            select: i.key_down(egui::Key::Backspace),
-        });
+        let pad_state = self.pads.poll();
+        // Keyboard drives the buttons only when no text widget has focus (E07_05).
+        let keymap = KeyMap::default();
+        let keyboard = if ctx.text_edit_focused() {
+            Input::default()
+        } else {
+            ctx.input(|i| state_from(|button| i.key_down(keymap.key_for(button))))
+        };
+        let input = merge(keyboard, pad_state);
         if input != self.last_input {
             self.emu.send(Command::Input(input));
             self.last_input = input;
