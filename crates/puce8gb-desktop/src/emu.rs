@@ -1,16 +1,22 @@
 //! Emulation thread: owns the core, paced by the audio ring when a device is open, else by the clock (E07_02, E07_03).
 use crate::audio::{pacing_decision, push_budget, target_fill, AudioOut, Pace};
+use crate::battery::BatterySaver;
 use crate::pacing::{clamp_owed, Pacer, MAX_BACKLOG_FRAMES};
 use crate::resample::Resampler;
+use crate::volume::gain_for_percent;
 use puce8gb_core::machine::{AUDIO_RING_SAMPLES, FRAME_DOTS};
 use puce8gb_core::{Dmg, Input, Machine};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TryRecvError};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// Commands sent from the UI to the emulation thread.
 pub enum Command {
     Load(Vec<u8>),
+    SavePath(Option<PathBuf>),
     Reset,
     Pause(bool),
     FrameStep,
@@ -25,25 +31,36 @@ pub struct EmuHandle {
     pub frames: Receiver<Vec<u32>>,
     /// Human readable status messages from the thread.
     pub status: Receiver<String>,
+    volume: Arc<AtomicU32>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl EmuHandle {
-    pub fn spawn() -> Self {
+    pub fn spawn(initial_volume: u8) -> Self {
+        let volume = Arc::new(AtomicU32::new(gain_for_percent(initial_volume).to_bits()));
+        let thread_volume = Arc::clone(&volume);
         let (commands, command_rx) = channel();
         let (frame_tx, frames) = sync_channel(2);
         let (status_tx, status) = channel();
-        let thread = std::thread::spawn(move || run(command_rx, frame_tx, status_tx));
+        let thread =
+            std::thread::spawn(move || run(command_rx, frame_tx, status_tx, thread_volume));
         EmuHandle {
             commands,
             frames,
             status,
+            volume,
             thread: Some(thread),
         }
     }
 
     pub fn send(&self, command: Command) {
         let _ = self.commands.send(command);
+    }
+
+    /// Sets the output volume (0..=100); the audio callback reads it without locking.
+    pub fn set_volume(&self, percent: u8) {
+        self.volume
+            .store(gain_for_percent(percent).to_bits(), Ordering::Relaxed);
     }
 }
 
@@ -66,8 +83,8 @@ struct Sound {
 }
 
 impl Sound {
-    fn open() -> Option<Sound> {
-        let out = AudioOut::open()?;
+    fn open(volume: Arc<AtomicU32>) -> Option<Sound> {
+        let out = AudioOut::open(volume)?;
         let rate = out.rate;
         Some(Sound {
             out,
@@ -96,9 +113,14 @@ impl Sound {
     }
 }
 
-fn run(commands: Receiver<Command>, frames: SyncSender<Vec<u32>>, status: Sender<String>) {
+fn run(
+    commands: Receiver<Command>,
+    frames: SyncSender<Vec<u32>>,
+    status: Sender<String>,
+    volume: Arc<AtomicU32>,
+) {
     let mut machine: Option<Dmg> = None;
-    let mut sound = Sound::open();
+    let mut sound = Sound::open(volume);
     let mode = match &sound {
         Some(s) => format!("audio {} Hz, audio-driven pacing", s.out.rate),
         None => String::from("no audio device, clock pacing"),
@@ -109,12 +131,18 @@ fn run(commands: Receiver<Command>, frames: SyncSender<Vec<u32>>, status: Sender
     let mut pacer = Pacer::default();
     let mut owed: u64 = 0;
     let mut last = Instant::now();
+    let mut battery = BatterySaver::new();
+    let mut save_path: Option<PathBuf> = None;
     loop {
         loop {
             match commands.try_recv() {
                 Ok(Command::Load(bytes)) => match Dmg::new(&bytes) {
-                    Ok(dmg) => {
-                        machine = Some(dmg);
+                    Ok(mut new_dmg) => {
+                        if let Some(old_dmg) = machine.as_ref() {
+                            battery.flush(old_dmg);
+                        }
+                        battery.attach(&mut new_dmg, save_path.take());
+                        machine = Some(new_dmg);
                         owed = 0;
                         let _ = status.send(format!("ROM loaded - {mode}"));
                     }
@@ -139,7 +167,13 @@ fn run(commands: Receiver<Command>, frames: SyncSender<Vec<u32>>, status: Sender
                         m.set_input(input);
                     }
                 }
-                Ok(Command::Quit) | Err(TryRecvError::Disconnected) => return,
+                Ok(Command::SavePath(path)) => save_path = path,
+                Ok(Command::Quit) | Err(TryRecvError::Disconnected) => {
+                    if let Some(m) = machine.as_ref() {
+                        battery.flush(m);
+                    }
+                    return;
+                }
                 Err(TryRecvError::Empty) => break,
             }
         }
@@ -178,6 +212,7 @@ fn run(commands: Receiver<Command>, frames: SyncSender<Vec<u32>>, status: Sender
             if produced {
                 let _ = frames.try_send(m.framebuffer().to_vec()); // full channel: drop the frame
             }
+            battery.poll(m, Instant::now());
         }
         std::thread::sleep(Duration::from_millis(1));
     }

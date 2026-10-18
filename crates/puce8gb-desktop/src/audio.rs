@@ -3,6 +3,8 @@ use crate::pacing::DOT_HZ;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use puce8gb_core::machine::FRAME_DOTS;
 use rtrb::{Producer, RingBuffer};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 /// Silence written when the ring runs dry (underrun policy).
 pub const SILENCE: [f32; 2] = [0.0, 0.0];
@@ -61,7 +63,7 @@ pub struct AudioOut {
 
 impl AudioOut {
     /// Opens the default output device (f32, at least 2 channels); None when unavailable.
-    pub fn open() -> Option<AudioOut> {
+    pub fn open(volume: Arc<AtomicU32>) -> Option<AudioOut> {
         let host = cpal::default_host();
         let device = host.default_output_device()?;
         let supported = device.default_output_config().ok()?;
@@ -77,11 +79,12 @@ impl AudioOut {
             .build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    let gain = f32::from_bits(volume.load(Ordering::Relaxed));
                     for frame in data.chunks_mut(channels) {
                         let pair = fill_frame(consumer.pop().ok());
                         if let [l, r, rest @ ..] = frame {
-                            *l = pair[0];
-                            *r = pair[1];
+                            *l = pair[0] * gain;
+                            *r = pair[1] * gain;
                             rest.fill(0.0);
                         }
                     }

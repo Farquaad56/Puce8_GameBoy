@@ -72,6 +72,33 @@ impl KeyMap {
             Button::Select => self.select,
         }
     }
+
+    /// Copy of the map with `button` bound to `key`.
+    pub fn with_key(mut self, button: Button, key: Key) -> KeyMap {
+        match button {
+            Button::Up => self.up = key,
+            Button::Down => self.down = key,
+            Button::Left => self.left = key,
+            Button::Right => self.right = key,
+            Button::A => self.a = key,
+            Button::B => self.b = key,
+            Button::Start => self.start = key,
+            Button::Select => self.select = key,
+        }
+        self
+    }
+
+    /// Binds `key` to `button`; the button that used `key` gets the old key of `button`.
+    pub fn rebind(self, button: Button, key: Key) -> KeyMap {
+        let old = self.key_for(button);
+        let mut map = self;
+        for other in BUTTONS {
+            if other != button && map.key_for(other) == key {
+                map = map.with_key(other, old);
+            }
+        }
+        map.with_key(button, key)
+    }
 }
 
 /// Game Boy button for a gamepad button (A on the right, B below-left, like the real layout).
