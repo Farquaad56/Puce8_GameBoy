@@ -17,6 +17,8 @@ pub const EV_ENVELOPE: u8 = 0x04;
 /// Bit 4 of DIV: its falling edge clocks the frame sequencer at 512 Hz (note 05b).
 const DIV_APU_BIT: u8 = 0x10;
 
+mod state;
+
 /// Frame sequencer state (E04_01): counts whatever the APU power state is, because the
 /// DIV-APU counter is not affected by power off (note 05b).
 #[derive(Debug, Default)]

@@ -17,6 +17,7 @@ const RTC_BYTES: usize = 7;
 /// Bytes of the RTC block that follows the RAM in the battery payload: running clock, latched
 /// clock, then the sub-second dots as a u64 (E05_06).
 const BATTERY_RTC_LEN: usize = 2 * RTC_BYTES + 8;
+mod state;
 
 /// The five RTC registers (note 07b): seconds, minutes, hours, 9-bit day counter, halt, carry.
 /// UNKNOWN - to confirm: behaviour of out-of-range values written by a program (the register

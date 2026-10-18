@@ -31,6 +31,8 @@ pub fn mix_side(analog: [i32; 4], routing: u8, volume: u8) -> i32 {
     sum * (i32::from(volume & 0x07) + 1) * GAIN
 }
 
+mod state;
+
 /// High-pass filter of one output side: out = in - capacitor; capacitor = in - out * factor.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Hpf {

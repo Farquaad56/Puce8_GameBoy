@@ -8,6 +8,8 @@ const DUTY: [[u8; 8]; 4] = [
     [0, 1, 1, 1, 1, 1, 1, 0],
 ];
 
+mod state;
+
 /// State of one pulse channel. `tick` is called once per M-cycle.
 #[derive(Debug, Default)]
 pub struct Pulse {

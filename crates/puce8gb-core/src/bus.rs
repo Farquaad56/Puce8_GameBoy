@@ -10,6 +10,7 @@ use crate::timer::Timer;
 
 /// IO register file FF00-FFFF size, including IF ($FF0F) and IE ($FFFF) (decision A_02).
 pub const IO_SIZE: usize = 0x100;
+mod state;
 
 /// Header checksum address in bank 0 (note 07a).
 pub const ROM_HEADER_CHECKSUM: usize = 0x14D;

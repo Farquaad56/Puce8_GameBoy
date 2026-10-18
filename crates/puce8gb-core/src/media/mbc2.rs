@@ -6,6 +6,7 @@ use super::{load_ram_payload, BatteryError};
 const ROM_BANK_SIZE: usize = 0x4000;
 /// Number of 4-bit RAM cells at A000-A1FF (note 07b); A200-BFFF echoes them.
 const RAM_CELLS: usize = 512;
+mod state;
 
 /// MBC2 cartridge (note 07b): registers written in 0000-3FFF, role chosen by address bit 8.
 /// The RAM size code of the header is ignored: the RAM is built into the chip. Bank numbers are

@@ -4,6 +4,7 @@ pub mod apu;
 pub mod mixer;
 pub mod noise;
 pub mod pulse;
+mod state;
 pub mod wave;
 
 use crate::audio::mixer::{analog15, mix_side, Hpf};

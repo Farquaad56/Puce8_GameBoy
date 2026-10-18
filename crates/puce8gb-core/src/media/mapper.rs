@@ -12,6 +12,7 @@ use super::{load_ram_payload, BatteryError};
 /// External RAM size of a ROM-only cartridge: up to 8 KiB at A000-BFFF (note 07b
 /// "No-MBC / ROM-only").
 pub const ROM_ONLY_RAM_SIZE: usize = 8 * 1024;
+mod state;
 
 /// Mapper state for the loaded cartridge. Enum by design, no trait objects
 /// (decision A_06); later tasks add one variant per supported mapper.

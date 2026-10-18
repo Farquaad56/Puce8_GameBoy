@@ -36,3 +36,26 @@ pub(crate) fn load_ram_payload(ram: &mut [u8], data: &[u8]) -> Result<(), Batter
     ram.copy_from_slice(data);
     Ok(())
 }
+
+/// Writes a RAM block: its length as u32, then the bytes (E09_02, decision A_05).
+pub(crate) fn write_ram_block(
+    w: &mut crate::savestate::StateWriter<'_>,
+    ram: &[u8],
+) -> Result<(), crate::savestate::StateError> {
+    let len = u32::try_from(ram.len()).map_err(|_| crate::savestate::StateError::BufferTooSmall)?;
+    w.put_u32(len)?;
+    w.put_bytes(ram)
+}
+
+/// Reads a RAM block of exactly `expected` bytes. A different stored length means the state
+/// was saved for another cartridge configuration: `RomMismatch`.
+pub(crate) fn read_ram_block<'a>(
+    r: &mut crate::savestate::StateReader<'a>,
+    expected: usize,
+) -> Result<&'a [u8], crate::savestate::StateError> {
+    let len = r.get_u32()?;
+    if usize::try_from(len) != Ok(expected) {
+        return Err(crate::savestate::StateError::RomMismatch);
+    }
+    r.get_bytes(expected)
+}

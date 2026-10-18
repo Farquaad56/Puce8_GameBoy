@@ -3,6 +3,8 @@
 /// Base divisors in M-cycles, indexed by NR43 bits 2-0 (8, 16, 32, ... 112 dots; divisor 0 is 0.5 units).
 const BASE_PERIOD: [u32; 8] = [2, 4, 8, 12, 16, 20, 24, 28];
 
+mod state;
+
 /// State of the noise channel. `tick` is called once per M-cycle.
 #[derive(Debug, Default)]
 pub struct Noise {

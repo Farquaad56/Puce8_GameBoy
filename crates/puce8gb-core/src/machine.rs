@@ -20,6 +20,7 @@ pub const FRAMEBUFFER_SIZE: usize = 23040;
 /// Audio ring capacity in interleaved samples: 4096 stereo pairs at 32768 Hz, ~0.125 s
 /// (decision A_04).
 pub const AUDIO_RING_SAMPLES: usize = 2 * 4096;
+mod state;
 
 /// Error returned when a ROM cannot be loaded (bad ROM => Result, never panic).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,16 +321,15 @@ impl Machine for Dmg {
         self.bus.set_buttons(input);
     }
 
-    fn save_state(&self, _buf: &mut [u8]) -> Result<(), StateError> {
-        // Binary format (magic + version + cartridge type 0147) arrives with later tasks
-        // (decision A_05).
-        Ok(())
+    fn save_state(&self, buf: &mut [u8]) -> Result<(), StateError> {
+        // Binary format of decision A_05 (E09_02); the caller provides the buffer.
+        self.write_machine_state(&mut crate::savestate::StateWriter::new(buf))
     }
 
-    fn load_state(&mut self, _buf: &[u8]) -> Result<(), StateError> {
-        // Binary format (magic + version + cartridge type 0147) arrives with later tasks
-        // (decision A_05).
-        Ok(())
+    fn load_state(&mut self, buf: &[u8]) -> Result<(), StateError> {
+        // Atomic: on any error the machine is left unchanged (E09_02). Bytes after the state
+        // are ignored.
+        self.read_machine_state(&mut crate::savestate::StateReader::new(buf))
     }
 }
 

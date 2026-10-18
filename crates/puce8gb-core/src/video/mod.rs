@@ -33,6 +33,7 @@ const FETCH_INITIAL_DOTS: u32 = 12;
 
 /// Maximum number of pixels held in a pixel FIFO at once (note 04b "FIFO de pixels").
 const FIFO_CAP: usize = 16;
+mod state;
 
 // LCDC ($FF40) bit masks (E03_09 spec, note 04a "LCDC bits"); later tasks use them.
 /// Bit 7: LCD and PPU enable (0 = off).

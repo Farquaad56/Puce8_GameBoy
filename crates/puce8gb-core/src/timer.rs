@@ -8,6 +8,7 @@ const DOTS_PER_MCYCLE: u16 = 4;
 /// Bit of the system counter selected for each TAC[1:0] clock select value, giving TIMA
 /// periods of 256, 4, 16 and 64 M-cycles (note 01b "FF07 TAC bits 1-0").
 const SELECTED_BIT: [u32; 4] = [9, 3, 5, 7];
+mod state;
 
 /// Timer and divider registers (note 01b).
 #[derive(Debug, Default)]

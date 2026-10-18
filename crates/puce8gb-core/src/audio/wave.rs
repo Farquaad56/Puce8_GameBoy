@@ -43,6 +43,8 @@ pub fn corrupt_ram(ram: &mut [u8; 16], index: u8) {
     }
 }
 
+mod state;
+
 /// State of the wave channel. `tick` is called once per M-cycle (two timer steps).
 #[derive(Debug, Default)]
 pub struct Wave {

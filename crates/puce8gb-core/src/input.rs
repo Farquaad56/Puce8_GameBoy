@@ -1,5 +1,6 @@
 //! Button input crossing the core/frontend boundary; the frontend drains it at frame
 //! boundaries (decision A_04).
+mod state;
 
 /// Current state of the DMG buttons.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

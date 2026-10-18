@@ -7,6 +7,7 @@ use super::{load_ram_payload, BatteryError};
 const ROM_BANK_SIZE: usize = 0x4000;
 /// Size of one RAM bank (note 07b).
 const RAM_BANK_SIZE: usize = 0x2000;
+mod state;
 
 /// MBC5 cartridge (note 07b): up to 8 MiB of ROM (banks $000-$1FF) and 8/32/128 KiB of RAM.
 /// Bank numbers are reduced to the real ROM or RAM size, so an out-of-range number never panics.

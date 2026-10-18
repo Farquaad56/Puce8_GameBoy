@@ -7,6 +7,7 @@ use super::{load_ram_payload, BatteryError};
 const ROM_BANK_SIZE: usize = 0x4000;
 /// Size of one RAM bank (note 07b).
 const RAM_BANK_SIZE: usize = 0x2000;
+mod state;
 
 /// MBC1 cartridge (note 07b): registers written in 0000-7FFF, ROM read through them.
 /// Bank numbers are reduced to the real ROM or RAM size, so an out-of-range number never panics.
