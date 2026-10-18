@@ -8,7 +8,8 @@ use std::fs;
 use std::io::Write;
 use std::process::ExitCode;
 
-use puce8gb_core::{Dmg, Machine};
+use puce8gb_core::savestate::HEADER_LEN;
+use puce8gb_core::{Dmg, Machine, StateError};
 
 use crate::run_args::RunArgs;
 // Re-exported for later tasks (C01_47+); bin-only crate, so unused names need an allow.
@@ -17,6 +18,9 @@ pub use crate::serial_scan::{scan_serial, Scan, FAIL_MARKER};
 
 #[cfg(test)]
 mod tests;
+
+/// Exit code for an invalid save state file (E09_03); 2, 3, 4 and 64 are taken. UNKNOWN - to confirm.
+const EXIT_BAD_STATE: u8 = 5;
 
 /// Outcome of a ROM execution (task C01_44).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +102,61 @@ pub fn run_frames(rom: &[u8], args: &RunArgs, frames: u64) -> (Outcome, Vec<u32>
         dmg.run_frame();
     }
     (Outcome::FramesDone, dmg.framebuffer().to_vec())
+}
+
+/// Result of `run_frames_state` (E09_03): the outcome, the final framebuffer (empty on a load
+/// error) and the serialized machine state when it was requested.
+#[derive(Debug)]
+pub struct FramesRun {
+    pub outcome: Outcome,
+    pub frame: Vec<u32>,
+    pub state: Option<Vec<u8>>,
+}
+
+/// Like `run_frames`, with save states (E09_03): when `load` is given the machine is restored
+/// from those bytes before the frames run; when `save` is true the state after the frames is
+/// returned. An invalid state is a `StateError` and runs nothing. No file access.
+pub fn run_frames_state(
+    rom: &[u8],
+    args: &RunArgs,
+    frames: u64,
+    load: Option<&[u8]>,
+    save: bool,
+) -> Result<FramesRun, StateError> {
+    let mut dmg = match Dmg::new(rom) {
+        Ok(dmg) => dmg,
+        Err(_) => {
+            return Ok(FramesRun {
+                outcome: Outcome::LoadError,
+                frame: Vec::new(),
+                state: None,
+            })
+        }
+    };
+    if let Some(v) = args.ly_fixed {
+        dmg.debug_set_ly_override(Some(v));
+    }
+    if let Some(bytes) = load {
+        // A buffer shorter than the header cannot hold a state (E09_03): report BadSize
+        // before the core's magic check, which would fire first on such buffers.
+        if bytes.len() < HEADER_LEN {
+            return Err(StateError::BadSize);
+        }
+        dmg.load_state(bytes)?;
+    }
+    for _ in 0..frames {
+        dmg.run_frame();
+    }
+    let state = if save {
+        Some(dmg.save_state_vec()?)
+    } else {
+        None
+    };
+    Ok(FramesRun {
+        outcome: Outcome::FramesDone,
+        frame: dmg.framebuffer().to_vec(),
+        state,
+    })
 }
 
 /// Run an already-built machine for at most `args.max_cycles` T-cycles (task C01_48): the
@@ -210,22 +269,50 @@ pub fn execute(args: &RunArgs) -> ExitCode {
         }
     };
     if let Some(frames) = args.frames {
-        let (outcome, frame) = run_frames(&rom, args, frames);
-        if outcome == Outcome::LoadError {
-            return ExitCode::from(exit_code(&outcome, args));
+        let load = match &args.load_state {
+            Some(path) => match fs::read(path) {
+                Ok(bytes) => Some(bytes),
+                Err(err) => {
+                    eprintln!("error: cannot read {path}: {err}");
+                    return ExitCode::from(3);
+                }
+            },
+            None => None,
+        };
+        let run = match run_frames_state(
+            &rom,
+            args,
+            frames,
+            load.as_deref(),
+            args.save_state.is_some(),
+        ) {
+            Ok(run) => run,
+            Err(err) => {
+                eprintln!("error: invalid state file: {err:?}");
+                return ExitCode::from(EXIT_BAD_STATE);
+            }
+        };
+        if run.outcome == Outcome::LoadError {
+            return ExitCode::from(exit_code(&run.outcome, args));
+        }
+        if let (Some(path), Some(state)) = (&args.save_state, &run.state) {
+            if let Err(err) = fs::write(path, state) {
+                eprintln!("error: cannot write {path}: {err}");
+                return ExitCode::from(3);
+            }
         }
         if let Some(path) = &args.dump_ppm {
             let written =
-                fs::File::create(path).and_then(|mut f| crate::ppm::write_ppm(&frame, &mut f));
+                fs::File::create(path).and_then(|mut f| crate::ppm::write_ppm(&run.frame, &mut f));
             if let Err(err) = written {
                 eprintln!("error: cannot write {path}: {err}");
                 return ExitCode::from(3);
             }
         }
         if args.hash {
-            println!("{}", crate::hash::hash_line(&frame));
+            println!("{}", crate::hash::hash_line(&run.frame));
         }
-        return ExitCode::from(exit_code(&outcome, args));
+        return ExitCode::from(exit_code(&run.outcome, args));
     }
     let outcome = run_rom(&rom, args);
     if let Outcome::Unimplemented { opcode, pc } = &outcome {

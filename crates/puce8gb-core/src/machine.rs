@@ -20,6 +20,8 @@ pub const FRAMEBUFFER_SIZE: usize = 23040;
 /// Audio ring capacity in interleaved samples: 4096 stereo pairs at 32768 Hz, ~0.125 s
 /// (decision A_04).
 pub const AUDIO_RING_SAMPLES: usize = 2 * 4096;
+#[cfg(test)]
+mod determinism;
 mod state;
 
 /// Error returned when a ROM cannot be loaded (bad ROM => Result, never panic).

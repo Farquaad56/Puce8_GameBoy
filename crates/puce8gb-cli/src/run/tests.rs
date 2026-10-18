@@ -30,6 +30,8 @@ fn args(max_cycles: u64, expect_serial: Option<&str>) -> RunArgs {
         frames: None,
         dump_ppm: None,
         hash: false,
+        save_state: None,
+        load_state: None,
         quiet: false,
     }
 }
@@ -300,4 +302,145 @@ fn e04_06_cart_ram_failure_text_is_reported() {
         run_machine(&mut dmg, &args),
         Outcome::Failed("Failed #3".to_string())
     );
+}
+
+use puce8gb_core::StateError;
+
+use crate::run_args::parse_run_args;
+
+fn e09_03_to_args(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+fn e09_03_parse_err(list: &[&str]) -> String {
+    match parse_run_args(&e09_03_to_args(list)) {
+        Ok(_) => panic!("expected a parse error"),
+        Err(msg) => msg,
+    }
+}
+
+/// Program at $0100: a stripe pattern in VRAM tile 0, then a loop copying LY into SCX.
+fn e09_03_rom() -> Vec<u8> {
+    test_rom(&[
+        0x21, 0x00, 0x80, // LD HL,$8000
+        0x3E, 0xAA, // LD A,$AA
+        0x0E, 0x20, // LD C,$20
+        0x22, // LD (HL+),A
+        0x0D, // DEC C
+        0x20, 0xFC, // JR NZ,-4
+        0xF0, 0x44, // LDH A,($44)
+        0xE0, 0x43, // LDH ($43),A
+        0x18, 0xFA, // JR -6
+    ])
+}
+
+#[test]
+fn e09_03_parse_save_and_load_state_flags() {
+    let a = parse_run_args(&e09_03_to_args(&[
+        "rom.gb",
+        "--frames",
+        "3",
+        "--save-state",
+        "s.bin",
+        "--load-state",
+        "l.bin",
+    ]))
+    .expect("parses");
+    assert_eq!(a.save_state.as_deref(), Some("s.bin"));
+    assert_eq!(a.load_state.as_deref(), Some("l.bin"));
+    let b = parse_run_args(&e09_03_to_args(&["rom.gb", "--frames", "3"])).expect("parses");
+    assert_eq!(b.save_state, None);
+    assert_eq!(b.load_state, None);
+}
+
+#[test]
+fn e09_03_state_flags_require_frames_and_a_value() {
+    assert_eq!(
+        e09_03_parse_err(&["rom.gb", "--save-state", "s.bin"]),
+        "--save-state requires --frames"
+    );
+    assert_eq!(
+        e09_03_parse_err(&["rom.gb", "--load-state", "l.bin"]),
+        "--load-state requires --frames"
+    );
+    assert_eq!(
+        e09_03_parse_err(&["rom.gb", "--frames", "1", "--save-state"]),
+        "--save-state requires a value"
+    );
+    assert_eq!(
+        e09_03_parse_err(&["rom.gb", "--frames", "1", "--load-state"]),
+        "--load-state requires a value"
+    );
+}
+
+#[test]
+fn e09_03_run_frames_state_resumes_like_a_continuous_run() {
+    let rom = e09_03_rom();
+    let a = args(0, None);
+    let full = run_frames_state(&rom, &a, 4, None, false).expect("runs");
+    assert!(
+        full.frame.iter().any(|&p| p != full.frame[0]),
+        "flat picture"
+    );
+    let first = run_frames_state(&rom, &a, 2, None, true).expect("runs");
+    let state = first.state.expect("state requested");
+    let second = run_frames_state(&rom, &a, 2, Some(&state), false).expect("runs");
+    assert_eq!(second.outcome, Outcome::FramesDone);
+    assert_eq!(second.frame, full.frame);
+    assert!(second.state.is_none());
+}
+
+#[test]
+fn e09_03_run_frames_state_rejects_a_bad_state() {
+    let rom = e09_03_rom();
+    let a = args(0, None);
+    let err = run_frames_state(&rom, &a, 1, Some(&[0u8; 4]), false).expect_err("bad state");
+    assert_eq!(err, StateError::BadSize);
+    let first = run_frames_state(&rom, &a, 1, None, true).expect("runs");
+    let mut state = first.state.expect("state requested");
+    state[0] ^= 0xFF;
+    let err = run_frames_state(&rom, &a, 1, Some(&state), false).expect_err("bad magic");
+    assert_eq!(err, StateError::BadMagic);
+}
+
+#[test]
+fn e09_03_cli_save_state_then_load_state_round_trip() {
+    let dir = std::env::temp_dir().join(format!("puce8gb_e09_03_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let rom_path = dir.join("rom.gb");
+    let state_path = dir.join("state.bin");
+    let full_path = dir.join("full.ppm");
+    let resumed_path = dir.join("resumed.ppm");
+    std::fs::write(&rom_path, e09_03_rom()).expect("rom file");
+    let path_of = |p: &std::path::Path| p.to_string_lossy().into_owned();
+
+    let mut full = args(0, None);
+    full.quiet = true;
+    full.rom = path_of(&rom_path);
+    full.frames = Some(4);
+    full.dump_ppm = Some(path_of(&full_path));
+    let _ = execute(&full);
+
+    let mut save = args(0, None);
+    save.quiet = true;
+    save.rom = path_of(&rom_path);
+    save.frames = Some(2);
+    save.save_state = Some(path_of(&state_path));
+    let _ = execute(&save);
+    let state_len = std::fs::metadata(&state_path).expect("state file").len();
+    assert!(state_len > 100_000, "state length {state_len}");
+
+    let mut resume = args(0, None);
+    resume.quiet = true;
+    resume.rom = path_of(&rom_path);
+    resume.frames = Some(2);
+    resume.load_state = Some(path_of(&state_path));
+    resume.dump_ppm = Some(path_of(&resumed_path));
+    let _ = execute(&resume);
+
+    let expected = std::fs::read(&full_path).expect("full ppm");
+    let actual = std::fs::read(&resumed_path).expect("resumed ppm");
+    assert!(!expected.is_empty());
+    assert_eq!(actual, expected);
+    let _ = std::fs::remove_dir_all(&dir);
 }

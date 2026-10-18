@@ -24,6 +24,10 @@ pub struct RunArgs {
     pub dump_ppm: Option<String>,
     /// Print the framebuffer hash after `frames` frames (`--hash`, E03_07).
     pub hash: bool,
+    /// Write the machine save state to this file after the frames ran (`--save-state FILE`, E09_03).
+    pub save_state: Option<String>,
+    /// Load this save state file before running the frames (`--load-state FILE`, E09_03).
+    pub load_state: Option<String>,
     /// Suppress the serial echo on stdout; set by the suite runner, not a CLI flag (E06_01).
     pub quiet: bool,
 }
@@ -40,6 +44,8 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
     let mut frames: Option<u64> = None;
     let mut dump_ppm: Option<String> = None;
     let mut hash = false;
+    let mut save_state: Option<String> = None;
+    let mut load_state: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -51,6 +57,8 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
             "--frames" => frames = Some(number(args, &mut i, "--frames")?),
             "--dump-ppm" => dump_ppm = Some(value(args, &mut i, "--dump-ppm")?),
             "--hash" => hash = true,
+            "--save-state" => save_state = Some(value(args, &mut i, "--save-state")?),
+            "--load-state" => load_state = Some(value(args, &mut i, "--load-state")?),
             other if other.starts_with("--") => return Err(format!("unknown flag: {other}")),
             positional => {
                 if rom.is_none() {
@@ -68,6 +76,12 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
     if hash && frames.is_none() {
         return Err("--hash requires --frames".to_string());
     }
+    if save_state.is_some() && frames.is_none() {
+        return Err("--save-state requires --frames".to_string());
+    }
+    if load_state.is_some() && frames.is_none() {
+        return Err("--load-state requires --frames".to_string());
+    }
     Ok(RunArgs {
         rom,
         max_cycles,
@@ -77,6 +91,8 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
         frames,
         dump_ppm,
         hash,
+        save_state,
+        load_state,
         quiet: false,
     })
 }

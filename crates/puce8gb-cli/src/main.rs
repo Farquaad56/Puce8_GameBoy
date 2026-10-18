@@ -36,7 +36,8 @@ fn main() -> ExitCode {
             eprintln!(
                 "usage: puce8gb-cli [info <rom> | run <rom> [--max-cycles N] \
                  [--expect-serial TEXT] [--trace N] [--ly-fixed HEX] \
-                 [--frames N] [--dump-ppm FILE] [--hash] | \
+                 [--frames N] [--dump-ppm FILE] [--hash] [--save-state FILE] \
+                 [--load-state FILE] | \
                  suite [--only NAME] [--baseline FILE] [--manifest FILE]]"
             );
             ExitCode::from(2)

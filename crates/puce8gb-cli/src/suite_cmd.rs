@@ -39,6 +39,8 @@ fn entry_args(entry: &Entry) -> RunArgs {
         frames: None,
         dump_ppm: None,
         hash: false,
+        save_state: None,
+        load_state: None,
         quiet: true,
     }
 }
@@ -335,6 +337,8 @@ mod tests {
                 frames: Some(2),
                 dump_ppm: None,
                 hash: false,
+                save_state: None,
+                load_state: None,
                 quiet: true,
             },
             2,
