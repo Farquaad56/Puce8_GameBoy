@@ -6,6 +6,7 @@
 pub mod audio;
 pub mod bus;
 pub mod cpu;
+pub mod debug;
 pub mod input;
 pub mod machine;
 pub mod media;
