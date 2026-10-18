@@ -136,6 +136,26 @@ impl Cpu {
         self.locked
     }
 
+    /// True when the next tick fetches an opcode, i.e. an instruction starts. False when the
+    /// tick is idle (lock-up, HALT with no pending request) or serves an interrupt. Read-only
+    /// mirror of the boundary logic of `tick`, used by the trace (E08_04).
+    pub(crate) fn will_fetch(&self, bus: &Bus) -> bool {
+        if self.step != 0 || self.locked {
+            return false;
+        }
+        let mask = bus.pending_interrupts();
+        if self.halted && mask == 0 {
+            return false;
+        }
+        if self.interrupt_step != 0 {
+            return false;
+        }
+        if self.ime && mask != 0 && !halt::preempt_exempt(bus.read(self.pc)) {
+            return false;
+        }
+        true
+    }
+
     /// Test seam for other crates (task C01_48): store an unimplemented-opcode record
     /// without executing anything. Not used by the engine itself.
     #[doc(hidden)]

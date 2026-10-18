@@ -1,10 +1,15 @@
 //! Desktop frontend: an eframe window showing the core framebuffer (E07_01).
 mod audio;
 mod battery;
+mod disasm;
 mod emu;
 mod fps;
 mod input_map;
 mod inspect;
+mod tracewin;
+#[allow(dead_code)]
+#[rustfmt::skip]
+mod opcodes;
 mod pacing;
 mod pads;
 mod resample;
@@ -51,6 +56,7 @@ struct App {
     sheet_tex: Option<egui::TextureHandle>,
     map_tex: [Option<egui::TextureHandle>; 2],
     debug_open: bool,
+    trace_open: bool,
     inspect: inspect::InspectState,
 }
 
@@ -84,6 +90,7 @@ impl App {
             sheet_tex: None,
             map_tex: [None, None],
             debug_open: false,
+            trace_open: false,
             inspect: inspect::InspectState::default(),
         };
         if let Some(path) = rom_path {
@@ -247,16 +254,24 @@ impl eframe::App for App {
                     {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
                     }
+                    if ui.checkbox(&mut self.trace_open, "CPU trace").changed() {
+                        self.emu.send(Command::Trace(self.trace_open));
+                        self.emu.send(Command::Viewer(
+                            self.viewer_open || self.debug_open || self.trace_open,
+                        ));
+                    }
                     if ui.checkbox(&mut self.viewer_open, "Tile viewer").changed() {
-                        self.emu
-                            .send(Command::Viewer(self.viewer_open || self.debug_open));
+                        self.emu.send(Command::Viewer(
+                            self.viewer_open || self.debug_open || self.trace_open,
+                        ));
                     }
                     if ui
                         .checkbox(&mut self.debug_open, "Memory, OAM and palettes")
                         .changed()
                     {
-                        self.emu
-                            .send(Command::Viewer(self.viewer_open || self.debug_open));
+                        self.emu.send(Command::Viewer(
+                            self.viewer_open || self.debug_open || self.trace_open,
+                        ));
                     }
                 });
                 ui.menu_button("Keys", |ui| {
@@ -388,13 +403,21 @@ impl eframe::App for App {
                 });
             if !open {
                 self.viewer_open = false;
-                self.emu.send(Command::Viewer(self.debug_open));
+                self.emu
+                    .send(Command::Viewer(self.debug_open || self.trace_open));
             }
         }
         if self.debug_open && !inspect::show_window(&ctx, &mut self.inspect, self.snapshot.as_ref())
         {
             self.debug_open = false;
-            self.emu.send(Command::Viewer(self.viewer_open));
+            self.emu
+                .send(Command::Viewer(self.viewer_open || self.trace_open));
+        }
+        if self.trace_open && !tracewin::show_window(&ctx, self.snapshot.as_ref()) {
+            self.trace_open = false;
+            self.emu.send(Command::Trace(false));
+            self.emu
+                .send(Command::Viewer(self.viewer_open || self.debug_open));
         }
         ctx.request_repaint();
     }

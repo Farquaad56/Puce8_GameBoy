@@ -26,6 +26,7 @@ pub enum Command {
     FrameStep,
     Input(Input),
     Viewer(bool),
+    Trace(bool),
     Quit,
 }
 
@@ -146,6 +147,7 @@ fn run(
     let mut save_path: Option<PathBuf> = None;
     let mut viewer_on = false;
     let mut since_snapshot: u32 = 0;
+    let mut trace_on = false;
     loop {
         loop {
             match commands.try_recv() {
@@ -185,6 +187,7 @@ fn run(
                     viewer_on = on;
                     since_snapshot = SNAPSHOT_EVERY;
                 }
+                Ok(Command::Trace(on)) => trace_on = on,
                 Ok(Command::Quit) | Err(TryRecvError::Disconnected) => {
                     if let Some(m) = machine.as_ref() {
                         battery.flush(m);
@@ -228,6 +231,9 @@ fn run(
             }
             if produced {
                 let _ = frames.try_send(m.framebuffer().to_vec()); // full channel: drop the frame
+            }
+            if m.trace_enabled() != trace_on {
+                m.set_trace_enabled(trace_on);
             }
             if viewer_on {
                 if produced {

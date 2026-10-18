@@ -8,6 +8,7 @@ use crate::input::Input;
 use crate::media::mapper::cartridge_has_battery;
 use crate::media::{BatteryError, Media};
 use crate::savestate::StateError;
+use crate::trace::Trace;
 use crate::video::{Ppu, VBLANK_FIRST_LINE};
 
 /// Dots per frame: 70224 (note 01_timing.md, decision A_01).
@@ -87,6 +88,8 @@ pub struct Dmg {
     stat_line_prev: bool,
     /// Frames completed since reset, incremented at each frame boundary (E03_14 spec).
     frame_count: u64,
+    /// Instruction trace ring (E08_04); empty and inactive until enabled.
+    pub(crate) trace: Trace,
 }
 
 impl Dmg {
@@ -137,6 +140,7 @@ impl Dmg {
             dot_phase: 0,
             stat_line_prev: false, // no STAT request pending at power-up (E03_08)
             frame_count: 0,
+            trace: Trace::default(),
         };
         dmg.reset();
         Ok(dmg)
@@ -189,6 +193,7 @@ impl Machine for Dmg {
         // The STAT interrupt line is low at power-up: no pending request (E03_08).
         self.stat_line_prev = false;
         self.frame_count = 0;
+        self.trace.clear();
         // Mirror the PPU's CPU access state for VRAM/OAM at power-up and reset (E03_10);
         // Dmg::new ends by calling this, so both paths are covered.
         self.bus
@@ -204,6 +209,7 @@ impl Machine for Dmg {
         // are filled in by later tasks.
         self.dot_phase = (self.dot_phase + 1) % 4;
         if self.dot_phase == 0 {
+            self.trace_instruction_start();
             self.cpu.tick(&mut self.bus);
             // Timer advances one M-cycle per M-cycle, after the CPU so a DIV/TAC write is
             // visible in the same dot (decision A_01). The timer tick returns true when the

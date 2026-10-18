@@ -2,7 +2,8 @@
 //! Only the core snapshot API is used (Dmg::debug_tile, Dmg::debug_palettes, Dmg::peek).
 
 use eframe::egui;
-use puce8gb_core::debug::{OamEntry, Palettes, OAM_ENTRIES, TILE_COUNT};
+use puce8gb_core::debug::{CpuRegs, OamEntry, Palettes, OAM_ENTRIES, TILE_COUNT};
+use puce8gb_core::trace::TraceEntry;
 use puce8gb_core::Dmg;
 
 /// Tile sheet layout: 16 tiles per row, 24 rows.
@@ -36,6 +37,8 @@ pub struct Snapshot {
     pub palettes: Palettes,
     /// All 65536 addresses read with Dmg::peek, index = address.
     pub memory: Vec<u8>,
+    /// Traced instructions, oldest first (empty while the trace is off).
+    pub trace: Vec<TraceEntry>,
 }
 
 /// Pixel position (x, y) of the top-left corner of tile `index` in a sheet of `cols` tiles per row.
@@ -84,6 +87,14 @@ pub fn capture(dmg: &Dmg) -> Snapshot {
     let mut oam = [OamEntry::default(); OAM_ENTRIES];
     dmg.debug_oam(&mut oam);
     let memory: Vec<u8> = (0..=0xFFFFu16).map(|addr| dmg.peek(addr)).collect();
+    let blank = TraceEntry {
+        pc: 0,
+        bytes: [0; 3],
+        regs: CpuRegs::default(),
+    };
+    let mut trace = vec![blank; 256];
+    let trace_len = dmg.debug_trace(&mut trace);
+    trace.truncate(trace_len);
     Snapshot {
         tiles,
         maps: [map0, map1],
@@ -92,6 +103,7 @@ pub fn capture(dmg: &Dmg) -> Snapshot {
         oam: oam.to_vec(),
         palettes: dmg.debug_palettes(),
         memory,
+        trace,
     }
 }
 

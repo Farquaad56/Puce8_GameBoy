@@ -12,6 +12,7 @@ pub mod machine;
 pub mod media;
 pub mod savestate;
 pub mod timer;
+pub mod trace;
 pub mod video;
 
 pub use input::Input;
