@@ -3,6 +3,7 @@ use crate::audio::{pacing_decision, push_budget, target_fill, AudioOut, Pace};
 use crate::battery::BatterySaver;
 use crate::pacing::{clamp_owed, Pacer, MAX_BACKLOG_FRAMES};
 use crate::resample::Resampler;
+use crate::viewer::{capture, Snapshot};
 use crate::volume::gain_for_percent;
 use puce8gb_core::machine::{AUDIO_RING_SAMPLES, FRAME_DOTS};
 use puce8gb_core::{Dmg, Input, Machine};
@@ -13,6 +14,9 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+/// Frames between two viewer snapshots while the machine runs.
+const SNAPSHOT_EVERY: u32 = 4;
+
 /// Commands sent from the UI to the emulation thread.
 pub enum Command {
     Load(Vec<u8>),
@@ -21,6 +25,7 @@ pub enum Command {
     Pause(bool),
     FrameStep,
     Input(Input),
+    Viewer(bool),
     Quit,
 }
 
@@ -31,6 +36,8 @@ pub struct EmuHandle {
     pub frames: Receiver<Vec<u32>>,
     /// Human readable status messages from the thread.
     pub status: Receiver<String>,
+    /// Viewer snapshots, produced only while the viewer is open.
+    pub snapshots: Receiver<Snapshot>,
     volume: Arc<AtomicU32>,
     thread: Option<JoinHandle<()>>,
 }
@@ -42,12 +49,15 @@ impl EmuHandle {
         let (commands, command_rx) = channel();
         let (frame_tx, frames) = sync_channel(2);
         let (status_tx, status) = channel();
-        let thread =
-            std::thread::spawn(move || run(command_rx, frame_tx, status_tx, thread_volume));
+        let (snapshot_tx, snapshots) = sync_channel(1);
+        let thread = std::thread::spawn(move || {
+            run(command_rx, frame_tx, status_tx, thread_volume, snapshot_tx)
+        });
         EmuHandle {
             commands,
             frames,
             status,
+            snapshots,
             volume,
             thread: Some(thread),
         }
@@ -118,6 +128,7 @@ fn run(
     frames: SyncSender<Vec<u32>>,
     status: Sender<String>,
     volume: Arc<AtomicU32>,
+    snapshots: SyncSender<Snapshot>,
 ) {
     let mut machine: Option<Dmg> = None;
     let mut sound = Sound::open(volume);
@@ -133,6 +144,8 @@ fn run(
     let mut last = Instant::now();
     let mut battery = BatterySaver::new();
     let mut save_path: Option<PathBuf> = None;
+    let mut viewer_on = false;
+    let mut since_snapshot: u32 = 0;
     loop {
         loop {
             match commands.try_recv() {
@@ -168,6 +181,10 @@ fn run(
                     }
                 }
                 Ok(Command::SavePath(path)) => save_path = path,
+                Ok(Command::Viewer(on)) => {
+                    viewer_on = on;
+                    since_snapshot = SNAPSHOT_EVERY;
+                }
                 Ok(Command::Quit) | Err(TryRecvError::Disconnected) => {
                     if let Some(m) = machine.as_ref() {
                         battery.flush(m);
@@ -211,6 +228,15 @@ fn run(
             }
             if produced {
                 let _ = frames.try_send(m.framebuffer().to_vec()); // full channel: drop the frame
+            }
+            if viewer_on {
+                if produced {
+                    since_snapshot += 1;
+                }
+                if since_snapshot >= SNAPSHOT_EVERY || (produced && paused) {
+                    let _ = snapshots.try_send(capture(m));
+                    since_snapshot = 0;
+                }
             }
             battery.poll(m, Instant::now());
         }

@@ -10,6 +10,7 @@ mod resample;
 mod rom_info;
 mod scale;
 mod settings;
+mod viewer;
 mod volume;
 
 use eframe::egui;
@@ -43,6 +44,11 @@ struct App {
     sent_title: String,
     settings_file: PathBuf,
     capture: Option<Button>,
+    viewer_open: bool,
+    snapshot: Option<viewer::Snapshot>,
+    snapshot_dirty: bool,
+    sheet_tex: Option<egui::TextureHandle>,
+    map_tex: [Option<egui::TextureHandle>; 2],
 }
 
 impl App {
@@ -69,6 +75,11 @@ impl App {
             sent_title: rom_info::window_title(""),
             settings_file,
             capture: None,
+            viewer_open: false,
+            snapshot: None,
+            snapshot_dirty: false,
+            sheet_tex: None,
+            map_tex: [None, None],
         };
         if let Some(path) = rom_path {
             app.load_rom(std::path::Path::new(&path));
@@ -132,6 +143,10 @@ impl eframe::App for App {
         }
         while let Ok(message) = self.emu.status.try_recv() {
             self.status = message;
+        }
+        while let Ok(snap) = self.emu.snapshots.try_recv() {
+            self.snapshot = Some(snap);
+            self.snapshot_dirty = true;
         }
         // Key remapping: the next key pressed is bound to the waiting button.
         if let Some(button) = self.capture {
@@ -227,6 +242,9 @@ impl eframe::App for App {
                     {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
                     }
+                    if ui.checkbox(&mut self.viewer_open, "Tile viewer").changed() {
+                        self.emu.send(Command::Viewer(self.viewer_open));
+                    }
                 });
                 ui.menu_button("Keys", |ui| {
                     for button in BUTTONS.iter().copied() {
@@ -297,6 +315,69 @@ impl eframe::App for App {
                 });
             }
         });
+        if self.viewer_open {
+            if self.snapshot_dirty {
+                if let Some(snap) = &self.snapshot {
+                    let sheet = viewer::to_color_image(
+                        &viewer::sheet_shades(snap),
+                        viewer::SHEET_W,
+                        viewer::SHEET_H,
+                    );
+                    viewer::upload(&ctx, &mut self.sheet_tex, "tile_sheet", sheet);
+                    for (which, slot) in self.map_tex.iter_mut().enumerate() {
+                        let map = viewer::to_color_image(
+                            &viewer::map_shades(snap, which),
+                            viewer::MAP_PX,
+                            viewer::MAP_PX,
+                        );
+                        viewer::upload(&ctx, slot, &format!("tile_map_{which}"), map);
+                    }
+                }
+                self.snapshot_dirty = false;
+            }
+            let mut open = true;
+            egui::Window::new("Tile viewer")
+                .open(&mut open)
+                .show(&ctx, |ui| {
+                    egui::ScrollArea::both().show(ui, |ui| {
+                        ui.horizontal_top(|ui| {
+                            if let Some(tex) = &self.sheet_tex {
+                                ui.vertical(|ui| {
+                                    ui.label("Tiles (current BGP)");
+                                    let size = egui::vec2(
+                                        (viewer::SHEET_W * viewer::SHEET_SCALE) as f32,
+                                        (viewer::SHEET_H * viewer::SHEET_SCALE) as f32,
+                                    );
+                                    ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                                        tex.id(),
+                                        size,
+                                    )));
+                                });
+                            }
+                            ui.vertical(|ui| {
+                                for (which, slot) in self.map_tex.iter().enumerate() {
+                                    if let Some(tex) = slot {
+                                        let base = if which == 0 { "$9800" } else { "$9C00" };
+                                        ui.label(format!("Tile map {base}"));
+                                        let size = egui::vec2(
+                                            (viewer::MAP_PX * viewer::MAP_SCALE) as f32,
+                                            (viewer::MAP_PX * viewer::MAP_SCALE) as f32,
+                                        );
+                                        ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                                            tex.id(),
+                                            size,
+                                        )));
+                                    }
+                                }
+                            });
+                        });
+                    });
+                });
+            if !open {
+                self.viewer_open = false;
+                self.emu.send(Command::Viewer(false));
+            }
+        }
         ctx.request_repaint();
     }
 }
