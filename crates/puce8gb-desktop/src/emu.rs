@@ -161,7 +161,7 @@ fn run(
                         if let Some(old_dmg) = machine.as_ref() {
                             battery.flush(old_dmg);
                         }
-                        battery.attach(&mut new_dmg, save_path.take());
+                        battery.attach(&mut new_dmg, save_path.clone());
                         machine = Some(new_dmg);
                         owed = 0;
                         let _ = status.send(format!("ROM loaded - {mode}"));
