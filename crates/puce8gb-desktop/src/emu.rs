@@ -3,6 +3,7 @@ use crate::audio::{pacing_decision, push_budget, target_fill, AudioOut, Pace};
 use crate::battery::BatterySaver;
 use crate::pacing::{clamp_owed, Pacer, MAX_BACKLOG_FRAMES};
 use crate::resample::Resampler;
+use crate::slots::{read_slot, slot_path, state_error_message, write_slot};
 use crate::viewer::{capture, Snapshot};
 use crate::volume::gain_for_percent;
 use puce8gb_core::machine::{AUDIO_RING_SAMPLES, FRAME_DOTS};
@@ -24,6 +25,10 @@ pub enum Command {
     Reset,
     Pause(bool),
     FrameStep,
+    /// Serialize the machine into slot file N (1..=4) next to the ROM.
+    SaveSlot(u32),
+    /// Restore the machine from slot file N (1..=4); battery RAM is untouched.
+    LoadSlot(u32),
     Input(Input),
     Viewer(bool),
     Trace(bool),
@@ -177,6 +182,50 @@ fn run(
                     steps = 0;
                 }
                 Ok(Command::FrameStep) => steps += 1,
+                Ok(Command::SaveSlot(slot)) => {
+                    let (Some(m), Some(base)) = (machine.as_ref(), save_path.as_ref()) else {
+                        let _ = status.send(String::from("Load a ROM first"));
+                        continue;
+                    };
+                    let file = slot_path(base, slot);
+                    match m.save_state_vec() {
+                        Ok(bytes) => match write_slot(&file, &bytes) {
+                            Ok(()) => {
+                                let _ =
+                                    status.send(format!("Slot {slot} saved to {}", file.display()));
+                            }
+                            Err(err) => {
+                                let _ = status.send(format!("Cannot save slot {slot}: {err}"));
+                            }
+                        },
+                        Err(err) => {
+                            let _ = status.send(state_error_message(slot, &err));
+                        }
+                    }
+                }
+                Ok(Command::LoadSlot(slot)) => {
+                    let (Some(m), Some(base)) = (machine.as_mut(), save_path.as_ref()) else {
+                        let _ = status.send(String::from("Load a ROM first"));
+                        continue;
+                    };
+                    let file = slot_path(base, slot);
+                    match read_slot(&file) {
+                        None => {
+                            let _ =
+                                status.send(format!("No save in slot {slot} ({})", file.display()));
+                        }
+                        Some(bytes) => match m.load_state(&bytes) {
+                            Ok(()) => {
+                                owed = 0;
+                                let _ = status
+                                    .send(format!("Slot {slot} loaded from {}", file.display()));
+                            }
+                            Err(err) => {
+                                let _ = status.send(state_error_message(slot, &err));
+                            }
+                        },
+                    }
+                }
                 Ok(Command::Input(input)) => {
                     if let Some(m) = machine.as_mut() {
                         m.set_input(input);

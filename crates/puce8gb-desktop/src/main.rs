@@ -16,6 +16,7 @@ mod resample;
 mod rom_info;
 mod scale;
 mod settings;
+mod slots;
 mod viewer;
 mod volume;
 
@@ -205,6 +206,22 @@ impl eframe::App for App {
                 self.fullscreen = !self.fullscreen;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
             }
+            let slot_key = [egui::Key::F5, egui::Key::F6, egui::Key::F7, egui::Key::F8]
+                .into_iter()
+                .find(|key| ctx.input(|i| i.key_pressed(*key)));
+            if let Some(key) = slot_key {
+                let slot = match key {
+                    egui::Key::F5 => 1,
+                    egui::Key::F6 => 2,
+                    egui::Key::F7 => 3,
+                    _ => 4,
+                };
+                if ctx.input(|i| i.modifiers.shift) {
+                    self.emu.send(Command::LoadSlot(slot));
+                } else {
+                    self.emu.send(Command::SaveSlot(slot));
+                }
+            }
         }
         if self.title != self.sent_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.title.clone()));
@@ -245,6 +262,24 @@ impl eframe::App for App {
                     }
                     if response.drag_stopped() || (response.changed() && !response.dragged()) {
                         self.save_settings();
+                    }
+                });
+                ui.menu_button("Save states", |ui| {
+                    for slot in 1..=slots::SLOT_COUNT {
+                        if ui
+                            .button(format!("Save slot {slot} (F{})", 4 + slot))
+                            .clicked()
+                        {
+                            self.emu.send(Command::SaveSlot(slot));
+                            ui.close();
+                        }
+                        if ui
+                            .button(format!("Load slot {slot} (Shift+F{})", 4 + slot))
+                            .clicked()
+                        {
+                            self.emu.send(Command::LoadSlot(slot));
+                            ui.close();
+                        }
                     }
                 });
                 ui.menu_button("View", |ui| {
@@ -319,7 +354,7 @@ impl eframe::App for App {
                 }
             });
             ui.label(
-                "Default keys: Arrows, W=A, X=B, Enter=Start, Backspace=Select (Keys menu to change) | P pause, N frame step, R reset, F11 fullscreen",
+                "Default keys: Arrows, W=A, X=B, Enter=Start, Backspace=Select (Keys menu to change) | P pause, N frame step, R reset, F11 fullscreen | F5-F8 save slots 1-4, Shift+F5-F8 load",
             );
         });
         egui::CentralPanel::default().show(ui, |ui| {
