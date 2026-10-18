@@ -2,7 +2,7 @@
 //! Only the core snapshot API is used (Dmg::debug_tile, Dmg::debug_palettes, Dmg::peek).
 
 use eframe::egui;
-use puce8gb_core::debug::TILE_COUNT;
+use puce8gb_core::debug::{OamEntry, Palettes, OAM_ENTRIES, TILE_COUNT};
 use puce8gb_core::Dmg;
 
 /// Tile sheet layout: 16 tiles per row, 24 rows.
@@ -30,6 +30,12 @@ pub struct Snapshot {
     pub lcdc: u8,
     /// BGP ($FF47) decoded: shade index of color 0..3.
     pub bgp: [u8; 4],
+    /// The 40 OAM entries as stored.
+    pub oam: Vec<OamEntry>,
+    /// BGP, OBP0 and OBP1 decoded.
+    pub palettes: Palettes,
+    /// All 65536 addresses read with Dmg::peek, index = address.
+    pub memory: Vec<u8>,
 }
 
 /// Pixel position (x, y) of the top-left corner of tile `index` in a sheet of `cols` tiles per row.
@@ -75,11 +81,17 @@ pub fn capture(dmg: &Dmg) -> Snapshot {
         *a = dmg.peek(MAP0_BASE + i as u16);
         *b = dmg.peek(MAP1_BASE + i as u16);
     }
+    let mut oam = [OamEntry::default(); OAM_ENTRIES];
+    dmg.debug_oam(&mut oam);
+    let memory: Vec<u8> = (0..=0xFFFFu16).map(|addr| dmg.peek(addr)).collect();
     Snapshot {
         tiles,
         maps: [map0, map1],
         lcdc: dmg.peek(0xFF40),
         bgp: dmg.debug_palettes().bgp,
+        oam: oam.to_vec(),
+        palettes: dmg.debug_palettes(),
+        memory,
     }
 }
 
@@ -212,5 +224,31 @@ mod tests {
         assert_eq!(image.pixels[1], egui::Color32::from_gray(0xAA));
         assert_eq!(image.pixels[2], egui::Color32::from_gray(0x55));
         assert_eq!(image.pixels[3], egui::Color32::from_gray(0x00));
+    }
+
+    #[test]
+    fn e08_03_capture_includes_oam_palettes_and_memory() {
+        let mut dmg = test_dmg();
+        dmg.bus.oam[0..4].copy_from_slice(&[16, 8, 0x42, 0xA0]);
+        dmg.bus.io[0x48] = 0x1B;
+        dmg.bus.vram[0] = 0x77;
+        dmg.bus.wram[0] = 0x5A;
+        let snap = capture(&dmg);
+        assert_eq!(snap.oam.len(), 40);
+        assert_eq!(
+            snap.oam[0],
+            OamEntry {
+                y: 16,
+                x: 8,
+                tile: 0x42,
+                flags: 0xA0
+            }
+        );
+        assert_eq!(snap.palettes.obp0, [3, 2, 1, 0]);
+        assert_eq!(snap.memory.len(), 0x10000);
+        assert_eq!(snap.memory[0x8000], 0x77);
+        assert_eq!(snap.memory[0xC000], 0x5A);
+        assert_eq!(snap.memory[0xE000], 0x5A);
+        assert_eq!(snap.memory[0xFF48], 0x1B);
     }
 }
