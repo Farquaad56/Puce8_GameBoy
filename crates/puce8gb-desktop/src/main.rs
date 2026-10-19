@@ -65,6 +65,7 @@ struct App {
     show_fps: bool,
     chrome_h: f32,
     resize_pending: bool,
+    palette: palettes::PaletteChoice,
 }
 
 impl App {
@@ -103,7 +104,9 @@ impl App {
             show_fps: loaded.show_fps,
             chrome_h: 60.0,
             resize_pending: true,
+            palette: loaded.palette,
         };
+        app.apply_palette();
         if let Some(path) = rom_path {
             app.load_rom(std::path::Path::new(&path));
         }
@@ -116,8 +119,17 @@ impl App {
             keys: self.key_map,
             window_scale: self.window_scale,
             show_fps: self.show_fps,
+            palette: self.palette,
         };
         let _ = std::fs::write(&self.settings_file, settings.to_text());
+    }
+
+    /// Sends the chosen palette to the emulation thread; CoreDefault sends nothing (E11_03).
+    fn apply_palette(&self) {
+        if let Some(colors) = self.palette.colors() {
+            self.emu
+                .send(Command::Palette(colors.map(palettes::pack_core)));
+        }
     }
 
     /// Asks the window manager for the inner size matching the chosen scale (all values in points).

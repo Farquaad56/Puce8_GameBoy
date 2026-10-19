@@ -86,6 +86,57 @@ pub fn format_palette(palette: [u32; 4]) -> String {
         .join(",")
 }
 
+/// The user's palette choice (E11_03). CoreDefault means: send nothing, the core keeps its own colors.
+#[allow(dead_code)] // used by E11_04
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PaletteChoice {
+    #[default]
+    CoreDefault,
+    Preset(usize),
+    Custom([u32; 4]),
+}
+
+impl PaletteChoice {
+    /// Colors to send to the core; None when the core keeps its own colors or the preset index is invalid.
+    #[allow(dead_code)] // used by E11_04
+    pub fn colors(&self) -> Option<[u32; 4]> {
+        match self {
+            PaletteChoice::CoreDefault => None,
+            PaletteChoice::Preset(index) => PRESETS.get(*index).map(|preset| preset.colors),
+            PaletteChoice::Custom(colors) => Some(*colors),
+        }
+    }
+
+    /// Settings text: "default", a preset name, or four "#RRGGBB" colors joined by commas.
+    #[allow(clippy::wrong_self_convention)] // Copy self kept as &self for symmetry with from_text
+    pub fn to_text(&self) -> String {
+        match self {
+            PaletteChoice::CoreDefault => String::from("default"),
+            PaletteChoice::Preset(index) => PRESETS
+                .get(*index)
+                .map_or_else(|| String::from("default"), |preset| preset.name.to_string()),
+            PaletteChoice::Custom(colors) => format_palette(*colors),
+        }
+    }
+
+    /// Parses settings text; unknown text gives CoreDefault.
+    pub fn from_text(text: &str) -> PaletteChoice {
+        let trimmed = text.trim();
+        if let Some(index) = preset_index(trimmed) {
+            return PaletteChoice::Preset(index);
+        }
+        if let Some(colors) = parse_palette(trimmed) {
+            return PaletteChoice::Custom(colors);
+        }
+        PaletteChoice::CoreDefault
+    }
+}
+
+/// Converts 0xRRGGBB to the core pixel format 0xAARRGGBB (alpha FF).
+pub fn pack_core(color: u32) -> u32 {
+    0xFF00_0000 | (color & 0x00FF_FFFF)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +193,52 @@ mod tests {
             None
         );
         assert_eq!(parse_palette("#FFFFFF,#AAAAAA,#555555,zzzzzz"), None);
+    }
+
+    #[test]
+    fn e11_03_choice_text_round_trip() {
+        let custom = [0x112233, 0x445566, 0x778899, 0xAABBCC];
+        for choice in [
+            PaletteChoice::CoreDefault,
+            PaletteChoice::Preset(2),
+            PaletteChoice::Custom(custom),
+        ] {
+            assert_eq!(PaletteChoice::from_text(&choice.to_text()), choice);
+        }
+        assert_eq!(PaletteChoice::Preset(2).to_text(), "Pocket");
+        assert_eq!(
+            PaletteChoice::Custom(custom).to_text(),
+            "#112233,#445566,#778899,#AABBCC"
+        );
+    }
+
+    #[test]
+    fn e11_03_unknown_text_gives_core_default() {
+        assert_eq!(PaletteChoice::from_text("nope"), PaletteChoice::CoreDefault);
+        assert_eq!(PaletteChoice::from_text(""), PaletteChoice::CoreDefault);
+        assert_eq!(
+            PaletteChoice::from_text("default"),
+            PaletteChoice::CoreDefault
+        );
+        assert_eq!(PaletteChoice::default(), PaletteChoice::CoreDefault);
+    }
+
+    #[test]
+    fn e11_03_colors_of_each_choice() {
+        assert_eq!(PaletteChoice::CoreDefault.colors(), None);
+        assert_eq!(PaletteChoice::Preset(99).colors(), None);
+        assert_eq!(PaletteChoice::Preset(1).colors(), Some(PRESETS[1].colors));
+        assert_eq!(
+            PaletteChoice::Custom([1, 2, 3, 4]).colors(),
+            Some([1, 2, 3, 4])
+        );
+        assert_eq!(PaletteChoice::Preset(99).to_text(), "default");
+    }
+
+    #[test]
+    fn e11_03_pack_core_adds_opaque_alpha() {
+        assert_eq!(pack_core(0x9BBC0F), 0xFF9B_BC0F);
+        assert_eq!(pack_core(0x000000), 0xFF00_0000);
+        assert_eq!(pack_core(0xFFFFFF), 0xFFFF_FFFF);
     }
 }

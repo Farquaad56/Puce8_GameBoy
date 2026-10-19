@@ -2,6 +2,7 @@
 
 use crate::display::clamp_scale;
 use crate::input_map::{Button, KeyMap, BUTTONS};
+use crate::palettes::PaletteChoice;
 use crate::volume::{DEFAULT_VOLUME, MAX_VOLUME};
 use eframe::egui::Key;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,7 @@ pub struct Settings {
     pub keys: KeyMap,
     pub window_scale: u32,
     pub show_fps: bool,
+    pub palette: PaletteChoice,
 }
 
 impl Default for Settings {
@@ -27,6 +29,7 @@ impl Default for Settings {
             keys: KeyMap::default(),
             window_scale: DEFAULT_WINDOW_SCALE,
             show_fps: true,
+            palette: PaletteChoice::CoreDefault,
         }
     }
 }
@@ -55,6 +58,7 @@ impl Settings {
         let mut text = format!("volume={}\n", self.volume);
         text.push_str(&format!("scale={}\n", self.window_scale));
         text.push_str(&format!("show_fps={}\n", self.show_fps));
+        text.push_str(&format!("palette={}\n", self.palette.to_text()));
         for button in BUTTONS {
             text.push_str(&format!(
                 "key_{}={}\n",
@@ -85,6 +89,8 @@ impl Settings {
                 if let Ok(show) = value.parse::<bool>() {
                     settings.show_fps = show;
                 }
+            } else if name == "palette" {
+                settings.palette = PaletteChoice::from_text(value);
             } else if let Some(button_text) = name.strip_prefix("key_") {
                 let button = BUTTONS
                     .iter()
@@ -184,5 +190,33 @@ mod tests {
         let parsed = Settings::from_text("bogus_key=1\nscale=2\nshow_fps=false\n");
         assert_eq!(parsed.window_scale, 2);
         assert!(!parsed.show_fps);
+    }
+
+    #[test]
+    fn e11_03_palette_round_trip_in_settings() {
+        for palette in [
+            PaletteChoice::CoreDefault,
+            PaletteChoice::Preset(1),
+            PaletteChoice::Custom([0x112233, 0x445566, 0x778899, 0xAABBCC]),
+        ] {
+            let custom = Settings {
+                palette,
+                ..Settings::default()
+            };
+            assert_eq!(Settings::from_text(&custom.to_text()), custom);
+        }
+    }
+
+    #[test]
+    fn e11_03_unknown_palette_text_gives_default() {
+        let parsed = Settings::from_text("palette=nope\nvolume=40\n");
+        assert_eq!(parsed.palette, PaletteChoice::CoreDefault);
+        assert_eq!(parsed.volume, 40);
+    }
+
+    #[test]
+    fn e11_03_missing_palette_line_gives_default() {
+        let parsed = Settings::from_text("volume=40\n");
+        assert_eq!(parsed.palette, PaletteChoice::CoreDefault);
     }
 }

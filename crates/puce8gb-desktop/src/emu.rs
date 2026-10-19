@@ -32,6 +32,8 @@ pub enum Command {
     Input(Input),
     Viewer(bool),
     Trace(bool),
+    /// Output colors of shades 0..3 as 0xAARRGGBB; re-applied after every ROM load (E11_03).
+    Palette([u32; 4]),
     Quit,
 }
 
@@ -153,6 +155,7 @@ fn run(
     let mut viewer_on = false;
     let mut since_snapshot: u32 = 0;
     let mut trace_on = false;
+    let mut palette: Option<[u32; 4]> = None;
     loop {
         loop {
             match commands.try_recv() {
@@ -162,6 +165,9 @@ fn run(
                             battery.flush(old_dmg);
                         }
                         battery.attach(&mut new_dmg, save_path.clone());
+                        if let Some(colors) = palette {
+                            new_dmg.set_dmg_palette(colors);
+                        }
                         machine = Some(new_dmg);
                         owed = 0;
                         let _ = status.send(format!("ROM loaded - {mode}"));
@@ -237,6 +243,12 @@ fn run(
                     since_snapshot = SNAPSHOT_EVERY;
                 }
                 Ok(Command::Trace(on)) => trace_on = on,
+                Ok(Command::Palette(colors)) => {
+                    palette = Some(colors);
+                    if let Some(m) = machine.as_mut() {
+                        m.set_dmg_palette(colors);
+                    }
+                }
                 Ok(Command::Quit) | Err(TryRecvError::Disconnected) => {
                     if let Some(m) = machine.as_ref() {
                         battery.flush(m);
