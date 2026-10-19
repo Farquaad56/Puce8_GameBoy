@@ -99,6 +99,16 @@ impl Dmg {
     /// Minimum ROM length: the header occupies $0100-$014F of bank 0 (note 07a).
     pub const MIN_ROM_LEN: usize = 0x150;
 
+    /// Sets the four output colors of shades 0..3 (E11_01); not part of the save state.
+    pub fn set_dmg_palette(&mut self, colors: [u32; 4]) {
+        self.ppu.set_dmg_palette(colors);
+    }
+
+    /// Current output colors of shades 0..3 (E11_01).
+    pub fn dmg_palette(&self) -> [u32; 4] {
+        self.ppu.dmg_palette()
+    }
+
     /// Battery-backed cartridge RAM for the frontend to save (E05_06): the persistent bytes of
     /// the mapper's RAM. None when the cartridge type has no battery or no RAM is present. File
     /// access stays in the frontends.
@@ -1057,6 +1067,15 @@ mod tests {
         }
         assert_eq!(a.framebuffer(), b.framebuffer()); // deterministic: same image (E03_14 spec)
         assert_eq!(a.frame_count(), 3);
+    }
+
+    #[test]
+    fn e11_01_machine_forwards_the_palette_to_the_ppu() {
+        let mut dmg = Dmg::new(&rom(32 * 1024, 0x00)).expect("ROM loads");
+        let colors = [0xFF01_0203, 0xFF04_0506, 0xFF07_0809, 0xFF0A_0B0C];
+        dmg.set_dmg_palette(colors);
+        assert_eq!(dmg.dmg_palette(), colors);
+        assert_eq!(dmg.ppu.dmg_palette(), colors);
     }
 
     #[test]

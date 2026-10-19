@@ -56,9 +56,14 @@ pub const LCDC_BG_ENABLE: u8 = 0x01;
 /// DMG output colors (E03_05 spec): u32 as 0xAARRGGBB with AA = 0xFF, neutral greys.
 pub const PALETTE: [u32; 4] = [0xFFFF_FFFF, 0xFFAA_AAAA, 0xFF55_5555, 0xFF00_0000];
 
+/// Shade 0..3 of a color index through a palette byte (E11_01): (palette >> (index * 2)) & 3.
+pub fn shade_index(palette: u8, index: u8) -> usize {
+    usize::from((palette >> ((index & 3) * 2)) & 3)
+}
+
 /// Output color of a color index through a palette byte (E03_05 spec): shade = (palette >> (index * 2)) & 3.
 pub fn shade_color(palette: u8, index: u8) -> u32 {
-    PALETTE[usize::from((palette >> ((index & 3) * 2)) & 3)]
+    PALETTE[shade_index(palette, index)]
 }
 
 /// One output pixel of a visible line (E03_04 spec): color index 0..3, whether the pixel comes
@@ -85,6 +90,8 @@ const PIXEL_BG_ZERO: PixelOut = PixelOut {
 #[derive(Debug)]
 pub struct Ppu {
     pub frame: [u32; FRAMEBUFFER_SIZE],
+    /// Output color of each shade 0..3 (E11_01); a frontend preference, NOT part of the save state.
+    dmg_palette: [u32; 4],
     /// Output pixels of the current visible line: color index 0..3 plus whether the pixel comes
     /// from a sprite and which object palette (E03_04 spec); filled by the pixel fetcher, the
     /// window fetcher and the sprite renderer during mode 3.
@@ -158,6 +165,7 @@ impl Default for Ppu {
     fn default() -> Self {
         let mut p = Ppu {
             frame: [PALETTE[0]; FRAMEBUFFER_SIZE],
+            dmg_palette: PALETTE,
             line_buf: [PIXEL_BG_ZERO; LINE_PIXELS as usize], // background pixels, color index 0 (E03_04 spec)
             dot_in_line: 0,
             ly: 0,
@@ -228,7 +236,7 @@ fn scroll_delay(fine: u8) -> u32 {
 impl Ppu {
     /// Post-boot state (note 08): LY = 0 at the start of line 0, LCD enabled.
     pub fn reset(&mut self) {
-        self.frame.fill(PALETTE[0]);
+        self.frame.fill(self.dmg_palette[0]);
         self.line_buf.fill(PIXEL_BG_ZERO); // background pixels, color index 0 (E03_04 spec)
         self.dot_in_line = 0;
         self.ly = 0;
@@ -265,6 +273,16 @@ impl Ppu {
     /// Framebuffer of 0xAARRGGBB pixels, 160 x 144 (E03_05 spec).
     pub fn framebuffer(&self) -> &[u32] {
         &self.frame
+    }
+
+    /// Sets the four output colors of shades 0..3 (E11_01); used by lines committed afterwards.
+    pub fn set_dmg_palette(&mut self, colors: [u32; 4]) {
+        self.dmg_palette = colors;
+    }
+
+    /// Current output colors of shades 0..3 (E11_01).
+    pub fn dmg_palette(&self) -> [u32; 4] {
+        self.dmg_palette
     }
 
     /// LCD and PPU enable state (LCDC ($FF40) bit 7, E03_09 spec).
@@ -425,7 +443,7 @@ impl Ppu {
             } else {
                 obp0
             };
-            self.frame[row + x] = shade_color(palette, px.color);
+            self.frame[row + x] = self.dmg_palette[shade_index(palette, px.color)];
         }
         self.line_committed = true;
     }
@@ -803,6 +821,48 @@ mod tests {
         fn eq(&self, other: &u8) -> bool {
             self.color == *other
         }
+    }
+
+    #[test]
+    fn e11_01_default_dmg_palette_is_the_old_constants() {
+        let p = Ppu::default();
+        assert_eq!(p.dmg_palette(), PALETTE);
+        assert_eq!(
+            p.dmg_palette(),
+            [0xFFFF_FFFF, 0xFFAA_AAAA, 0xFF55_5555, 0xFF00_0000]
+        );
+    }
+
+    #[test]
+    fn e11_01_custom_palette_colors_a_flat_line_with_bgp_e4() {
+        let colors = [0xFF11_2233, 0xFF44_5566, 0xFF77_8899, 0xFFAA_BBCC];
+        let mut p = Ppu::default();
+        p.reset();
+        p.set_dmg_palette(colors);
+        p.pixels_output = 160;
+        p.commit_line(0xE4, 0xE4, 0xE4);
+        assert!(p.frame[..160].iter().all(|&c| c == colors[0]));
+    }
+
+    #[test]
+    fn e11_01_bgp_ff_gives_the_last_color() {
+        let colors = [0xFF11_2233, 0xFF44_5566, 0xFF77_8899, 0xFFAA_BBCC];
+        let mut p = Ppu::default();
+        p.reset();
+        p.set_dmg_palette(colors);
+        p.pixels_output = 160;
+        p.commit_line(0xFF, 0xE4, 0xE4);
+        assert!(p.frame[..160].iter().all(|&c| c == colors[3]));
+    }
+
+    #[test]
+    fn e11_01_palette_survives_reset() {
+        let colors = [0xFF11_2233, 0xFF44_5566, 0xFF77_8899, 0xFFAA_BBCC];
+        let mut p = Ppu::default();
+        p.set_dmg_palette(colors);
+        p.reset();
+        assert_eq!(p.dmg_palette(), colors);
+        assert_eq!(p.frame[0], colors[0]);
     }
 
     #[test]
