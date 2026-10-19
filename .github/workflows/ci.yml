@@ -5,7 +5,8 @@ on:
   pull_request:
 
 jobs:
-  ci:
+  core:
+    name: core and cli (Linux)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -13,12 +14,32 @@ jobs:
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --exclude puce8gb-desktop --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --exclude puce8gb-desktop
+
+  desktop:
+    name: whole workspace (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Test workspace
+      - name: Test
         run: cargo test --workspace
