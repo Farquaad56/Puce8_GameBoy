@@ -10,6 +10,7 @@ mod tracewin;
 #[allow(dead_code)]
 #[rustfmt::skip]
 mod opcodes;
+mod display;
 mod pacing;
 mod pads;
 mod resample;
@@ -59,6 +60,8 @@ struct App {
     debug_open: bool,
     trace_open: bool,
     inspect: inspect::InspectState,
+    window_scale: u32,
+    show_fps: bool,
 }
 
 impl App {
@@ -93,6 +96,8 @@ impl App {
             debug_open: false,
             trace_open: false,
             inspect: inspect::InspectState::default(),
+            window_scale: loaded.window_scale,
+            show_fps: loaded.show_fps,
         };
         if let Some(path) = rom_path {
             app.load_rom(std::path::Path::new(&path));
@@ -104,6 +109,8 @@ impl App {
         let settings = Settings {
             volume: self.volume,
             keys: self.key_map,
+            window_scale: self.window_scale,
+            show_fps: self.show_fps,
         };
         let _ = std::fs::write(&self.settings_file, settings.to_text());
     }

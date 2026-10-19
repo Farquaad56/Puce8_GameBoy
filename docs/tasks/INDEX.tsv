@@ -141,3 +141,75 @@ E09_01	CODE	0	docs/tasks/E09/E09_01.md	Savestate format
 E09_02	CODE	0	docs/tasks/E09/E09_02.md	State of every component
 E09_03	TEST	0	docs/tasks/E09/E09_03.md	Determinism tests
 E09_04	CODE	1	docs/tasks/E09/E09_04.md	Save states in the desktop app
+E10_01	CODE	0	docs/tasks/E10/E10_01.md	Display geometry (pure functions)
+E10_02	CODE	0	docs/tasks/E10/E10_02.md	Settings: window scale and show frame rate
+E10_03	CODE	0	docs/tasks/E10/E10_03.md	Window size menu and integer-scaled image
+E10_04	CODE	1	docs/tasks/E10/E10_04.md	Show frame rate option
+E11_01	CODE	0	docs/tasks/E11/E11_01.md	Core: DMG palette table
+E11_02	CODE	0	docs/tasks/E11/E11_02.md	Desktop: palette presets and color parsing
+E11_03	CODE	0	docs/tasks/E11/E11_03.md	Palette choice: settings and emulation thread
+E11_04	CODE	1	docs/tasks/E11/E11_04.md	Palette menu
+E12_01	CODE	0	docs/tasks/E12/E12_01.md	LCD grid filter (pure)
+E12_02	CODE	0	docs/tasks/E12/E12_02.md	LCD ghosting blend (pure)
+E12_03	CODE	0	docs/tasks/E12/E12_03.md	LcdFilter state and modes
+E12_04	CODE	1	docs/tasks/E12/E12_04.md	LCD shader menu and rendering
+E13_01	CODE	0	docs/tasks/E13/E13_01.md	ROM check (pure header inspection)
+E13_02	CODE	0	docs/tasks/E13/E13_02.md	Recent ROM list (pure)
+E13_03	CODE	0	docs/tasks/E13/E13_03.md	Settings: recent ROMs and last folder
+E13_04	CODE	0	docs/tasks/E13/E13_04.md	Open ROM dialog (rfd)
+E13_05	CODE	0	docs/tasks/E13/E13_05.md	Open recent menu
+E13_06	CODE	0	docs/tasks/E13/E13_06.md	Load pipeline uses the ROM check
+E13_07	CODE	0	docs/tasks/E13/E13_07.md	ZIP archives (zip crate)
+E13_08	CODE	1	docs/tasks/E13/E13_08.md	ROM info window
+E14_01	DOC	0	docs/tasks/E14/E14_01.md	Note 10: boot ROM facts
+E14_02	CODE	0	docs/tasks/E14/E14_02.md	Core: boot ROM mapping in the bus
+E14_03	CODE	0	docs/tasks/E14/E14_03.md	Core: Dmg starts from the boot ROM
+E14_04	CODE	0	docs/tasks/E14/E14_04.md	Savestate VERSION 2: model and boot flag
+E14_05	CODE	0	docs/tasks/E14/E14_05.md	CLI: --boot-rom
+E14_06	CODE	0	docs/tasks/E14/E14_06.md	Desktop: boot ROM settings and validation
+E14_07	CODE	1	docs/tasks/E14/E14_07.md	Desktop: Boot ROM menu and loading
+E15_01	DOC	0	docs/tasks/E15/E15_01.md	Note 11a: CGB registers and memory banks
+E15_02	DOC	0	docs/tasks/E15/E15_02.md	Note 11b: CGB video
+E15_03	DOC	0	docs/tasks/E15/E15_03.md	Note 11c: CGB speed and DMA
+E15_04	CODE	0	docs/tasks/E15/E15_04.md	Core: MachineConfig, auto model, save guard
+E15_05	CODE	0	docs/tasks/E15/E15_05.md	Core: CGB post-boot state (skip boot ROM)
+E15_06	CODE	0	docs/tasks/E15/E15_06.md	Core: WRAM banking (SVBK $FF70)
+E15_07	CODE	0	docs/tasks/E15/E15_07.md	Core: VRAM bank 1 (VBK $FF4F)
+E15_08	CODE	0	docs/tasks/E15/E15_08.md	Core: palette RAM (BCPS/BCPD/OCPS/OCPD)
+E15_09	CODE	0	docs/tasks/E15/E15_09.md	Core: RGB555 to pixel conversion
+E15_10	CODE	0	docs/tasks/E15/E15_10.md	Core: background and window attributes
+E15_11	CODE	0	docs/tasks/E15/E15_11.md	Core: sprite attributes and OPRI
+E15_12	CODE	0	docs/tasks/E15/E15_12.md	Core: BG/OBJ priority on Cgb
+E15_13	CODE	0	docs/tasks/E15/E15_13.md	Core: DMG compatibility mode on the Cgb model
+E15_14	CODE	0	docs/tasks/E15/E15_14.md	Core: HDMA general-purpose transfer
+E15_15	CODE	0	docs/tasks/E15/E15_15.md	Core: HDMA HBlank transfer
+E15_16	CODE	0	docs/tasks/E15/E15_16.md	Core: KEY1 and the STOP speed switch
+E15_17	CODE	0	docs/tasks/E15/E15_17.md	Core: double speed clock
+E15_18	CODE	0	docs/tasks/E15/E15_18.md	Core: RP and undocumented registers
+E15_19	CODE	0	docs/tasks/E15/E15_19.md	Savestate: Cgb block
+E15_20	CODE	0	docs/tasks/E15/E15_20.md	CLI: --model
+E15_21	TEST	1	docs/tasks/E15/E15_21.md	cgb-acid2
+E15_22	TEST	0	docs/tasks/E15/E15_22.md	Manifest: CGB suites and separate baseline
+E15_23	CODE	1	docs/tasks/E15/E15_23.md	Desktop: Emulate system menu (Game Boy / Game Boy Color)
+E16_01	DOC	0	docs/tasks/E16/E16_01.md	Note 12a: SGB packets and commands
+E16_02	DOC	0	docs/tasks/E16/E16_02.md	Note 12b: SGB graphics
+E16_03	CODE	0	docs/tasks/E16/E16_03.md	Core: Sgb model post-boot state and JOYP hook
+E16_04	CODE	0	docs/tasks/E16/E16_04.md	Core: SGB packet receiver
+E16_05	CODE	0	docs/tasks/E16/E16_05.md	Core: command assembler
+E16_06	CODE	0	docs/tasks/E16/E16_06.md	Core: MLT_REQ and joypad IDs
+E16_07	CODE	0	docs/tasks/E16/E16_07.md	Core: PAL01, PAL23, PAL03, PAL12
+E16_08	CODE	0	docs/tasks/E16/E16_08.md	Core: SGB color output of the game area
+E16_09	CODE	0	docs/tasks/E16/E16_09.md	Core: ATTR_BLK
+E16_10	CODE	0	docs/tasks/E16/E16_10.md	Core: ATTR_LIN, ATTR_DIV, ATTR_CHR
+E16_11	CODE	0	docs/tasks/E16/E16_11.md	Core: VRAM transfer capture
+E16_12	CODE	0	docs/tasks/E16/E16_12.md	Core: PAL_TRN and PAL_SET
+E16_13	CODE	0	docs/tasks/E16/E16_13.md	Core: ATTR_TRN and ATTR_SET
+E16_14	CODE	0	docs/tasks/E16/E16_14.md	Core: MASK_EN
+E16_15	CODE	0	docs/tasks/E16/E16_15.md	Core: CHR_TRN (border tiles)
+E16_16	CODE	0	docs/tasks/E16/E16_16.md	Core: PCT_TRN (border map and palettes)
+E16_17	CODE	0	docs/tasks/E16/E16_17.md	Core: border composition (256x224 frame)
+E16_18	CODE	0	docs/tasks/E16/E16_18.md	Core: ignored SGB commands
+E16_19	CODE	0	docs/tasks/E16/E16_19.md	Savestate: Sgb block
+E16_20	CODE	0	docs/tasks/E16/E16_20.md	CLI: --model sgb and --sgb-border
+E16_21	TEST	0	docs/tasks/E16/E16_21.md	SGB integration test with a synthetic ROM
+E16_22	CODE	1	docs/tasks/E16/E16_22.md	Desktop: Super Game Boy menu entry and border display

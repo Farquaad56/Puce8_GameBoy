@@ -1,5 +1,6 @@
 //! Plain-text settings file next to the executable: volume and key bindings (E07_06).
 
+use crate::display::clamp_scale;
 use crate::input_map::{Button, KeyMap, BUTTONS};
 use crate::volume::{DEFAULT_VOLUME, MAX_VOLUME};
 use eframe::egui::Key;
@@ -7,11 +8,16 @@ use std::path::{Path, PathBuf};
 
 pub const SETTINGS_FILE: &str = "puce8gb.cfg";
 
+/// Window scale used when the settings file has no valid `scale` line (UNKNOWN - to confirm).
+const DEFAULT_WINDOW_SCALE: u32 = 3;
+
 /// Persistent user settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {
     pub volume: u8,
     pub keys: KeyMap,
+    pub window_scale: u32,
+    pub show_fps: bool,
 }
 
 impl Default for Settings {
@@ -19,6 +25,8 @@ impl Default for Settings {
         Settings {
             volume: DEFAULT_VOLUME,
             keys: KeyMap::default(),
+            window_scale: DEFAULT_WINDOW_SCALE,
+            show_fps: true,
         }
     }
 }
@@ -45,6 +53,8 @@ impl Settings {
     /// One `key=value` line per setting.
     pub fn to_text(self) -> String {
         let mut text = format!("volume={}\n", self.volume);
+        text.push_str(&format!("scale={}\n", self.window_scale));
+        text.push_str(&format!("show_fps={}\n", self.show_fps));
         for button in BUTTONS {
             text.push_str(&format!(
                 "key_{}={}\n",
@@ -66,6 +76,14 @@ impl Settings {
             if name == "volume" {
                 if let Ok(volume) = value.parse::<u8>() {
                     settings.volume = volume.min(MAX_VOLUME);
+                }
+            } else if name == "scale" {
+                if let Ok(scale) = value.parse::<u32>() {
+                    settings.window_scale = clamp_scale(scale);
+                }
+            } else if name == "show_fps" {
+                if let Ok(show) = value.parse::<bool>() {
+                    settings.show_fps = show;
                 }
             } else if let Some(button_text) = name.strip_prefix("key_") {
                 let button = BUTTONS
@@ -90,6 +108,7 @@ mod tests {
         let custom = Settings {
             volume: 35,
             keys: KeyMap::default().with_key(Button::A, Key::Space),
+            ..Settings::default()
         };
         assert_eq!(Settings::from_text(&custom.to_text()), custom);
         let default = Settings::default();
@@ -127,5 +146,43 @@ mod tests {
         assert_eq!(free.a, Key::Q);
         assert_eq!(free.b, Key::X);
         assert_eq!(map.rebind(Button::A, Key::W), map);
+    }
+
+    #[test]
+    fn e10_02_new_fields_round_trip() {
+        let custom = Settings {
+            window_scale: 5,
+            show_fps: false,
+            ..Settings::default()
+        };
+        assert_eq!(Settings::from_text(&custom.to_text()), custom);
+    }
+
+    #[test]
+    fn e10_02_scale_is_clamped() {
+        assert_eq!(Settings::from_text("scale=0\n").window_scale, 1);
+        assert_eq!(Settings::from_text("scale=99\n").window_scale, 6);
+        assert_eq!(Settings::from_text("scale=4\n").window_scale, 4);
+    }
+
+    #[test]
+    fn e10_02_invalid_values_keep_defaults() {
+        let parsed = Settings::from_text("scale=abc\nshow_fps=maybe\n");
+        assert_eq!(parsed, Settings::default());
+    }
+
+    #[test]
+    fn e10_02_missing_keys_give_defaults() {
+        let parsed = Settings::from_text("volume=40\n");
+        assert_eq!(parsed.volume, 40);
+        assert_eq!(parsed.window_scale, 3);
+        assert!(parsed.show_fps);
+    }
+
+    #[test]
+    fn e10_02_unknown_key_is_ignored() {
+        let parsed = Settings::from_text("bogus_key=1\nscale=2\nshow_fps=false\n");
+        assert_eq!(parsed.window_scale, 2);
+        assert!(!parsed.show_fps);
     }
 }

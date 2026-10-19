@@ -10,3 +10,5 @@ trace*.log
 
 t_*.txt
 out.txt
+
+boot_roms/

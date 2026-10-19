@@ -310,3 +310,52 @@ Consequence :
 - Critere de validation : serie Blargg "Passed" dans l'ordre de docs/tasks/C01 (06, 03, 04, 05, 01, 09, 10, 11, 07, 08, 02, puis instr_timing, mem_timing 01-03, halt_bug).
 
 Statut : APPROUVE
+
+## A_08
+Titre : Options du desktop (taille de fenetre, frame rate, reglages)
+Options : (a) echelle entiere 1 a 6 uniquement ; (b) echelle libre non entiere ; (c) les deux. Reglages dans le fichier settings existant (une ligne cle=valeur par reglage) ou nouveau fichier.
+Recommandation : (a) echelle entiere 1x1 a 6x6 (demande de l'utilisateur), pixels nets, filtre de texture NEAREST. Les nouveaux reglages s'ajoutent au fichier settings existant ; une cle inconnue est ignoree, une valeur invalide donne la valeur par defaut. Show frame rate : case a cocher ; coche = texte FPS dans la barre d'etat ET en surimpression sur l'image.
+Consequence : aucune modification du coeur. Valeurs par defaut UNKNOWN - to confirm : window_scale = 3, show_fps = true (comportement actuel : le FPS est deja dans la barre d'etat).
+Statut : DECIDE (utilisateur, 2026-10-19) pour l'echelle 1 a 6 ; PROPOSE pour le reste.
+
+## A_09
+Titre : Palettes DMG et shader LCD
+Options : palette dans le coeur (table de 4 couleurs) ou dans le frontend (remappage) ; shader LCD en filtre CPU (fonctions pures) ou GPU (wgpu/WGSL).
+Recommandation : le coeur expose seulement `set_dmg_palette` (table de 4 pixels, valeur par defaut = valeurs actuelles, hors etat sauvegarde). Les presets, la saisie et la persistance vivent dans le frontend. Shader LCD : filtre CPU d'abord (fonctions pures testables : grille a cellules douces, remanence), GPU plus tard seulement si le filtre CPU est trop lent. Formules entieres fixes (voir E12_01 et E12_02).
+Consequence : aucun changement du format de save state. Le filtre travaille a l'echelle de la fenetre (echelle 1 : aucun effet). Reference visuelle du shader : capture BGB fournie par l'utilisateur, pour la GRILLE seulement (cellules de pixels douces, sombres entre les pixels) ; la palette de cette capture n'est pas une exigence.
+Statut : DECIDE (utilisateur, 2026-10-19) pour CPU d'abord puis GPU ; PROPOSE pour les formules.
+
+## A_10
+Titre : Chargeur de ROM et dependances du desktop
+Options : aucune dependance ; rfd (dialogue natif) ; rfd + zip.
+Recommandation : rfd et zip autorises UNIQUEMENT dans puce8gb-desktop ; le coeur et le CLI restent sans dependance nouvelle. Les problemes de ROM ont une severite : Error (impossible de lancer, ex. ROM plus petite que l'en-tete) ou Warning (on lance quand meme, message dans la barre d'etat : checksum d'en-tete faux, taille declaree differente). Le logo Nintendo n'est pas verifie par le chargeur (le vrai boot ROM le fait).
+Consequence : Cargo.lock change ; versions des crates UNKNOWN - to confirm (prendre la derniere compatible avec eframe 0.37).
+Statut : DECIDE (utilisateur, 2026-10-19).
+
+## A_11
+Titre : Boot ROM
+Options : embarquer les boot ROM ; fichiers fournis par l'utilisateur ; ne jamais les supporter.
+Recommandation : les boot ROM sont protegees par copyright : JAMAIS dans le depot, JAMAIS dans les tests. Chemins fournis par l'utilisateur (trois emplacements : DMG, GBC, SGB), stockes dans les reglages. Option Enable / Skip ; Skip = comportement actuel (etat post-boot a PC=$0100, decision A_06) et reste le defaut. Enable avec fichier absent ou de mauvaise taille : retour automatique a Skip + message. Tailles attendues : DMG 256 octets, SGB 256 octets, GBC 2304 octets (UNKNOWN - to confirm, voir note 10). Mapping : le boot ROM recouvre le debut de la cartouche jusqu'a la premiere ecriture non nulle dans FF50 ; ensuite il ne revient qu'apres reset. Les tests du coeur utilisent un boot ROM synthetique de 256 octets ecrit a la main.
+Consequence : le format de save state passe en VERSION 2 (A_05) : un bloc d'extension en fin d'etat machine = [modele u8 (0 Dmg, 1 Cgb, 2 Sgb)][boot_mapped u8 (0 ou 1)] suivi des blocs propres au modele. Les etats VERSION 1 sont refuses (BadVersion). Etat charge avec boot_mapped = 1 dans une machine sans boot ROM : RomMismatch.
+Statut : PROPOSE - a confirmer par l'utilisateur.
+
+## A_12
+Titre : Choix du systeme emule (Game Boy, Game Boy Color, Super Game Boy)
+Options : detection automatique seule ; choix manuel seul ; Auto + choix manuel.
+Recommandation : Auto + choix manuel. Type `Model { Dmg, Cgb, Sgb }` dans le coeur ; la structure `Dmg` garde son nom. Auto : bit 7 de l'octet $0143 a 1 (valeurs $80 ou $C0) donne Cgb, sinon Dmg ; Sgb n'est JAMAIS choisi automatiquement. Le choix manuel prime. Le changement de modele s'applique au prochain chargement ou reset. Le boot ROM utilise suit le modele (Dmg -> DMG, Cgb -> GBC, Sgb -> SGB).
+Consequence : tant qu'un modele n'est pas completement serialise, la sauvegarde d'etat d'un modele autre que Dmg renvoie InvalidState (garde retiree par E15_19 et E16_17).
+Statut : PROPOSE - a confirmer par l'utilisateur.
+
+## A_13
+Titre : Portee Game Boy Color
+Options : complet ; sans double vitesse ; couleur minimale.
+Recommandation : complet (choix utilisateur) : banques VRAM et WRAM, palettes couleur, attributs de tuiles et de sprites, priorites, OPRI, mode de compatibilite DMG (utilise la palette DMG choisie par l'utilisateur au lieu de la table de hash du boot ROM), HDMA general et HBlank, double vitesse (KEY1 + STOP), registres divers, save states. Validation : cgb-acid2 par comparaison de hash (comme dmg-acid2, apres approbation de l'utilisateur).
+Consequence : en double vitesse le CPU, le timer et les DMA tournent avec un M-cycle toutes les 2 dots ; PPU et APU gardent les dots (revision de A_01 limitee a la cadence CPU). Plusieurs points restent UNKNOWN - to confirm (delai exact du changement de vitesse, registres FF72-FF77) : ils sont listes dans open_questions.md.
+Statut : DECIDE (utilisateur, 2026-10-19) pour la portee ; PROPOSE pour le reste.
+
+## A_14
+Titre : Portee Super Game Boy
+Options : palettes + bordure ; palettes seules ; complet.
+Recommandation : palettes + bordure (choix utilisateur). Protocole de paquets par JOYP ($FF00), commandes PAL01, PAL23, PAL03, PAL12, PAL_SET, PAL_TRN, ATTR_BLK, ATTR_LIN, ATTR_DIV, ATTR_CHR, ATTR_TRN, ATTR_SET, MASK_EN, MLT_REQ, CHR_TRN, PCT_TRN. Les commandes SOUND, SOU_TRN, DATA_SND, DATA_TRN, JUMP, ICON_EN, TEST_EN, ATRC_EN sont acceptees et ignorees sans erreur. Sortie : image 256x224 (bordure + fenetre de jeu 160x144 a la position (48, 40)) ; image 160x144 simple si la bordure est desactivee.
+Consequence : le frontend doit gerer deux tailles d'image (160x144 et 256x224). Vitesse d'horloge du SGB : UNKNOWN - to confirm (note 12), non emulee tant que la note ne la confirme pas.
+Statut : DECIDE (utilisateur, 2026-10-19) pour la portee ; PROPOSE pour le reste.
