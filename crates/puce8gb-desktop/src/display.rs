@@ -73,6 +73,15 @@ pub fn effective_scale(chosen: u32, fit: u32) -> u32 {
     clamp_scale(chosen).min(fit.max(1))
 }
 
+/// Frame rate text to draw, or None when the option is off.
+pub fn overlay_text(show: bool, label: &str) -> Option<String> {
+    if show {
+        Some(label.to_string())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +142,19 @@ mod tests {
         assert_eq!(effective_scale(2, 6), 2);
         assert_eq!(effective_scale(4, 0), 1);
         assert_eq!(effective_scale(99, 99), 6);
+    }
+
+    #[test]
+    fn e10_04_overlay_text_off_gives_none() {
+        assert_eq!(overlay_text(false, "59.7 FPS"), None);
+    }
+
+    #[test]
+    fn e10_04_overlay_text_on_gives_the_label() {
+        assert_eq!(
+            overlay_text(true, "59.7 FPS"),
+            Some(String::from("59.7 FPS"))
+        );
+        assert_eq!(overlay_text(true, ""), Some(String::new()));
     }
 }

@@ -321,6 +321,9 @@ impl eframe::App for App {
                             }
                         }
                     });
+                    if ui.checkbox(&mut self.show_fps, "Show frame rate").changed() {
+                        self.save_settings();
+                    }
                     if ui.checkbox(&mut self.trace_open, "CPU trace").changed() {
                         self.emu.send(Command::Trace(self.trace_open));
                         self.emu.send(Command::Viewer(
@@ -375,8 +378,10 @@ impl eframe::App for App {
         let bottom_panel = egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(&self.status);
-                ui.separator();
-                ui.label(self.fps.label());
+                if let Some(text) = display::overlay_text(self.show_fps, &self.fps.label()) {
+                    ui.separator();
+                    ui.label(text);
+                }
                 if self.paused {
                     ui.separator();
                     ui.label("PAUSED");
@@ -408,10 +413,29 @@ impl eframe::App for App {
             );
             if let Some(texture) = &self.texture {
                 ui.vertical_centered(|ui| {
-                    ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                    let response = ui.add(egui::Image::new(egui::load::SizedTexture::new(
                         texture.id(),
                         size,
                     )));
+                    if let Some(text) = display::overlay_text(self.show_fps, &self.fps.label()) {
+                        let pos = response.rect.left_top() + egui::vec2(4.0, 4.0);
+                        let font = egui::FontId::monospace(14.0);
+                        let painter = ui.painter();
+                        painter.text(
+                            pos + egui::vec2(1.0, 1.0),
+                            egui::Align2::LEFT_TOP,
+                            &text,
+                            font.clone(),
+                            egui::Color32::BLACK,
+                        );
+                        painter.text(
+                            pos,
+                            egui::Align2::LEFT_TOP,
+                            &text,
+                            font,
+                            egui::Color32::WHITE,
+                        );
+                    }
                 });
             }
         });
