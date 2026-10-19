@@ -62,6 +62,8 @@ struct App {
     inspect: inspect::InspectState,
     window_scale: u32,
     show_fps: bool,
+    chrome_h: f32,
+    resize_pending: bool,
 }
 
 impl App {
@@ -98,6 +100,8 @@ impl App {
             inspect: inspect::InspectState::default(),
             window_scale: loaded.window_scale,
             show_fps: loaded.show_fps,
+            chrome_h: 60.0,
+            resize_pending: true,
         };
         if let Some(path) = rom_path {
             app.load_rom(std::path::Path::new(&path));
@@ -113,6 +117,16 @@ impl App {
             show_fps: self.show_fps,
         };
         let _ = std::fs::write(&self.settings_file, settings.to_text());
+    }
+
+    /// Asks the window manager for the inner size matching the chosen scale (all values in points).
+    fn resize_window(&self, ctx: &egui::Context) {
+        let ppp = ctx.pixels_per_point();
+        let (w, h) = display::window_size(self.window_scale, self.chrome_h * ppp, 480.0 * ppp);
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+            display::points_for(w.round() as u32, ppp),
+            display::points_for(h.round() as u32, ppp),
+        )));
     }
 
     fn load_rom(&mut self, path: &std::path::Path) {
@@ -240,7 +254,7 @@ impl eframe::App for App {
         } else {
             self.texture = Some(ctx.load_texture("screen", image, egui::TextureOptions::NEAREST));
         }
-        egui::Panel::top("menu").show(ui, |ui| {
+        let top_panel = egui::Panel::top("menu").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("Emulation", |ui| {
                     let pause_label = if self.paused {
@@ -296,6 +310,17 @@ impl eframe::App for App {
                     {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
                     }
+                    ui.menu_button("Window size", |ui| {
+                        for scale in display::all_scales() {
+                            let selected = self.window_scale == scale;
+                            if ui.radio(selected, display::scale_label(scale)).clicked() {
+                                self.window_scale = scale;
+                                self.save_settings();
+                                self.resize_window(&ctx);
+                                ui.close();
+                            }
+                        }
+                    });
                     if ui.checkbox(&mut self.trace_open, "CPU trace").changed() {
                         self.emu.send(Command::Trace(self.trace_open));
                         self.emu.send(Command::Viewer(
@@ -346,7 +371,8 @@ impl eframe::App for App {
                 }
             });
         });
-        egui::Panel::bottom("status").show(ui, |ui| {
+        let top_height = top_panel.response.rect.height();
+        let bottom_panel = egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(&self.status);
                 ui.separator();
@@ -364,17 +390,21 @@ impl eframe::App for App {
                 "Default keys: Arrows, W=A, X=B, Enter=Start, Backspace=Select (Keys menu to change) | P pause, N frame step, R reset, F11 fullscreen | F5-F8 save slots 1-4, Shift+F5-F8 load",
             );
         });
+        self.chrome_h = top_height + bottom_panel.response.rect.height();
         egui::CentralPanel::default().show(ui, |ui| {
             let avail = ui.available_size();
-            let scale = scale::integer_scale(
-                avail.x as u32,
-                avail.y as u32,
+            let ppp = ctx.pixels_per_point();
+            let fit = scale::integer_scale(
+                (avail.x * ppp) as u32,
+                (avail.y * ppp) as u32,
                 SCREEN_W as u32,
                 SCREEN_H as u32,
             );
+            let scale = display::effective_scale(self.window_scale, fit);
+            let (px_w, px_h) = display::image_size(scale);
             let size = egui::vec2(
-                (SCREEN_W as u32 * scale) as f32,
-                (SCREEN_H as u32 * scale) as f32,
+                display::points_for(px_w, ppp),
+                display::points_for(px_h, ppp),
             );
             if let Some(texture) = &self.texture {
                 ui.vertical_centered(|ui| {
@@ -385,6 +415,10 @@ impl eframe::App for App {
                 });
             }
         });
+        if self.resize_pending {
+            self.resize_pending = false;
+            self.resize_window(&ctx);
+        }
         if self.viewer_open {
             if self.snapshot_dirty {
                 if let Some(snap) = &self.snapshot {

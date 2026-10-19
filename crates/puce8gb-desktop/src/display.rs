@@ -53,6 +53,26 @@ pub fn window_size(scale: u32, chrome_h: f32, min_w: f32) -> (f32, f32) {
     )
 }
 
+/// All selectable window scales, in menu order.
+pub fn all_scales() -> [u32; 6] {
+    [1, 2, 3, 4, 5, 6]
+}
+
+/// Converts a size in pixels to egui points. A zero, negative or non-finite ppp counts as 1.0.
+pub fn points_for(px: u32, ppp: f32) -> f32 {
+    let ppp = if ppp.is_finite() && ppp > 0.0 {
+        ppp
+    } else {
+        1.0
+    };
+    px as f32 / ppp
+}
+
+/// Scale actually drawn: the chosen scale, reduced to `fit` when the window is too small (never below 1).
+pub fn effective_scale(chosen: u32, fit: u32) -> u32 {
+    clamp_scale(chosen).min(fit.max(1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +110,28 @@ mod tests {
     fn e10_01_window_size_adds_chrome_and_min_width() {
         assert_eq!(window_size(3, 60.0, 400.0), (480.0, 492.0));
         assert_eq!(window_size(1, 60.0, 400.0), (400.0, 204.0));
+    }
+
+    #[test]
+    fn e10_03_all_scales_lists_one_to_six() {
+        assert_eq!(all_scales(), [1, 2, 3, 4, 5, 6]);
+        assert_eq!(all_scales()[5], 6);
+    }
+
+    #[test]
+    fn e10_03_points_for_divides_by_ppp() {
+        assert_eq!(points_for(640, 2.0), 320.0);
+        assert_eq!(points_for(160, 1.0), 160.0);
+        assert_eq!(points_for(160, 0.0), 160.0);
+        assert_eq!(points_for(160, f32::NAN), 160.0);
+        assert_eq!(points_for(160, -2.0), 160.0);
+    }
+
+    #[test]
+    fn e10_03_effective_scale_never_overflows_the_window() {
+        assert_eq!(effective_scale(5, 3), 3);
+        assert_eq!(effective_scale(2, 6), 2);
+        assert_eq!(effective_scale(4, 0), 1);
+        assert_eq!(effective_scale(99, 99), 6);
     }
 }
