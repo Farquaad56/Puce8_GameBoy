@@ -6,6 +6,7 @@ mod emu;
 mod fps;
 mod input_map;
 mod inspect;
+mod lcd_filter;
 mod tracewin;
 #[allow(dead_code)]
 #[rustfmt::skip]
