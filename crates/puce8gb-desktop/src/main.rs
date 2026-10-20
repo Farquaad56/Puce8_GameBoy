@@ -66,6 +66,8 @@ struct App {
     chrome_h: f32,
     resize_pending: bool,
     palette: palettes::PaletteChoice,
+    custom_open: bool,
+    custom_fields: [String; 4],
 }
 
 impl App {
@@ -105,6 +107,8 @@ impl App {
             chrome_h: 60.0,
             resize_pending: true,
             palette: loaded.palette,
+            custom_open: false,
+            custom_fields: Default::default(),
         };
         app.apply_palette();
         if let Some(path) = rom_path {
@@ -124,12 +128,18 @@ impl App {
         let _ = std::fs::write(&self.settings_file, settings.to_text());
     }
 
-    /// Sends the chosen palette to the emulation thread; CoreDefault sends nothing (E11_03).
+    /// Sends the chosen palette to the emulation thread; CoreDefault sends the core's own colors (E11_04).
     fn apply_palette(&self) {
-        if let Some(colors) = self.palette.colors() {
-            self.emu
-                .send(Command::Palette(colors.map(palettes::pack_core)));
-        }
+        self.emu.send(Command::Palette(
+            self.palette.effective_colors().map(palettes::pack_core),
+        ));
+    }
+
+    /// Stores a new palette choice, applies it right away and saves the settings (E11_04).
+    fn set_palette(&mut self, choice: palettes::PaletteChoice) {
+        self.palette = choice;
+        self.apply_palette();
+        self.save_settings();
     }
 
     /// Asks the window manager for the inner size matching the chosen scale (all values in points).
@@ -334,6 +344,30 @@ impl eframe::App for App {
                             }
                         }
                     });
+                    ui.menu_button("Palette", |ui| {
+                        let default_choice = palettes::PaletteChoice::CoreDefault;
+                        if ui
+                            .radio(self.palette == default_choice, "Default")
+                            .clicked()
+                        {
+                            self.set_palette(default_choice);
+                            ui.close();
+                        }
+                        for (index, preset) in palettes::PRESETS.iter().enumerate() {
+                            let choice = palettes::PaletteChoice::Preset(index);
+                            if ui.radio(self.palette == choice, preset.name).clicked() {
+                                self.set_palette(choice);
+                                ui.close();
+                            }
+                        }
+                        let is_custom = matches!(self.palette, palettes::PaletteChoice::Custom(_));
+                        if ui.radio(is_custom, "Custom...").clicked() {
+                            self.custom_fields =
+                                palettes::fields_for(self.palette.effective_colors());
+                            self.custom_open = true;
+                            ui.close();
+                        }
+                    });
                     if ui.checkbox(&mut self.show_fps, "Show frame rate").changed() {
                         self.save_settings();
                     }
@@ -531,6 +565,48 @@ impl eframe::App for App {
             self.emu.send(Command::Trace(false));
             self.emu
                 .send(Command::Viewer(self.viewer_open || self.debug_open));
+        }
+        if self.custom_open {
+            let mut open = true;
+            let mut apply: Option<[u32; 4]> = None;
+            egui::Window::new("Custom palette")
+                .open(&mut open)
+                .show(&ctx, |ui| {
+                    let labels = [
+                        "Shade 0 (lightest)",
+                        "Shade 1",
+                        "Shade 2",
+                        "Shade 3 (darkest)",
+                    ];
+                    for (index, label) in labels.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(*label);
+                            let valid =
+                                palettes::parse_hex_color(&self.custom_fields[index]).is_some();
+                            let mut edit =
+                                egui::TextEdit::singleline(&mut self.custom_fields[index])
+                                    .desired_width(90.0);
+                            if !valid {
+                                edit = edit.text_color(egui::Color32::RED);
+                            }
+                            ui.add(edit);
+                        });
+                    }
+                    let colors = palettes::validate_custom(&self.custom_fields).ok();
+                    if ui
+                        .add_enabled(colors.is_some(), egui::Button::new("Apply"))
+                        .clicked()
+                    {
+                        apply = colors;
+                    }
+                });
+            if let Some(colors) = apply {
+                self.set_palette(palettes::PaletteChoice::Custom(colors));
+                open = false;
+            }
+            if !open {
+                self.custom_open = false;
+            }
         }
         ctx.request_repaint();
     }

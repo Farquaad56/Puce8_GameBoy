@@ -12,7 +12,7 @@ pub struct Preset {
 
 /// Built-in presets, in menu order.
 #[allow(dead_code)] // used by E11_03
-pub const PRESETS: [Preset; 4] = [
+pub const PRESETS: [Preset; 5] = [
     Preset {
         name: "Grayscale",
         colors: [0xFFFFFF, 0xAAAAAA, 0x555555, 0x000000],
@@ -28,6 +28,10 @@ pub const PRESETS: [Preset; 4] = [
     Preset {
         name: "Kirby light",
         colors: [0xE0F8D0, 0x88C070, 0x346856, 0x081820],
+    },
+    Preset {
+        name: "BGB DMG reality",
+        colors: [0x759833, 0x588F51, 0x3B7560, 0x2E615A],
     },
 ];
 
@@ -107,6 +111,11 @@ impl PaletteChoice {
         }
     }
 
+    /// Colors to send to the core: the choice's colors, or the core's own default colors for CoreDefault.
+    pub fn effective_colors(&self) -> [u32; 4] {
+        self.colors().unwrap_or(CORE_DEFAULT_COLORS)
+    }
+
     /// Settings text: "default", a preset name, or four "#RRGGBB" colors joined by commas.
     #[allow(clippy::wrong_self_convention)] // Copy self kept as &self for symmetry with from_text
     pub fn to_text(&self) -> String {
@@ -137,6 +146,23 @@ pub fn pack_core(color: u32) -> u32 {
     0xFF00_0000 | (color & 0x00FF_FFFF)
 }
 
+/// The core's own default colors (E03_05: neutral greys) as 0xRRGGBB.
+pub const CORE_DEFAULT_COLORS: [u32; 4] = [0xFFFFFF, 0xAAAAAA, 0x555555, 0x000000];
+
+/// Validates the four text fields of the custom editor: the colors, or the index of the first invalid field.
+pub fn validate_custom(fields: &[String; 4]) -> Result<[u32; 4], usize> {
+    let mut colors = [0u32; 4];
+    for (index, field) in fields.iter().enumerate() {
+        colors[index] = parse_hex_color(field).ok_or(index)?;
+    }
+    Ok(colors)
+}
+
+/// Text fields pre-filled with the given colors ("#RRGGBB" each).
+pub fn fields_for(colors: [u32; 4]) -> [String; 4] {
+    colors.map(format_hex_color)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,8 +190,8 @@ mod tests {
     }
 
     #[test]
-    fn e11_02_presets_table_has_four_entries() {
-        assert_eq!(PRESETS.len(), 4);
+    fn e11_02_presets_table_has_five_entries() {
+        assert_eq!(PRESETS.len(), 5);
         assert_eq!(PRESETS[0].name, "Grayscale");
         assert_eq!(PRESETS[0].colors, [0xFFFFFF, 0xAAAAAA, 0x555555, 0x000000]);
         assert_eq!(PRESETS[1].colors, [0x9BBC0F, 0x8BAC0F, 0x306230, 0x0F380F]);
@@ -240,5 +266,79 @@ mod tests {
         assert_eq!(pack_core(0x9BBC0F), 0xFF9B_BC0F);
         assert_eq!(pack_core(0x000000), 0xFF00_0000);
         assert_eq!(pack_core(0xFFFFFF), 0xFFFF_FFFF);
+    }
+
+    fn four(a: &str, b: &str, c: &str, d: &str) -> [String; 4] {
+        [a.to_string(), b.to_string(), c.to_string(), d.to_string()]
+    }
+
+    #[test]
+    fn e11_04_validate_custom_accepts_four_valid_fields() {
+        let fields = four("#FFFFFF", "aaaaaa", " #555555 ", "#000000");
+        assert_eq!(
+            validate_custom(&fields),
+            Ok([0xFFFFFF, 0xAAAAAA, 0x555555, 0x000000])
+        );
+    }
+
+    #[test]
+    fn e11_04_validate_custom_reports_the_third_invalid_field() {
+        let fields = four("#FFFFFF", "#AAAAAA", "#55555", "#000000");
+        assert_eq!(validate_custom(&fields), Err(2));
+    }
+
+    #[test]
+    fn e11_04_validate_custom_rejects_an_empty_field() {
+        let fields = four("#FFFFFF", "", "#555555", "#000000");
+        assert_eq!(validate_custom(&fields), Err(1));
+    }
+
+    #[test]
+    fn e11_04_validate_custom_reports_the_first_of_two_invalid_fields() {
+        let fields = four("zzzzzz", "#AAAAAA", "#555555", "nope");
+        assert_eq!(validate_custom(&fields), Err(0));
+    }
+
+    #[test]
+    fn e11_04_fields_for_round_trips_through_validate() {
+        let colors = [0x9BBC0F, 0x8BAC0F, 0x306230, 0x0F380F];
+        assert_eq!(validate_custom(&fields_for(colors)), Ok(colors));
+        assert_eq!(fields_for(colors)[3], "#0F380F");
+    }
+
+    #[test]
+    fn e11_04_effective_colors_falls_back_to_the_core_default() {
+        assert_eq!(
+            PaletteChoice::CoreDefault.effective_colors(),
+            CORE_DEFAULT_COLORS
+        );
+        assert_eq!(
+            PaletteChoice::Preset(99).effective_colors(),
+            CORE_DEFAULT_COLORS
+        );
+        assert_eq!(
+            PaletteChoice::Preset(1).effective_colors(),
+            PRESETS[1].colors
+        );
+    }
+
+    #[test]
+    fn e11_04_core_default_packs_to_the_old_core_constants() {
+        assert_eq!(CORE_DEFAULT_COLORS, PRESETS[0].colors);
+        assert_eq!(
+            CORE_DEFAULT_COLORS.map(pack_core),
+            [0xFFFF_FFFF, 0xFFAA_AAAA, 0xFF55_5555, 0xFF00_0000]
+        );
+    }
+
+    #[test]
+    fn e11_04_bgb_preset_has_the_scheme_colors() {
+        assert_eq!(PRESETS[4].name, "BGB DMG reality");
+        assert_eq!(PRESETS[4].colors, [0x759833, 0x588F51, 0x3B7560, 0x2E615A]);
+        assert_eq!(preset_index(" bgb dmg REALITY "), Some(4));
+        assert_eq!(
+            PaletteChoice::from_text("BGB DMG reality"),
+            PaletteChoice::Preset(4)
+        );
     }
 }
