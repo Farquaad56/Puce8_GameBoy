@@ -2,6 +2,7 @@
 
 use crate::display::clamp_scale;
 use crate::input_map::{Button, KeyMap, BUTTONS};
+use crate::lcd_filter::LcdMode;
 use crate::palettes::PaletteChoice;
 use crate::volume::{DEFAULT_VOLUME, MAX_VOLUME};
 use eframe::egui::Key;
@@ -20,6 +21,7 @@ pub struct Settings {
     pub window_scale: u32,
     pub show_fps: bool,
     pub palette: PaletteChoice,
+    pub lcd_mode: LcdMode,
 }
 
 impl Default for Settings {
@@ -30,6 +32,7 @@ impl Default for Settings {
             window_scale: DEFAULT_WINDOW_SCALE,
             show_fps: true,
             palette: PaletteChoice::CoreDefault,
+            lcd_mode: LcdMode::Off,
         }
     }
 }
@@ -59,6 +62,7 @@ impl Settings {
         text.push_str(&format!("scale={}\n", self.window_scale));
         text.push_str(&format!("show_fps={}\n", self.show_fps));
         text.push_str(&format!("palette={}\n", self.palette.to_text()));
+        text.push_str(&format!("lcd_filter={}\n", self.lcd_mode.as_str()));
         for button in BUTTONS {
             text.push_str(&format!(
                 "key_{}={}\n",
@@ -91,6 +95,8 @@ impl Settings {
                 }
             } else if name == "palette" {
                 settings.palette = PaletteChoice::from_text(value);
+            } else if name == "lcd_filter" {
+                settings.lcd_mode = LcdMode::from_str(value);
             } else if let Some(button_text) = name.strip_prefix("key_") {
                 let button = BUTTONS
                     .iter()
@@ -218,5 +224,28 @@ mod tests {
     fn e11_03_missing_palette_line_gives_default() {
         let parsed = Settings::from_text("volume=40\n");
         assert_eq!(parsed.palette, PaletteChoice::CoreDefault);
+    }
+
+    #[test]
+    fn e12_04_lcd_mode_round_trip_in_settings() {
+        for lcd_mode in [LcdMode::Off, LcdMode::Grid, LcdMode::Ghost] {
+            let custom = Settings {
+                lcd_mode,
+                ..Settings::default()
+            };
+            assert_eq!(Settings::from_text(&custom.to_text()), custom);
+        }
+    }
+
+    #[test]
+    fn e12_04_unknown_lcd_text_gives_off() {
+        let parsed = Settings::from_text("lcd_filter=banana\nvolume=40\n");
+        assert_eq!(parsed.lcd_mode, LcdMode::Off);
+        assert_eq!(parsed.volume, 40);
+    }
+
+    #[test]
+    fn e12_04_missing_lcd_line_gives_off() {
+        assert_eq!(Settings::from_text("volume=40\n").lcd_mode, LcdMode::Off);
     }
 }

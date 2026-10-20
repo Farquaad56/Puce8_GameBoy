@@ -69,6 +69,10 @@ struct App {
     palette: palettes::PaletteChoice,
     custom_open: bool,
     custom_fields: [String; 4],
+    lcd: lcd_filter::LcdFilter,
+    frame_dirty: bool,
+    display_scale: u32,
+    uploaded_scale: u32,
 }
 
 impl App {
@@ -110,8 +114,15 @@ impl App {
             palette: loaded.palette,
             custom_open: false,
             custom_fields: Default::default(),
+            lcd: lcd_filter::LcdFilter::new(),
+            frame_dirty: true,
+            display_scale: 1,
+            uploaded_scale: 0,
         };
         app.apply_palette();
+        app.lcd.set_mode(loaded.lcd_mode);
+        app.lcd
+            .set_gap(lcd_filter::gap_for(Some(app.palette.effective_colors())));
         if let Some(path) = rom_path {
             app.load_rom(std::path::Path::new(&path));
         }
@@ -125,6 +136,7 @@ impl App {
             window_scale: self.window_scale,
             show_fps: self.show_fps,
             palette: self.palette,
+            lcd_mode: self.lcd.mode(),
         };
         let _ = std::fs::write(&self.settings_file, settings.to_text());
     }
@@ -140,6 +152,9 @@ impl App {
     fn set_palette(&mut self, choice: palettes::PaletteChoice) {
         self.palette = choice;
         self.apply_palette();
+        self.lcd
+            .set_gap(lcd_filter::gap_for(Some(self.palette.effective_colors())));
+        self.frame_dirty = true;
         self.save_settings();
     }
 
@@ -162,6 +177,7 @@ impl App {
                     .send(Command::SavePath(Some(rom_info::save_path(path))));
                 self.emu.send(Command::Load(bytes));
                 self.frame.clear();
+                self.frame_dirty = true;
                 self.last_input = Input::default();
                 self.status = format!("Loading {}", path.display());
             }
@@ -172,6 +188,34 @@ impl App {
     fn toggle_pause(&mut self) {
         self.paused = !self.paused;
         self.emu.send(Command::Pause(self.paused));
+    }
+
+    /// Current framebuffer as RGBA bytes, 160 x 144 (opaque black when no ROM is loaded).
+    fn current_rgba(&self) -> Vec<[u8; 4]> {
+        let mut pixels = vec![[0u8, 0, 0, 255]; SCREEN_W * SCREEN_H];
+        for (dst, &argb) in pixels.iter_mut().zip(self.frame.iter()) {
+            *dst = [
+                ((argb >> 16) & 0xFF) as u8,
+                ((argb >> 8) & 0xFF) as u8,
+                (argb & 0xFF) as u8,
+                255,
+            ];
+        }
+        pixels
+    }
+
+    /// Image to upload as the screen texture: filtered when the LCD shader is on, else the plain
+    /// frame. The grid filters change nothing at scale 1 (E12_04).
+    fn render_image(&mut self, scale: u32) -> egui::ColorImage {
+        let rgba = self.current_rgba();
+        if let Some(pixels) = self.lcd.process(&rgba, SCREEN_W, SCREEN_H, scale) {
+            let side = [SCREEN_W * scale as usize, SCREEN_H * scale as usize];
+            if pixels.len() == side[0] * side[1] {
+                let bytes: Vec<u8> = pixels.iter().flatten().copied().collect();
+                return egui::ColorImage::from_rgba_unmultiplied(side, &bytes);
+            }
+        }
+        self.current_image()
     }
 
     /// Current framebuffer as an egui image (black when no ROM is loaded).
@@ -196,6 +240,7 @@ impl eframe::App for App {
         }
         while let Ok(frame) = self.emu.frames.try_recv() {
             self.frame = frame;
+            self.frame_dirty = true;
             let now_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
             self.fps.frame(now_ms);
         }
@@ -272,11 +317,17 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.title.clone()));
             self.sent_title = self.title.clone();
         }
-        let image = self.current_image();
-        if let Some(texture) = &mut self.texture {
-            texture.set(image, egui::TextureOptions::NEAREST);
-        } else {
-            self.texture = Some(ctx.load_texture("screen", image, egui::TextureOptions::NEAREST));
+        let wanted_scale = self.display_scale;
+        if self.frame_dirty || self.texture.is_none() || self.uploaded_scale != wanted_scale {
+            self.frame_dirty = false;
+            self.uploaded_scale = wanted_scale;
+            let image = self.render_image(wanted_scale);
+            if let Some(texture) = &mut self.texture {
+                texture.set(image, egui::TextureOptions::NEAREST);
+            } else {
+                self.texture =
+                    Some(ctx.load_texture("screen", image, egui::TextureOptions::NEAREST));
+            }
         }
         let top_panel = egui::Panel::top("menu").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
@@ -369,6 +420,21 @@ impl eframe::App for App {
                             ui.close();
                         }
                     });
+
+                    ui.menu_button("LCD shader", |ui| {
+                        for (mode, label) in [
+                            (lcd_filter::LcdMode::Off, "Off"),
+                            (lcd_filter::LcdMode::Grid, "Grid"),
+                            (lcd_filter::LcdMode::Ghost, "Ghost"),
+                        ] {
+                            if ui.radio(self.lcd.mode() == mode, label).clicked() {
+                                self.lcd.set_mode(mode);
+                                self.frame_dirty = true;
+                                self.save_settings();
+                                ui.close();
+                            }
+                        }
+                    });
                     if ui.checkbox(&mut self.show_fps, "Show frame rate").changed() {
                         self.save_settings();
                     }
@@ -454,6 +520,7 @@ impl eframe::App for App {
                 SCREEN_H as u32,
             );
             let scale = display::effective_scale(self.window_scale, fit);
+            self.display_scale = scale;
             let (px_w, px_h) = display::image_size(scale);
             let size = egui::vec2(
                 display::points_for(px_w, ppp),
