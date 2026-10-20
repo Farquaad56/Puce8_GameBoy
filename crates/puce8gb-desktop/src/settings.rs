@@ -4,6 +4,7 @@ use crate::display::clamp_scale;
 use crate::input_map::{Button, KeyMap, BUTTONS};
 use crate::lcd_filter::LcdMode;
 use crate::palettes::PaletteChoice;
+use crate::recent::RecentList;
 use crate::volume::{DEFAULT_VOLUME, MAX_VOLUME};
 use eframe::egui::Key;
 use std::path::{Path, PathBuf};
@@ -14,7 +15,7 @@ pub const SETTINGS_FILE: &str = "puce8gb.cfg";
 const DEFAULT_WINDOW_SCALE: u32 = 3;
 
 /// Persistent user settings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub volume: u8,
     pub keys: KeyMap,
@@ -22,6 +23,8 @@ pub struct Settings {
     pub show_fps: bool,
     pub palette: PaletteChoice,
     pub lcd_mode: LcdMode,
+    pub recent: Vec<String>,
+    pub last_dir: String,
 }
 
 impl Default for Settings {
@@ -33,6 +36,8 @@ impl Default for Settings {
             show_fps: true,
             palette: PaletteChoice::CoreDefault,
             lcd_mode: LcdMode::Off,
+            recent: Vec::new(),
+            last_dir: String::new(),
         }
     }
 }
@@ -57,12 +62,20 @@ pub fn settings_path(exe: &Path) -> PathBuf {
 
 impl Settings {
     /// One `key=value` line per setting.
-    pub fn to_text(self) -> String {
+    pub fn to_text(&self) -> String {
         let mut text = format!("volume={}\n", self.volume);
         text.push_str(&format!("scale={}\n", self.window_scale));
         text.push_str(&format!("show_fps={}\n", self.show_fps));
         text.push_str(&format!("palette={}\n", self.palette.to_text()));
         text.push_str(&format!("lcd_filter={}\n", self.lcd_mode.as_str()));
+        for path in &self.recent {
+            if !path.contains(['\n', '\r']) {
+                text.push_str(&format!("recent={path}\n"));
+            }
+        }
+        if !self.last_dir.contains(['\n', '\r']) {
+            text.push_str(&format!("last_dir={}\n", self.last_dir));
+        }
         for button in BUTTONS {
             text.push_str(&format!(
                 "key_{}={}\n",
@@ -76,6 +89,7 @@ impl Settings {
     /// Parses settings text; unknown or invalid lines are ignored and keep the default.
     pub fn from_text(text: &str) -> Settings {
         let mut settings = Settings::default();
+        let mut recent_lines: Vec<String> = Vec::new();
         for line in text.lines() {
             let Some((name, value)) = line.split_once('=') else {
                 continue;
@@ -97,6 +111,10 @@ impl Settings {
                 settings.palette = PaletteChoice::from_text(value);
             } else if name == "lcd_filter" {
                 settings.lcd_mode = LcdMode::from_str(value);
+            } else if name == "recent" {
+                recent_lines.push(value.to_string());
+            } else if name == "last_dir" {
+                settings.last_dir = value.to_string();
             } else if let Some(button_text) = name.strip_prefix("key_") {
                 let button = BUTTONS
                     .iter()
@@ -107,6 +125,7 @@ impl Settings {
                 }
             }
         }
+        settings.recent = RecentList::from_lines(&recent_lines).to_lines();
         settings
     }
 }
@@ -247,5 +266,56 @@ mod tests {
     #[test]
     fn e12_04_missing_lcd_line_gives_off() {
         assert_eq!(Settings::from_text("volume=40\n").lcd_mode, LcdMode::Off);
+    }
+
+    #[test]
+    fn e13_03_recent_and_last_dir_round_trip_in_order() {
+        let custom = Settings {
+            recent: vec![
+                String::from("H:\\roms\\c.gb"),
+                String::from("H:\\roms\\b.gb"),
+                String::from("H:\\roms\\a.gb"),
+            ],
+            last_dir: String::from("H:\\roms"),
+            ..Settings::default()
+        };
+        let parsed = Settings::from_text(&custom.to_text());
+        assert_eq!(parsed, custom);
+        assert_eq!(parsed.recent[0], "H:\\roms\\c.gb");
+    }
+
+    #[test]
+    fn e13_03_a_path_with_equals_survives() {
+        let custom = Settings {
+            recent: vec![String::from("H:\\roms\\a=b.gb")],
+            last_dir: String::from("H:\\x=y"),
+            ..Settings::default()
+        };
+        assert_eq!(Settings::from_text(&custom.to_text()), custom);
+    }
+
+    #[test]
+    fn e13_03_more_than_ten_recent_lines_load_as_ten() {
+        let mut text = String::new();
+        for n in 0..12 {
+            text.push_str(&format!("recent=p{n}\n"));
+        }
+        let parsed = Settings::from_text(&text);
+        assert_eq!(parsed.recent.len(), 10);
+        assert_eq!(parsed.recent[0], "p0");
+        assert_eq!(parsed.recent[9], "p9");
+    }
+
+    #[test]
+    fn e13_03_blank_and_duplicate_recent_lines_are_dropped() {
+        let parsed = Settings::from_text("recent=a\nrecent=\nrecent=b\nrecent=a\n");
+        assert_eq!(parsed.recent, vec![String::from("a"), String::from("b")]);
+    }
+
+    #[test]
+    fn e13_03_missing_keys_give_empty_values() {
+        let parsed = Settings::from_text("volume=40\n");
+        assert!(parsed.recent.is_empty());
+        assert!(parsed.last_dir.is_empty());
     }
 }

@@ -75,6 +75,8 @@ struct App {
     frame_dirty: bool,
     display_scale: u32,
     uploaded_scale: u32,
+    recent: recent::RecentList,
+    last_dir: String,
 }
 
 impl App {
@@ -120,6 +122,8 @@ impl App {
             frame_dirty: true,
             display_scale: 1,
             uploaded_scale: 0,
+            recent: recent::RecentList::from_lines(&loaded.recent),
+            last_dir: loaded.last_dir.clone(),
         };
         app.apply_palette();
         app.lcd.set_mode(loaded.lcd_mode);
@@ -139,6 +143,8 @@ impl App {
             show_fps: self.show_fps,
             palette: self.palette,
             lcd_mode: self.lcd.mode(),
+            recent: self.recent.to_lines(),
+            last_dir: self.last_dir.clone(),
         };
         let _ = std::fs::write(&self.settings_file, settings.to_text());
     }
