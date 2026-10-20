@@ -16,6 +16,7 @@ mod pacing;
 mod pads;
 mod palettes;
 mod resample;
+mod rom_check;
 mod rom_info;
 mod scale;
 mod settings;
