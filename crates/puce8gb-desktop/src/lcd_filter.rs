@@ -58,6 +58,33 @@ pub fn grid_filter(
     out
 }
 
+/// Mixes one color channel: `p` (0..=255) is the share of the previous frame, out of 256.
+fn mix(cur: u8, prev: u8, p: u32) -> u8 {
+    ((u32::from(cur) * (256 - p) + u32::from(prev) * p + 128) >> 8) as u8
+}
+
+/// Pixel response: blends the previous frame into the current one. `persistence` 0..=255 is the
+/// weight of the previous frame (0 = no ghosting). Alpha is copied from `cur`. When the two
+/// frames differ in length the current frame is returned unchanged.
+#[allow(dead_code)] // used by E12_03
+pub fn ghost_blend(prev: &[[u8; 4]], cur: &[[u8; 4]], persistence: u32) -> Vec<[u8; 4]> {
+    if prev.len() != cur.len() {
+        return cur.to_vec();
+    }
+    let p = persistence.min(255);
+    prev.iter()
+        .zip(cur.iter())
+        .map(|(old, new)| {
+            [
+                mix(new[0], old[0], p),
+                mix(new[1], old[1], p),
+                mix(new[2], old[2], p),
+                new[3],
+            ]
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,5 +133,39 @@ mod tests {
     fn e12_01_grid_filter_scale_zero_gives_empty() {
         let src = [[0u8, 0, 0, 255]];
         assert!(grid_filter(&src, 1, 1, 0, 128, [0, 0, 0]).is_empty());
+    }
+
+    #[test]
+    fn e12_02_ghost_blend_halfway() {
+        let prev = [[100u8, 100, 100, 255]];
+        let cur = [[200u8, 200, 200, 255]];
+        assert_eq!(ghost_blend(&prev, &cur, 128)[0], [150, 150, 150, 255]);
+    }
+
+    #[test]
+    fn e12_02_ghost_blend_zero_persistence_is_identity() {
+        let prev = [[100u8, 100, 100, 255]];
+        let cur = [[200u8, 200, 200, 255]];
+        assert_eq!(ghost_blend(&prev, &cur, 0), cur.to_vec());
+    }
+
+    #[test]
+    fn e12_02_ghost_blend_mismatched_length_returns_cur() {
+        let cur = [[200u8, 200, 200, 255], [10, 20, 30, 255]];
+        assert_eq!(ghost_blend(&[], &cur, 128), cur.to_vec());
+        assert_eq!(ghost_blend(&[[0u8, 0, 0, 255]], &cur, 128), cur.to_vec());
+    }
+
+    #[test]
+    fn e12_02_ghost_blend_keeps_alpha_and_clamps_persistence() {
+        let prev = [[100u8, 100, 100, 7]];
+        let cur = [[200u8, 200, 200, 255]];
+        let out = ghost_blend(&prev, &cur, 128);
+        assert_eq!(out[0][3], 255);
+        assert_eq!(
+            ghost_blend(&prev, &cur, 1000),
+            ghost_blend(&prev, &cur, 255)
+        );
+        assert_eq!(ghost_blend(&prev, &cur, 255)[0][0], 100);
     }
 }
