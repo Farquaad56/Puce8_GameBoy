@@ -191,25 +191,3 @@ E15_20	CODE	0	docs/tasks/E15/E15_20.md	CLI: --model
 E15_21	TEST	1	docs/tasks/E15/E15_21.md	cgb-acid2
 E15_22	TEST	0	docs/tasks/E15/E15_22.md	Manifest: CGB suites and separate baseline
 E15_23	CODE	1	docs/tasks/E15/E15_23.md	Desktop: Emulate system menu (Game Boy / Game Boy Color)
-E16_01	DOC	0	docs/tasks/E16/E16_01.md	Note 12a: SGB packets and commands
-E16_02	DOC	0	docs/tasks/E16/E16_02.md	Note 12b: SGB graphics
-E16_03	CODE	0	docs/tasks/E16/E16_03.md	Core: Sgb model post-boot state and JOYP hook
-E16_04	CODE	0	docs/tasks/E16/E16_04.md	Core: SGB packet receiver
-E16_05	CODE	0	docs/tasks/E16/E16_05.md	Core: command assembler
-E16_06	CODE	0	docs/tasks/E16/E16_06.md	Core: MLT_REQ and joypad IDs
-E16_07	CODE	0	docs/tasks/E16/E16_07.md	Core: PAL01, PAL23, PAL03, PAL12
-E16_08	CODE	0	docs/tasks/E16/E16_08.md	Core: SGB color output of the game area
-E16_09	CODE	0	docs/tasks/E16/E16_09.md	Core: ATTR_BLK
-E16_10	CODE	0	docs/tasks/E16/E16_10.md	Core: ATTR_LIN, ATTR_DIV, ATTR_CHR
-E16_11	CODE	0	docs/tasks/E16/E16_11.md	Core: VRAM transfer capture
-E16_12	CODE	0	docs/tasks/E16/E16_12.md	Core: PAL_TRN and PAL_SET
-E16_13	CODE	0	docs/tasks/E16/E16_13.md	Core: ATTR_TRN and ATTR_SET
-E16_14	CODE	0	docs/tasks/E16/E16_14.md	Core: MASK_EN
-E16_15	CODE	0	docs/tasks/E16/E16_15.md	Core: CHR_TRN (border tiles)
-E16_16	CODE	0	docs/tasks/E16/E16_16.md	Core: PCT_TRN (border map and palettes)
-E16_17	CODE	0	docs/tasks/E16/E16_17.md	Core: border composition (256x224 frame)
-E16_18	CODE	0	docs/tasks/E16/E16_18.md	Core: ignored SGB commands
-E16_19	CODE	0	docs/tasks/E16/E16_19.md	Savestate: Sgb block
-E16_20	CODE	0	docs/tasks/E16/E16_20.md	CLI: --model sgb and --sgb-border
-E16_21	TEST	0	docs/tasks/E16/E16_21.md	SGB integration test with a synthetic ROM
-E16_22	CODE	1	docs/tasks/E16/E16_22.md	Desktop: Super Game Boy menu entry and border display

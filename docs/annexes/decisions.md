@@ -335,15 +335,15 @@ Statut : DECIDE (utilisateur, 2026-10-19).
 ## A_11
 Titre : Boot ROM
 Options : embarquer les boot ROM ; fichiers fournis par l'utilisateur ; ne jamais les supporter.
-Recommandation : les boot ROM sont protegees par copyright : JAMAIS dans le depot, JAMAIS dans les tests. Chemins fournis par l'utilisateur (trois emplacements : DMG, GBC, SGB), stockes dans les reglages. Option Enable / Skip ; Skip = comportement actuel (etat post-boot a PC=$0100, decision A_06) et reste le defaut. Enable avec fichier absent ou de mauvaise taille : retour automatique a Skip + message. Tailles attendues : DMG 256 octets, SGB 256 octets, GBC 2304 octets (UNKNOWN - to confirm, voir note 10). Mapping : le boot ROM recouvre le debut de la cartouche jusqu'a la premiere ecriture non nulle dans FF50 ; ensuite il ne revient qu'apres reset. Les tests du coeur utilisent un boot ROM synthetique de 256 octets ecrit a la main.
-Consequence : le format de save state passe en VERSION 2 (A_05) : un bloc d'extension en fin d'etat machine = [modele u8 (0 Dmg, 1 Cgb, 2 Sgb)][boot_mapped u8 (0 ou 1)] suivi des blocs propres au modele. Les etats VERSION 1 sont refuses (BadVersion). Etat charge avec boot_mapped = 1 dans une machine sans boot ROM : RomMismatch.
+Recommandation : les boot ROM sont protegees par copyright : JAMAIS dans le depot, JAMAIS dans les tests. Chemins fournis par l'utilisateur (deux emplacements : DMG, GBC ; SGB abandonne, voir A_14), stockes dans les reglages. Option Enable / Skip ; Skip = comportement actuel (etat post-boot a PC=$0100, decision A_06) et reste le defaut. Enable avec fichier absent ou de mauvaise taille : retour automatique a Skip + message. Tailles attendues : DMG 256 octets, GBC 2304 octets (UNKNOWN - to confirm, voir note 10). Mapping : le boot ROM recouvre le debut de la cartouche jusqu'a la premiere ecriture non nulle dans FF50 ; ensuite il ne revient qu'apres reset. Les tests du coeur utilisent un boot ROM synthetique de 256 octets ecrit a la main.
+Consequence : le format de save state passe en VERSION 2 (A_05) : un bloc d'extension en fin d'etat machine = [modele u8 (0 Dmg, 1 Cgb)][boot_mapped u8 (0 ou 1)] suivi des blocs propres au modele. Les etats VERSION 1 sont refuses (BadVersion). Etat charge avec boot_mapped = 1 dans une machine sans boot ROM : RomMismatch.
 Statut : PROPOSE - a confirmer par l'utilisateur.
 
 ## A_12
-Titre : Choix du systeme emule (Game Boy, Game Boy Color, Super Game Boy)
+Titre : Choix du systeme emule (Game Boy, Game Boy Color)
 Options : detection automatique seule ; choix manuel seul ; Auto + choix manuel.
-Recommandation : Auto + choix manuel. Type `Model { Dmg, Cgb, Sgb }` dans le coeur ; la structure `Dmg` garde son nom. Auto : bit 7 de l'octet $0143 a 1 (valeurs $80 ou $C0) donne Cgb, sinon Dmg ; Sgb n'est JAMAIS choisi automatiquement. Le choix manuel prime. Le changement de modele s'applique au prochain chargement ou reset. Le boot ROM utilise suit le modele (Dmg -> DMG, Cgb -> GBC, Sgb -> SGB).
-Consequence : tant qu'un modele n'est pas completement serialise, la sauvegarde d'etat d'un modele autre que Dmg renvoie InvalidState (garde retiree par E15_19 et E16_17).
+Recommandation : Auto + choix manuel. Type `Model { Dmg, Cgb }` dans le coeur ; la structure `Dmg` garde son nom. Auto : bit 7 de l'octet $0143 a 1 (valeurs $80 ou $C0) donne Cgb, sinon Dmg ; Pas de SGB (abandonne, A_14). Le choix manuel prime. Le changement de modele s'applique au prochain chargement ou reset. Le boot ROM utilise suit le modele (Dmg -> DMG, Cgb -> GBC).
+Consequence : tant qu'un modele n'est pas completement serialise, la sauvegarde d'etat d'un modele autre que Dmg renvoie InvalidState (garde retiree par E15_19).
 Statut : PROPOSE - a confirmer par l'utilisateur.
 
 ## A_13
@@ -354,8 +354,9 @@ Consequence : en double vitesse le CPU, le timer et les DMA tournent avec un M-c
 Statut : DECIDE (utilisateur, 2026-10-19) pour la portee ; PROPOSE pour le reste.
 
 ## A_14
-Titre : Portee Super Game Boy
+Titre : Portee Super Game Boy - ANNULE (2026-10-21)
+ANNULE : l'utilisateur ne garde que Game Boy (DMG) et Game Boy Color (CGB). Pas de Super Game Boy ni de Game Boy Advance. L'epic E16 est retiree de docs/tasks/INDEX.tsv (fichiers conserves, jamais executes). Le texte ci-dessous est conserve pour memoire seulement.
 Options : palettes + bordure ; palettes seules ; complet.
 Recommandation : palettes + bordure (choix utilisateur). Protocole de paquets par JOYP ($FF00), commandes PAL01, PAL23, PAL03, PAL12, PAL_SET, PAL_TRN, ATTR_BLK, ATTR_LIN, ATTR_DIV, ATTR_CHR, ATTR_TRN, ATTR_SET, MASK_EN, MLT_REQ, CHR_TRN, PCT_TRN. Les commandes SOUND, SOU_TRN, DATA_SND, DATA_TRN, JUMP, ICON_EN, TEST_EN, ATRC_EN sont acceptees et ignorees sans erreur. Sortie : image 256x224 (bordure + fenetre de jeu 160x144 a la position (48, 40)) ; image 160x144 simple si la bordure est desactivee.
 Consequence : le frontend doit gerer deux tailles d'image (160x144 et 256x224). Vitesse d'horloge du SGB : UNKNOWN - to confirm (note 12), non emulee tant que la note ne la confirme pas.
-Statut : DECIDE (utilisateur, 2026-10-19) pour la portee ; PROPOSE pour le reste.
+Statut : ANNULE (utilisateur, 2026-10-21) - seules la Game Boy (DMG) et la Game Boy Color (CGB) sont implantees.

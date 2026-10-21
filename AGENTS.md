@@ -1,8 +1,8 @@
-# AGENTS.md - Game Boy (DMG) emulator, Rust, cycle accurate
+# AGENTS.md - Game Boy (DMG) and Game Boy Color (CGB) emulator, Rust, cycle accurate
 
 You are one agent in a strict sequential pipeline. ONE sub-task per session.
 Speak to the user in French. Code, identifiers, comments, commit messages: English, ASCII only.
-Hardware: original Game Boy (DMG). CPU = Sharp SM83 (NOT a Zilog Z80). Docs = Pan Docs in refs/pandocs.
+Hardware: original Game Boy (DMG) and Game Boy Color (CGB). Out of scope (decision A_14, 2026-10-21): Super Game Boy (SGB) and Game Boy Advance (GBA); never implement them. CPU = Sharp SM83 (NOT a Zilog Z80). Docs = Pan Docs in refs/pandocs.
 
 ## Session start (always, in this order)
 1. Run: python3 docs/tools/task.py show

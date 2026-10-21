@@ -1,0 +1,215 @@
+# id	role	gate	path	title
+E00_01	CODE	0	docs/tasks/E00/E00_01.md	Cargo workspace with three crates
+E00_02	DOC	0	docs/tasks/E00/E00_02.md	Fetch Pan Docs and test ROMs
+E00_03	CODE	1	docs/tasks/E00/E00_03.md	CI workflow and repo hygiene
+D_01	DOC	0	docs/tasks/D/D_01.md	Sources inventory
+D_02	DOC	0	docs/tasks/D/D_02.md	Note: timing
+D_03	DOC	0	docs/tasks/D/D_03.md	Note: timer
+D_04	DOC	0	docs/tasks/D/D_04.md	Opcode table (generated, verified)
+D_05	DOC	0	docs/tasks/D/D_05.md	Note: CPU core
+D_06	DOC	0	docs/tasks/D/D_06.md	Note: CPU interrupts and halt
+D_07	DOC	0	docs/tasks/D/D_07.md	Note: memory map
+D_08	DOC	0	docs/tasks/D/D_08.md	Note: I/O registers
+D_09	DOC	0	docs/tasks/D/D_09.md	Note: video registers
+D_10	DOC	0	docs/tasks/D/D_10.md	Note: video rendering
+D_11	DOC	0	docs/tasks/D/D_11.md	Note: audio channels
+D_12	DOC	0	docs/tasks/D/D_12.md	Note: audio mixing
+D_13	DOC	0	docs/tasks/D/D_13.md	Note: joypad and serial
+D_14	DOC	0	docs/tasks/D/D_14.md	Note: cartridge header
+D_15	DOC	0	docs/tasks/D/D_15.md	Note: mappers
+D_16	DOC	0	docs/tasks/D/D_16.md	Note: boot and reset
+D_17	DOC	0	docs/tasks/D/D_17.md	Note: test ROM catalog
+D_18	DOC	1	docs/tasks/D/D_18.md	Coverage matrix and documentation GATE
+A_01	ARCH	1	docs/tasks/A/A_01.md	Decision: master clock, tick, chip order
+A_02	ARCH	1	docs/tasks/A/A_02.md	Decision: bus design
+A_03	ARCH	1	docs/tasks/A/A_03.md	Decision: CPU micro-op model
+A_04	ARCH	1	docs/tasks/A/A_04.md	Decision: buffers, cadence, core/frontend boundary
+A_05	ARCH	1	docs/tasks/A/A_05.md	Decision: save states and determinism
+A_06	ARCH	1	docs/tasks/A/A_06.md	Decision: supported variants and first target
+A_07	ARCH	1	docs/tasks/A/A_07.md	Decision: test strategy
+E01_01	CODE	0	docs/tasks/E01/E01_01.md	Machine trait, Dmg struct, errors, post-boot state
+E01_02	CODE	0	docs/tasks/E01/E01_02.md	Cartridge header parsing
+E01_03	CODE	0	docs/tasks/E01/E01_03.md	Bus: regions, echo, peek
+E01_04	CODE	1	docs/tasks/E01/E01_04.md	ROM-only mapper and CLI info
+E02_01	CODE	0	docs/tasks/E02/E02_01.md	Registers and flag helpers
+C01_01	CODE	0	docs/tasks/C01/C01_01.md	CPU clean slate: skeleton, engine contract, test helper
+C01_02	CODE	0	docs/tasks/C01/C01_02.md	Dmg drives the CPU: one M-cycle every 4 dots
+C01_03	CODE	0	docs/tasks/C01/C01_03.md	Serial capture (SB/SC) in the bus
+C01_42	CODE	0	docs/tasks/C01/C01_42.md	Harden C01_01 tests (no dependency on an unimplemented opcode)
+C01_43	CODE	0	docs/tasks/C01/C01_43.md	CLI run: argument parsing
+C01_44	CODE	0	docs/tasks/C01/C01_44.md	CLI run: load the ROM and run the machine loop
+C01_45	CODE	0	docs/tasks/C01/C01_45.md	CLI run: serial output and --expect-serial
+C01_46	CODE	0	docs/tasks/C01/C01_46.md	CLI run: report an unimplemented opcode (exit 4)
+C01_47	CODE	0	docs/tasks/C01/C01_47.md	CLI run: --trace
+C01_04	CODE	1	docs/tasks/C01/C01_04.md	CLI run: verification and GATE
+C01_48	CODE	0	docs/tasks/C01/C01_48.md	Fix CLI tests that depend on an unimplemented opcode
+C01_05	CODE	0	docs/tasks/C01/C01_05.md	NOP, LD r,r and LD r,n (register forms)
+C01_06	CODE	0	docs/tasks/C01/C01_06.md	LD through (HL), (BC), (DE), HL+/HL-
+C01_07	CODE	0	docs/tasks/C01/C01_07.md	LD absolute, LDH and LD (C)
+C01_08	CODE	0	docs/tasks/C01/C01_08.md	LD rr,nn, LD SP,HL, LD (nn),SP
+C01_09	CODE	0	docs/tasks/C01/C01_09.md	PUSH and POP
+C01_10	CODE	0	docs/tasks/C01/C01_10.md	JP and JR
+C01_11	CODE	0	docs/tasks/C01/C01_11.md	CALL, RET, RST
+C01_12	CODE	0	docs/tasks/C01/C01_12.md	INC and DEC 8-bit
+C01_13	CODE	0	docs/tasks/C01/C01_13.md	ADD, ADC, SUB, SBC
+C01_14	CODE	0	docs/tasks/C01/C01_14.md	AND, XOR, OR, CP
+C01_15	CODE	0	docs/tasks/C01/C01_15.md	Minimal LY / VBlank stub
+C01_17	CODE	0	docs/tasks/C01/C01_17.md	INC/DEC rr and ADD HL,rr
+C01_18	CODE	0	docs/tasks/C01/C01_18.md	ADD SP,e8 and LD HL,SP+e8
+C01_22	CODE	0	docs/tasks/C01/C01_22.md	Accumulator rotates, CPL, SCF, CCF
+C01_23	CODE	0	docs/tasks/C01/C01_23.md	DAA
+C01_25	CODE	0	docs/tasks/C01/C01_25.md	CB rotates, shifts and SWAP
+C01_26	CODE	0	docs/tasks/C01/C01_26.md	CB BIT, RES, SET
+C01_16	TEST	1	docs/tasks/C01/C01_16.md	blargg cpu_instrs 06 ld r,r
+C01_19	TEST	1	docs/tasks/C01/C01_19.md	blargg cpu_instrs 03 op sp,hl
+C01_20	TEST	1	docs/tasks/C01/C01_20.md	blargg cpu_instrs 04 op r,imm
+C01_21	TEST	1	docs/tasks/C01/C01_21.md	blargg cpu_instrs 05 op rp
+C01_24	TEST	1	docs/tasks/C01/C01_24.md	blargg cpu_instrs 01 special
+C01_27	TEST	1	docs/tasks/C01/C01_27.md	blargg cpu_instrs 09 op r,r
+C01_28	TEST	1	docs/tasks/C01/C01_28.md	blargg cpu_instrs 10 bit ops
+C01_29	TEST	1	docs/tasks/C01/C01_29.md	blargg cpu_instrs 11 op a,(hl)
+C01_49	CODE	0	docs/tasks/C01/C01_49.md	Doctor mode: fixed LY value (--ly-fixed)
+C01_30	TEST	1	docs/tasks/C01/C01_30.md	blargg cpu_instrs 07 jr,jp,call,ret,rst
+C01_31	TEST	1	docs/tasks/C01/C01_31.md	blargg cpu_instrs 08 misc instrs
+C01_32	CODE	0	docs/tasks/C01/C01_32.md	EI, DI, IME and interrupt dispatch, RETI
+C01_33	CODE	0	docs/tasks/C01/C01_33.md	HALT, HALT bug, STOP, illegal opcodes
+C01_34	CODE	0	docs/tasks/C01/C01_34.md	Timer: DIV, TIMA, TMA, TAC counting
+C01_35	CODE	0	docs/tasks/C01/C01_35.md	Timer: overflow, reload and interrupt
+C01_36	TEST	1	docs/tasks/C01/C01_36.md	blargg cpu_instrs 02 interrupts
+C01_37	TEST	1	docs/tasks/C01/C01_37.md	blargg instr_timing
+C01_38	TEST	1	docs/tasks/C01/C01_38.md	blargg mem_timing 01 read_timing
+C01_39	TEST	1	docs/tasks/C01/C01_39.md	blargg mem_timing 02 write_timing
+C01_40	TEST	1	docs/tasks/C01/C01_40.md	blargg mem_timing 03 modify_timing
+C01_41	TEST	1	docs/tasks/C01/C01_41.md	CPU restart closure gate (cpu_instrs 01-11)
+E03_01	CODE	0	docs/tasks/E03/E03_01.md	PPU line and frame timing, modes, LY, VBlank
+E03_08	CODE	0	docs/tasks/E03/E03_08.md	LYC, STAT register and STAT interrupt line
+E03_09	CODE	0	docs/tasks/E03/E03_09.md	LCDC, LCD on and off, plain video registers
+E03_02	CODE	0	docs/tasks/E03/E03_02.md	OAM scan: sprite selection per line
+E03_10	CODE	0	docs/tasks/E03/E03_10.md	VRAM and OAM access blocking
+E03_03	CODE	0	docs/tasks/E03/E03_03.md	Background pixel pipeline (no fine scroll, no window)
+E03_11	CODE	0	docs/tasks/E03/E03_11.md	Background fine scroll and variable mode 3 length
+E03_12	CODE	0	docs/tasks/E03/E03_12.md	Window
+E03_04	CODE	0	docs/tasks/E03/E03_04.md	Sprites in the pipeline (without mode 3 penalty)
+E03_13	CODE	0	docs/tasks/E03/E03_13.md	Sprite penalty on mode 3 length
+E03_05	CODE	0	docs/tasks/E03/E03_05.md	Palettes and framebuffer
+E03_14	CODE	0	docs/tasks/E03/E03_14.md	Frame completion: run_frame and determinism
+E03_16	CODE	0	docs/tasks/E03/E03_16.md	CLI image dump: --frames and --dump-ppm
+E03_17	TEST	1	docs/tasks/E03/E03_17.md	blargg halt_bug on screen (image comparison)
+E03_06	CODE	0	docs/tasks/E03/E03_06.md	OAM DMA: register and transfer
+E03_15	CODE	0	docs/tasks/E03/E03_15.md	OAM DMA: bus restrictions for the CPU
+E03_07	TEST	1	docs/tasks/E03/E03_07.md	dmg-acid2 and framebuffer hash
+E04_01	CODE	0	docs/tasks/E04/E04_01.md	APU skeleton and frame sequencer
+E04_02	CODE	0	docs/tasks/E04/E04_02.md	Pulse channels 1 and 2
+E04_03	CODE	0	docs/tasks/E04/E04_03.md	Wave channel 3
+E04_04	CODE	0	docs/tasks/E04/E04_04.md	Noise channel 4
+E04_05	CODE	0	docs/tasks/E04/E04_05.md	Mixer and sample output
+E04_06	TEST	0	docs/tasks/E04/E04_06.md	dmg_sound ROMs 01 to 06
+E04_07	TEST	1	docs/tasks/E04/E04_07.md	dmg_sound ROMs 07 to 12
+E05_01	CODE	0	docs/tasks/E05/E05_01.md	Joypad
+E05_02	CODE	0	docs/tasks/E05/E05_02.md	MBC1
+E05_03	CODE	0	docs/tasks/E05/E05_03.md	MBC2
+E05_04	CODE	0	docs/tasks/E05/E05_04.md	MBC3 with RTC
+E05_05	CODE	0	docs/tasks/E05/E05_05.md	MBC5
+E05_06	CODE	1	docs/tasks/E05/E05_06.md	Battery RAM API
+E05_07	CODE	0	docs/tasks/E05/E05_07.md	Wire mappers into the bus
+E06_01	CODE	0	docs/tasks/E06/E06_01.md	CLI suite runner
+E06_02	TEST	0	docs/tasks/E06/E06_02.md	Fill the manifest
+E06_03	TEST	1	docs/tasks/E06/E06_03.md	Baseline and regression rule
+FIX_01	TEST	0	docs/tasks/FIX/FIX_01.md	Fix test mooneye acceptance/timer/tim00_div_trigger
+FIX_02	TEST	0	docs/tasks/FIX/FIX_02.md	Fix test mooneye acceptance/call_timing
+FIX_03	TEST	0	docs/tasks/FIX/FIX_03.md	Fix test mooneye acceptance/ei_sequence
+FIX_04	TEST	0	docs/tasks/FIX/FIX_04.md	Fix test mooneye acceptance/interrupts/ie_push
+FIX_05	TEST	0	docs/tasks/FIX/FIX_05.md	Fix test mooneye acceptance/bits/unused_hwio-GS
+FIX_06	TEST	0	docs/tasks/FIX/FIX_06.md	Fix test mooneye acceptance/oam_dma/sources-GS
+FIX_07	TEST	0	docs/tasks/FIX/FIX_07.md	Fix test mooneye acceptance/ppu/vblank_stat_intr-GS
+FIX_08	TEST	0	docs/tasks/FIX/FIX_08.md	Fix test mooneye acceptance/ppu/stat_lyc_onoff
+FIX_09	TEST	0	docs/tasks/FIX/FIX_09.md	Fix test mooneye acceptance/ppu/lcdon_timing-GS
+FIX_10	TEST	0	docs/tasks/FIX/FIX_10.md	Fix test mooneye acceptance/ppu/lcdon_write_timing-GS
+FIX_11	TEST	0	docs/tasks/FIX/FIX_11.md	Fix test mooneye acceptance/ppu/hblank_ly_scx_timing-GS
+FIX_12	TEST	0	docs/tasks/FIX/FIX_12.md	Fix test mooneye acceptance/ppu/intr_2_mode0_timing_sprites
+E07_01	CODE	0	docs/tasks/E07/E07_01.md	eframe window and texture
+E07_02	CODE	0	docs/tasks/E07/E07_02.md	Emulation thread and pacing
+E07_03	CODE	0	docs/tasks/E07/E07_03.md	cpal output and lock-free ring buffer
+E07_04	CODE	0	docs/tasks/E07/E07_04.md	Resampler with low-pass filter
+E07_05	CODE	0	docs/tasks/E07/E07_05.md	Keyboard and gamepad input
+E07_06	CODE	1	docs/tasks/E07/E07_06.md	Menu, volume, fullscreen, key config
+E08_01	CODE	0	docs/tasks/E08/E08_01.md	Core debug snapshots (peek)
+E08_02	CODE	0	docs/tasks/E08/E08_02.md	Tile and background viewer
+E08_03	CODE	0	docs/tasks/E08/E08_03.md	OAM, palette and memory viewers
+E08_04	CODE	1	docs/tasks/E08/E08_04.md	CPU trace window
+E09_01	CODE	0	docs/tasks/E09/E09_01.md	Savestate format
+E09_02	CODE	0	docs/tasks/E09/E09_02.md	State of every component
+E09_03	TEST	0	docs/tasks/E09/E09_03.md	Determinism tests
+E09_04	CODE	1	docs/tasks/E09/E09_04.md	Save states in the desktop app
+E10_01	CODE	0	docs/tasks/E10/E10_01.md	Display geometry (pure functions)
+E10_02	CODE	0	docs/tasks/E10/E10_02.md	Settings: window scale and show frame rate
+E10_03	CODE	0	docs/tasks/E10/E10_03.md	Window size menu and integer-scaled image
+E10_04	CODE	1	docs/tasks/E10/E10_04.md	Show frame rate option
+E11_01	CODE	0	docs/tasks/E11/E11_01.md	Core: DMG palette table
+E11_02	CODE	0	docs/tasks/E11/E11_02.md	Desktop: palette presets and color parsing
+E11_03	CODE	0	docs/tasks/E11/E11_03.md	Palette choice: settings and emulation thread
+E11_04	CODE	1	docs/tasks/E11/E11_04.md	Palette menu
+E12_01	CODE	0	docs/tasks/E12/E12_01.md	LCD grid filter (pure)
+E12_02	CODE	0	docs/tasks/E12/E12_02.md	LCD ghosting blend (pure)
+E12_03	CODE	0	docs/tasks/E12/E12_03.md	LcdFilter state and modes
+E12_04	CODE	1	docs/tasks/E12/E12_04.md	LCD shader menu and rendering
+E13_01	CODE	0	docs/tasks/E13/E13_01.md	ROM check (pure header inspection)
+E13_02	CODE	0	docs/tasks/E13/E13_02.md	Recent ROM list (pure)
+E13_03	CODE	0	docs/tasks/E13/E13_03.md	Settings: recent ROMs and last folder
+E13_04	CODE	0	docs/tasks/E13/E13_04.md	Open ROM dialog (rfd)
+E13_05	CODE	0	docs/tasks/E13/E13_05.md	Open recent menu
+E13_06	CODE	0	docs/tasks/E13/E13_06.md	Load pipeline uses the ROM check
+E13_07	CODE	0	docs/tasks/E13/E13_07.md	ZIP archives (zip crate)
+E13_08	CODE	1	docs/tasks/E13/E13_08.md	ROM info window
+E14_01	DOC	0	docs/tasks/E14/E14_01.md	Note 10: boot ROM facts
+E14_02	CODE	0	docs/tasks/E14/E14_02.md	Core: boot ROM mapping in the bus
+E14_03	CODE	0	docs/tasks/E14/E14_03.md	Core: Dmg starts from the boot ROM
+E14_04	CODE	0	docs/tasks/E14/E14_04.md	Savestate VERSION 2: model and boot flag
+E14_05	CODE	0	docs/tasks/E14/E14_05.md	CLI: --boot-rom
+E14_06	CODE	0	docs/tasks/E14/E14_06.md	Desktop: boot ROM settings and validation
+E14_07	CODE	1	docs/tasks/E14/E14_07.md	Desktop: Boot ROM menu and loading
+E15_01	DOC	0	docs/tasks/E15/E15_01.md	Note 11a: CGB registers and memory banks
+E15_02	DOC	0	docs/tasks/E15/E15_02.md	Note 11b: CGB video
+E15_03	DOC	0	docs/tasks/E15/E15_03.md	Note 11c: CGB speed and DMA
+E15_04	CODE	0	docs/tasks/E15/E15_04.md	Core: MachineConfig, auto model, save guard
+E15_05	CODE	0	docs/tasks/E15/E15_05.md	Core: CGB post-boot state (skip boot ROM)
+E15_06	CODE	0	docs/tasks/E15/E15_06.md	Core: WRAM banking (SVBK $FF70)
+E15_07	CODE	0	docs/tasks/E15/E15_07.md	Core: VRAM bank 1 (VBK $FF4F)
+E15_08	CODE	0	docs/tasks/E15/E15_08.md	Core: palette RAM (BCPS/BCPD/OCPS/OCPD)
+E15_09	CODE	0	docs/tasks/E15/E15_09.md	Core: RGB555 to pixel conversion
+E15_10	CODE	0	docs/tasks/E15/E15_10.md	Core: background and window attributes
+E15_11	CODE	0	docs/tasks/E15/E15_11.md	Core: sprite attributes and OPRI
+E15_12	CODE	0	docs/tasks/E15/E15_12.md	Core: BG/OBJ priority on Cgb
+E15_13	CODE	0	docs/tasks/E15/E15_13.md	Core: DMG compatibility mode on the Cgb model
+E15_14	CODE	0	docs/tasks/E15/E15_14.md	Core: HDMA general-purpose transfer
+E15_15	CODE	0	docs/tasks/E15/E15_15.md	Core: HDMA HBlank transfer
+E15_16	CODE	0	docs/tasks/E15/E15_16.md	Core: KEY1 and the STOP speed switch
+E15_17	CODE	0	docs/tasks/E15/E15_17.md	Core: double speed clock
+E15_18	CODE	0	docs/tasks/E15/E15_18.md	Core: RP and undocumented registers
+E15_19	CODE	0	docs/tasks/E15/E15_19.md	Savestate: Cgb block
+E15_20	CODE	0	docs/tasks/E15/E15_20.md	CLI: --model
+E15_21	TEST	1	docs/tasks/E15/E15_21.md	cgb-acid2
+E15_22	TEST	0	docs/tasks/E15/E15_22.md	Manifest: CGB suites and separate baseline
+E15_23	CODE	1	docs/tasks/E15/E15_23.md	Desktop: Emulate system menu (Game Boy / Game Boy Color)
+E16_01	DOC	0	docs/tasks/E16/E16_01.md	Note 12a: SGB packets and commands
+E16_02	DOC	0	docs/tasks/E16/E16_02.md	Note 12b: SGB graphics
+E16_03	CODE	0	docs/tasks/E16/E16_03.md	Core: Sgb model post-boot state and JOYP hook
+E16_04	CODE	0	docs/tasks/E16/E16_04.md	Core: SGB packet receiver
+E16_05	CODE	0	docs/tasks/E16/E16_05.md	Core: command assembler
+E16_06	CODE	0	docs/tasks/E16/E16_06.md	Core: MLT_REQ and joypad IDs
+E16_07	CODE	0	docs/tasks/E16/E16_07.md	Core: PAL01, PAL23, PAL03, PAL12
+E16_08	CODE	0	docs/tasks/E16/E16_08.md	Core: SGB color output of the game area
+E16_09	CODE	0	docs/tasks/E16/E16_09.md	Core: ATTR_BLK
+E16_10	CODE	0	docs/tasks/E16/E16_10.md	Core: ATTR_LIN, ATTR_DIV, ATTR_CHR
+E16_11	CODE	0	docs/tasks/E16/E16_11.md	Core: VRAM transfer capture
+E16_12	CODE	0	docs/tasks/E16/E16_12.md	Core: PAL_TRN and PAL_SET
+E16_13	CODE	0	docs/tasks/E16/E16_13.md	Core: ATTR_TRN and ATTR_SET
+E16_14	CODE	0	docs/tasks/E16/E16_14.md	Core: MASK_EN
+E16_15	CODE	0	docs/tasks/E16/E16_15.md	Core: CHR_TRN (border tiles)
+E16_16	CODE	0	docs/tasks/E16/E16_16.md	Core: PCT_TRN (border map and palettes)
+E16_17	CODE	0	docs/tasks/E16/E16_17.md	Core: border composition (256x224 frame)
+E16_18	CODE	0	docs/tasks/E16/E16_18.md	Core: ignored SGB commands
+E16_19	CODE	0	docs/tasks/E16/E16_19.md	Savestate: Sgb block
+E16_20	CODE	0	docs/tasks/E16/E16_20.md	CLI: --model sgb and --sgb-border
+E16_21	TEST	0	docs/tasks/E16/E16_21.md	SGB integration test with a synthetic ROM
+E16_22	CODE	1	docs/tasks/E16/E16_22.md	Desktop: Super Game Boy menu entry and border display
