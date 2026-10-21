@@ -70,6 +70,14 @@ pub fn recent_label(path: &str) -> String {
     path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
 }
 
+/// Menu entries for the "Open recent" submenu: (label, full path) pairs, newest first (E13_05).
+pub fn menu_entries(list: &RecentList) -> Vec<(String, String)> {
+    list.items()
+        .iter()
+        .map(|path| (recent_label(path), path.clone()))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,5 +162,24 @@ mod tests {
         assert_eq!(recent_label("/a/b/zelda.gbc"), "zelda.gbc");
         assert_eq!(recent_label("plain.gb"), "plain.gb");
         assert_eq!(recent_label(""), "");
+    }
+
+    #[test]
+    fn e13_05_menu_entries_gives_file_name_labels_and_full_paths() {
+        let mut list = RecentList::default();
+        list.push("H:\\roms\\tetris.gb");
+        list.push("/a/b/zelda.gbc");
+        assert_eq!(
+            menu_entries(&list),
+            vec![
+                ("zelda.gbc".to_string(), "/a/b/zelda.gbc".to_string()),
+                ("tetris.gb".to_string(), "H:\\roms\\tetris.gb".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn e13_05_menu_entries_empty_list_gives_an_empty_vec() {
+        assert!(menu_entries(&RecentList::default()).is_empty());
     }
 }

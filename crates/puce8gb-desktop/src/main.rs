@@ -193,20 +193,29 @@ impl App {
         }
     }
 
-    fn load_rom(&mut self, path: &std::path::Path) {
+    /// Loads a ROM from disk. On success the path is remembered in the recent list and the
+    /// settings are saved (E13_05). Returns false when the file cannot be read.
+    fn load_rom(&mut self, path: &std::path::Path) -> bool {
         match std::fs::read(path) {
             Ok(bytes) => {
+                let display = path.display().to_string();
                 self.title = rom_info::window_title(&rom_info::rom_title(&bytes));
-                self.path_input = path.display().to_string();
+                self.path_input = display.clone();
                 self.emu
                     .send(Command::SavePath(Some(rom_info::save_path(path))));
                 self.emu.send(Command::Load(bytes));
                 self.frame.clear();
                 self.frame_dirty = true;
                 self.last_input = Input::default();
-                self.status = format!("Loading {}", path.display());
+                self.status = format!("Loading {display}");
+                self.recent.push(&display);
+                self.save_settings();
+                true
             }
-            Err(err) => self.status = format!("Cannot read {}: {err}", path.display()),
+            Err(err) => {
+                self.status = format!("Cannot read {}: {err}", path.display());
+                false
+            }
         }
     }
 
@@ -367,6 +376,29 @@ impl eframe::App for App {
                         self.open_rom_dialog();
                         ui.close();
                     }
+                    ui.menu_button("Open recent", |ui| {
+                        let entries = recent::menu_entries(&self.recent);
+                        if entries.is_empty() {
+                            ui.add_enabled(false, egui::Button::new("(empty)"));
+                        } else {
+                            for (label, path) in entries {
+                                // The full path is the hover text; a failed load drops the entry.
+                                let response = ui.button(label).on_hover_text(path.clone());
+                                if response.clicked() {
+                                    if !self.load_rom(std::path::Path::new(&path)) {
+                                        self.recent.remove(&path);
+                                        self.save_settings();
+                                    }
+                                    ui.close();
+                                }
+                            }
+                            if ui.button("Clear list").clicked() {
+                                self.recent.clear();
+                                self.save_settings();
+                                ui.close();
+                            }
+                        }
+                    });
                 });
                 ui.menu_button("Emulation", |ui| {
                     let pause_label = if self.paused {
