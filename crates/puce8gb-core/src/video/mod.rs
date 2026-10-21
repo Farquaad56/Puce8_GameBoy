@@ -914,7 +914,17 @@ impl Ppu {
                 continue; // a better winner already resolved this pixel (E03_04 spec)
             }
             self.line_resolved[p] = true;
-            if bg_prio && self.line_buf[p].color != 0 {
+            let hidden = if vram1.is_some() {
+                // Cgb color mode (E15_12, note 11b): with LCDC bit 0 clear the sprites are always on top
+                // of the BG and window; otherwise a sprite pixel is hidden behind BG color ids 1-3
+                // when the BG attribute bit 7 or the OAM attribute bit 7 is set.
+                self.lcdc & LCDC_BG_ENABLE != 0
+                    && self.line_buf[p].color != 0
+                    && (bg_prio || self.line_attr[p] & 0x80 != 0)
+            } else {
+                bg_prio && self.line_buf[p].color != 0 // DMG path, unchanged
+            };
+            if hidden {
                 continue; // BG colors 1..3 are drawn over the sprite: the background stays (E03_04 spec)
             }
             self.line_obj_attr[p] = attrs; // OBJ palette number for the Cgb commit (E15_11)
@@ -966,6 +976,81 @@ impl Ppu {
 mod tests {
     use super::*;
     use crate::machine::FRAME_DOTS;
+
+    /// Runs line 0 in Cgb color mode with one sprite over the background tile of map entry (0,0)
+    /// (E15_12): the BG tile 0 row 0 has color id 2 (when `bg_color_2`, else id 0), the sprite
+    /// (tile 1, columns 0..7) has color id 1. `bg_attr` is the BG attribute byte of entry (0,0) in
+    /// bank 1, `oam_attr` the OAM attribute byte. OPRI = 0 (CGB style).
+    fn e15_12_run(lcdc: u8, bg_attr: u8, oam_attr: u8, bg_color_2: bool) -> Ppu {
+        let mut vram0 = [0x00u8; 0x2000];
+        let mut vram1 = [0x00u8; 0x2000];
+        if bg_color_2 {
+            vram0[1] = 0xFF; // tile 0 row 0 high plane: color id 2 on all 8 pixels
+        }
+        vram0[0x10] = 0xFF; // tile 1 row 0 low plane: sprite color id 1 on all 8 pixels
+        vram1[0x1800] = bg_attr;
+        let mut oam = [0u8; 160];
+        oam[0] = 16; // Y=16: screen line 0 with LY=0
+        oam[1] = 8; // X=8: screen columns 0..7
+        oam[2] = 1; // tile 1
+        oam[3] = oam_attr;
+        let mut p = Ppu {
+            lcdc,
+            ..Ppu::default()
+        };
+        p.scan_oam(&oam);
+        for dot in 0..LINE_DOTS {
+            if dot > 0 {
+                p.tick();
+            }
+            p.fetch_pixels_cgb(&vram0, Some(&vram1), 0, 0);
+            p.render_sprites_cgb(&oam, &vram0, Some(&vram1), false);
+        }
+        p
+    }
+
+    #[test]
+    fn e15_12_case_1_no_flag_the_sprite_wins() {
+        let p = e15_12_run(0x93, 0x00, 0x00, true);
+        assert!(p.line_buf[0].obj);
+        assert_eq!(p.line_buf[0].color, 1);
+    }
+
+    #[test]
+    fn e15_12_case_2_oam_bit_7_the_bg_wins() {
+        let p = e15_12_run(0x93, 0x00, 0x80, true);
+        assert!(!p.line_buf[0].obj);
+        assert_eq!(p.line_buf[0].color, 2);
+    }
+
+    #[test]
+    fn e15_12_case_3_oam_bit_7_with_bg_color_0_the_sprite_wins() {
+        let p = e15_12_run(0x93, 0x00, 0x80, false);
+        assert!(p.line_buf[0].obj);
+        assert_eq!(p.line_buf[0].color, 1);
+    }
+
+    #[test]
+    fn e15_12_case_4_bg_attribute_bit_7_the_bg_wins() {
+        let p = e15_12_run(0x93, 0x80, 0x00, true);
+        assert!(!p.line_buf[0].obj);
+        assert_eq!(p.line_buf[0].color, 2);
+    }
+
+    #[test]
+    fn e15_12_case_5_lcdc_bit_0_clear_the_sprite_wins() {
+        let p = e15_12_run(0x92, 0x80, 0x00, true); // BG attribute bit 7 is ignored
+        assert!(p.line_buf[0].obj);
+        assert_eq!(p.line_buf[0].color, 1);
+    }
+
+    #[test]
+    fn e15_12_lcdc_bit_0_clear_also_ignores_oam_bit_7() {
+        let p = e15_12_run(0x92, 0x80, 0x80, true);
+        assert!(p.line_buf[0].obj);
+        assert_eq!(p.line_buf[0].color, 1);
+        assert!(!p.line_buf[8].obj); // column 8 has no sprite: the BG stays
+    }
 
     /// Runs line 0 with sprites in Cgb color mode (E15_11): OAM scan, then per dot a tick plus the
     /// pixel fetch and the sprite merge. LCDC $93: LCD on, unsigned tile data, sprites on, BG on.
