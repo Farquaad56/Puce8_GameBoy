@@ -19,6 +19,7 @@ mod recent;
 mod resample;
 mod rom_check;
 mod rom_info;
+mod rom_zip;
 mod scale;
 mod settings;
 mod slots;
@@ -198,12 +199,28 @@ impl App {
     /// sent to the emulation thread, so the current game keeps running (E13_06). Returns
     /// false when the file cannot be read or the ROM is rejected.
     fn load_rom(&mut self, path: &std::path::Path) -> bool {
-        let bytes = match std::fs::read(path) {
+        let raw = match std::fs::read(path) {
             Ok(bytes) => bytes,
             Err(err) => {
                 self.status = format!("Cannot read {}: {err}", path.display());
                 return false;
             }
+        };
+        // A .zip is unpacked first; the extracted ROM goes through the same check (E13_07).
+        let is_zip = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"));
+        let (bytes, entry_name) = if is_zip {
+            match rom_zip::extract_rom(&raw) {
+                Ok((name, data)) => (data, Some(name)),
+                Err(text) => {
+                    self.status = format!("Error: {text}");
+                    return false;
+                }
+            }
+        } else {
+            (raw, None)
         };
         // The ROM check runs before the core sees the image (E13_06, decision A_10).
         match rom_check::decide(&bytes) {
@@ -213,7 +230,9 @@ impl App {
             }
             decision => {
                 let display = path.display().to_string();
-                self.title = rom_info::window_title(&rom_info::rom_title(&bytes));
+                self.title = rom_info::window_title(
+                    &entry_name.unwrap_or_else(|| rom_info::rom_title(&bytes)),
+                );
                 self.path_input = display.clone();
                 self.emu
                     .send(Command::SavePath(Some(rom_info::save_path(path))));
