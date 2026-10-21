@@ -13,6 +13,8 @@ pub const IO_SIZE: usize = 0x100;
 #[cfg(test)]
 mod boot_tests;
 #[cfg(test)]
+mod cgb_palette_tests;
+#[cfg(test)]
 mod cgb_vram_tests;
 #[cfg(test)]
 mod cgb_wram_tests;
@@ -136,6 +138,14 @@ pub struct Bus {
     vram1: Box<[u8]>,
     /// VBK ($FF4F) bit 0: the VRAM bank seen by the CPU on Cgb (E15_07).
     vbk: u8,
+    /// Background palette RAM of the Cgb model, 8 palettes x 4 colors x 2 bytes (E15_08).
+    pub bg_pal: [u8; 64],
+    /// OBJ palette RAM of the Cgb model, same layout (E15_08).
+    pub obj_pal: [u8; 64],
+    /// BCPS ($FF68): bit 7 auto-increment, bits 5-0 index; bit 6 is not stored (E15_08).
+    bcps: u8,
+    /// OCPS ($FF6A): same layout as BCPS (E15_08).
+    ocps: u8,
 }
 
 impl Bus {
@@ -177,7 +187,11 @@ impl Bus {
             wram_hi: vec![0x00; 0x6000].into_boxed_slice(), // WRAM banks 2-7 (E15_06)
             vram1: vec![0x00; 0x2000].into_boxed_slice(), // VRAM bank 1 (E15_07)
             vbk: 0,                  // VBK bit 0 (E15_07)
-            svbk: 0,                 // SVBK bits 0-2 (E15_06)
+            bg_pal: [0xFF; 64],      // all white, UNKNOWN - to confirm (E15_08)
+            obj_pal: [0xFF; 64],     // UNKNOWN - to confirm (E15_08)
+            bcps: 0,
+            ocps: 0,
+            svbk: 0, // SVBK bits 0-2 (E15_06)
         }
     }
 
@@ -208,6 +222,14 @@ impl Bus {
         self.wram_hi.fill(0x00); // WRAM banks 2-7 (E15_06)
         self.svbk = 0; // bank 1 selected, SVBK reads $F8 (E15_06, note 11a)
         self.vbk = 0; // VRAM bank 0 selected by the CPU (E15_07)
+                      // Palette RAM (E15_08, note 11b): the boot ROM leaves every BG color white; $FF is used for
+                      // each byte (bit 15 is ignored, so $FFFF is white). OBJ colors are uninitialized on hardware:
+                      // $FF is used except byte 0, which the boot ROM sets to $00. All UNKNOWN - to confirm.
+        self.bg_pal.fill(0xFF);
+        self.obj_pal.fill(0xFF);
+        self.obj_pal[0] = 0x00;
+        self.bcps = 0;
+        self.ocps = 0;
         self.hram.fill(0x00);
         // Cartridge RAM is NOT kept across reset (E05_07): rebuild the mapper from the ROM;
         // the frontend reloads battery RAM with load_battery_ram.
@@ -327,6 +349,33 @@ impl Bus {
         self.timer = Timer::default();
         self.p1_prev = p1_read(self.io[0x00], &self.input) & 0x0F;
         self.remap_boot();
+    }
+
+    /// Byte of the palette RAM selected by BCPS (`obj` false) or OCPS (`obj` true) (E15_08).
+    fn cram_data(&self, obj: bool) -> u8 {
+        if obj {
+            self.obj_pal[usize::from(self.ocps & 0x3F)]
+        } else {
+            self.bg_pal[usize::from(self.bcps & 0x3F)]
+        }
+    }
+
+    /// Write to BCPD (`obj` false) or OCPD (`obj` true) (E15_08, note 11b): the byte is ignored
+    /// while the PPU blocks VRAM (mode 3), but the auto-increment still happens, even when the
+    /// write fails; the index wraps from 63 to 0.
+    fn cram_write(&mut self, obj: bool, val: u8) {
+        let writable = self.vram_write_ok;
+        let (ram, spec) = if obj {
+            (&mut self.obj_pal, &mut self.ocps)
+        } else {
+            (&mut self.bg_pal, &mut self.bcps)
+        };
+        if writable {
+            ram[usize::from(*spec & 0x3F)] = val;
+        }
+        if *spec & 0x80 != 0 {
+            *spec = 0x80 | (((*spec & 0x3F) + 1) & 0x3F);
+        }
     }
 
     /// VRAM byte at `addr` ($8000-$9FFF) as the CPU sees it (E15_07): bank 1 when the Cgb model
@@ -459,6 +508,24 @@ impl Bus {
             0xFF02 => self.io[0x02] | 0x7E, // SC ($FF02): bits 6-1 are unused and read 1 on DMG (mooneye unused_hwio-GS, FIX_05)
             0xFF70 if self.cgb => 0xF8 | self.svbk, // SVBK: bits 3-7 read 1, bits 0-2 as written (E15_06, note 11a); a written 0 reading back as 0 is UNKNOWN - to confirm
             0xFF4F if self.cgb => 0xFE | self.vbk, // VBK: bits 7-1 read 1, bit 0 is the bank (E15_07, note 11a)
+            0xFF68 if self.cgb => 0x40 | self.bcps, // BCPS: unused bit 6 read value is UNKNOWN - to confirm, 1 is used (E15_08)
+            0xFF6A if self.cgb => 0x40 | self.ocps, // OCPS: same as BCPS (E15_08)
+            0xFF69 if self.cgb => {
+                // BCPD: reads $FF while the PPU blocks VRAM (mode 3) (E15_08, note 11b)
+                if self.vram_open {
+                    self.cram_data(false)
+                } else {
+                    0xFF
+                }
+            }
+            0xFF6B if self.cgb => {
+                // OCPD: same as BCPD (E15_08)
+                if self.vram_open {
+                    self.cram_data(true)
+                } else {
+                    0xFF
+                }
+            }
             0xFF03 | 0xFF08..=0xFF0E | 0xFF4C..=0xFF7F => 0xFF, // unmapped I/O reads $FF (mooneye unused_hwio-GS, FIX_05)
             0xFF01..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
@@ -571,6 +638,10 @@ impl Bus {
             },
             0xFF70 if self.cgb => self.svbk = val & 0x07, // SVBK: only bits 0-2 are kept (E15_06, note 11a)
             0xFF4F if self.cgb => self.vbk = val & 0x01, // VBK: only bit 0 matters (E15_07, note 11a)
+            0xFF68 if self.cgb => self.bcps = val & 0xBF, // BCPS: bit 7 auto-increment, bits 5-0 index (E15_08)
+            0xFF6A if self.cgb => self.ocps = val & 0xBF, // OCPS (E15_08)
+            0xFF69 if self.cgb => self.cram_write(false, val), // BCPD (E15_08)
+            0xFF6B if self.cgb => self.cram_write(true, val), // OCPD (E15_08)
             0xFF03 | 0xFF08..=0xFF0E | 0xFF4C..=0xFF7F => {} // unmapped I/O: writes are ignored (mooneye unused_hwio-GS, FIX_05)
             0xFF01..=0xFF7F => {
                 self.io[(addr - 0xFF00) as usize] = val;
@@ -735,6 +806,10 @@ impl Bus {
             0xFF02 => self.io[0x02] | 0x7E, // same as read() (FIX_05)
             0xFF70 if self.cgb => 0xF8 | self.svbk, // same as read() (E15_06)
             0xFF4F if self.cgb => 0xFE | self.vbk, // same as read() (E15_07)
+            0xFF68 if self.cgb => 0x40 | self.bcps, // same as read() (E15_08)
+            0xFF6A if self.cgb => 0x40 | self.ocps, // same as read() (E15_08)
+            0xFF69 if self.cgb => self.cram_data(false), // peek ignores the PPU blocking (E15_08)
+            0xFF6B if self.cgb => self.cram_data(true), // same as BCPD (E15_08)
             0xFF03 | 0xFF08..=0xFF0E | 0xFF4C..=0xFF7F => 0xFF, // same as read() (FIX_05)
             0xFF01..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
