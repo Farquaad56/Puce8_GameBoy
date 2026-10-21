@@ -132,3 +132,6 @@ E04_07: Pan Docs Audio Details does not state the APU power-on/power-off effects
 - E06_03 baseline: FAIL boot_hwio-dmgABCmgb: area = I/O register values right after the boot ROM; probable cause UNKNOWN - to confirm
 - E06_03 baseline: FAIL boot_sclk_align-dmgABCmgb: area = serial clock alignment right after the boot ROM; probable cause UNKNOWN - to confirm
 - E06_03 baseline: FAIL multicart_rom_8Mb: area = MBC1 multicart (MBC1M) wiring not modelled; probable cause UNKNOWN - to confirm
+- E14_01 boot ROM: can a write to $FF50 be undone (boot ROM remapped), and what does a later write do? Not stated in pandocs. UNKNOWN - to confirm
+- E14_01 boot ROM: CPU register values before the boot ROM runs (power-on). Not stated in pandocs. UNKNOWN - to confirm
+- E14_01 boot ROM: I/O register values before the boot ROM runs (power-on). Not stated in pandocs. UNKNOWN - to confirm
