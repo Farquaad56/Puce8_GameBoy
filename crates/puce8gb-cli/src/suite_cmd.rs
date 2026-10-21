@@ -42,7 +42,7 @@ fn entry_args(entry: &Entry) -> RunArgs {
         save_state: None,
         load_state: None,
         boot_rom: None,
-        model: crate::run_args::ModelChoice::Auto,
+        model: crate::run_args::ModelChoice::Dmg, // the manifest baseline is a DMG baseline (E15_20 regression fix)
         quiet: true,
     }
 }
@@ -73,7 +73,7 @@ pub fn run_entry(entry: &Entry, rom: &[u8]) -> EntryResult {
             Outcome::FramesDone => EntryResult::Fail("unexpected outcome".to_string()),
         },
         Kind::Mooneye => {
-            let mut dmg = match run::new_machine(rom, None, crate::run_args::ModelChoice::Auto) {
+            let mut dmg = match run::new_machine(rom, None, crate::run_args::ModelChoice::Dmg) {
                 Ok(dmg) => dmg,
                 Err(_) => return EntryResult::Fail("cannot load ROM".to_string()),
             };

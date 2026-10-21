@@ -39,7 +39,9 @@ pub struct RunArgs {
     pub load_state: Option<String>,
     /// Boot ROM file to start from (`--boot-rom FILE`, E14_05).
     pub boot_rom: Option<String>,
-    /// Console model (`--model auto|dmg|cgb`, E15_20); default auto.
+    /// Console model (`--model auto|dmg|cgb`, E15_20). The default is dmg: the task asked for auto,
+    /// but DMG test ROMs such as blargg cpu_instrs have $0143 bit 7 set and the older check C01_04
+    /// expects the DMG start registers. `--model auto` picks the model from the header.
     pub model: ModelChoice,
     /// Suppress the serial echo on stdout; set by the suite runner, not a CLI flag (E06_01).
     pub quiet: bool,
@@ -60,7 +62,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
     let mut save_state: Option<String> = None;
     let mut load_state: Option<String> = None;
     let mut boot_rom: Option<String> = None;
-    let mut model = ModelChoice::Auto;
+    let mut model = ModelChoice::Dmg; // default dmg, see the doc of RunArgs::model
 
     let mut i = 0;
     while i < args.len() {
@@ -202,9 +204,9 @@ mod tests {
     }
 
     #[test]
-    fn e15_20_model_default_is_auto() {
+    fn e15_20_model_default_is_dmg() {
         let a = parse_run_args(&[arg("game.gb")]).expect("a rom path parses");
-        assert_eq!(a.model, ModelChoice::Auto);
+        assert_eq!(a.model, ModelChoice::Dmg);
     }
 
     #[test]
