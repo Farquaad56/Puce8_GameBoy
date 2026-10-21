@@ -37,6 +37,36 @@ pub enum LoadError {
     BadBootRom,
 }
 
+/// Console model emulated by a machine (decision A_11, E14_04).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Model {
+    #[default]
+    Dmg,
+    Cgb,
+    Sgb,
+}
+
+impl Model {
+    /// Byte stored in the save-state extension block: 0 Dmg, 1 Cgb, 2 Sgb (E14_04).
+    pub fn to_byte(self) -> u8 {
+        match self {
+            Model::Dmg => 0,
+            Model::Cgb => 1,
+            Model::Sgb => 2,
+        }
+    }
+
+    /// Inverse of `to_byte`; None for any other value (E14_04).
+    pub fn from_byte(byte: u8) -> Option<Model> {
+        match byte {
+            0 => Some(Model::Dmg),
+            1 => Some(Model::Cgb),
+            2 => Some(Model::Sgb),
+            _ => None,
+        }
+    }
+}
+
 /// Core machine interface (decisions A_01/A_04/A_05).
 pub trait Machine {
     /// Reset to the documented post-boot state at PC=$0100 without running the boot ROM
@@ -95,6 +125,10 @@ pub struct Dmg {
     frame_count: u64,
     /// Instruction trace ring (E08_04); empty and inactive until enabled.
     pub(crate) trace: Trace,
+    /// Console model (E14_04); always Dmg for now.
+    model: Model,
+    /// Copy of the installed boot ROM image, kept so a loaded state can rebuild it (E14_04).
+    boot_image: Option<Vec<u8>>,
 }
 
 impl Dmg {
@@ -159,6 +193,8 @@ impl Dmg {
             stat_line_prev: false, // no STAT request pending at power-up (E03_08)
             frame_count: 0,
             trace: Trace::default(),
+            model: Model::Dmg,
+            boot_image: None,
         };
         dmg.reset();
         Ok(dmg)
@@ -171,6 +207,7 @@ impl Dmg {
         dmg.bus
             .set_boot_rom(boot, Self::DMG_BOOT_ROM_LEN)
             .map_err(|_| LoadError::BadBootRom)?;
+        dmg.boot_image = Some(boot.to_vec());
         dmg.reset(); // a boot ROM is installed: restarts from the power-on state
         Ok(dmg)
     }
@@ -208,6 +245,11 @@ impl Dmg {
             || (stat & 0x20 != 0 && self.ppu.ly() == VBLANK_FIRST_LINE && self.ppu.line_dot() < 4) // bit 5 also fires at the very start of line 144, together with vblank (mooneye vblank_stat_intr-GS, FIX_07); how long the line stays high: UNKNOWN - to confirm, 4 dots used
             || (stat & 0x10 != 0 && self.ppu.stat_mode() == 1) // bit 4: VBlank
             || (stat & 0x08 != 0 && self.ppu.stat_mode() == 0) // bits 3/4/5 irqs all follow the 4-dot lagged mode (mooneye intr_1_2 / intr_2_0, FIX_09)
+    }
+
+    /// Console model of this machine (E14_04).
+    pub fn model(&self) -> Model {
+        self.model
     }
 
     /// Frames completed since reset, incremented at each frame boundary (E03_14 spec).

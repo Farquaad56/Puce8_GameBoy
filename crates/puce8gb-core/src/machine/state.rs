@@ -1,13 +1,14 @@
 //! Save state of the whole machine (E09_02, decision A_05). Layout: header (magic, version,
 //! cartridge type $0147), cpu, bus (RAMs, IO, serial, DMA, timer, input, mapper with its
 //! cartridge RAM and RTC), ppu (with its framebuffer), audio, dot_phase (0..3),
-//! stat_line_prev, frame_count (u64), input. The ROM is not saved. Cartridge RAM is part of the
+//! stat_line_prev, frame_count (u64), input, then the extension block of decision A_11 (model
+//! u8, boot_mapped u8; E14_04). The ROM is not saved. Cartridge RAM is part of the
 //! state: UNKNOWN - to confirm (A_05 only says the battery file is separate), so loading a
 //! state replaces the current cartridge RAM. Loading builds a fresh machine from the same ROM,
 //! reads everything into it and replaces `self` only on success, so an error never changes the
 //! machine. Bytes after the state are ignored on load.
 
-use super::Dmg;
+use super::{Dmg, Model};
 use crate::savestate::{StateError, StateReader, StateWriter};
 
 impl Dmg {
@@ -24,12 +25,23 @@ impl Dmg {
         w.put_u8(self.dot_phase)?;
         w.put_bool(self.stat_line_prev)?;
         w.put_u64(self.frame_count)?;
-        self.input.write_state(w)
+        self.input.write_state(w)?;
+        // Extension block (decision A_11, E14_04): model byte, then the boot ROM mapped flag.
+        w.put_u8(self.model.to_byte())?;
+        w.put_bool(self.bus.boot_mapped())
     }
 
     pub(super) fn read_machine_state(&mut self, r: &mut StateReader<'_>) -> Result<(), StateError> {
         r.get_header(self.bus.peek(0x0147))?;
         let mut fresh = Dmg::new(&self.bus.rom).map_err(|_| StateError::InvalidState)?;
+        fresh.model = self.model;
+        if let Some(image) = &self.boot_image {
+            fresh
+                .bus
+                .set_boot_rom(image, Dmg::DMG_BOOT_ROM_LEN)
+                .map_err(|_| StateError::InvalidState)?;
+            fresh.boot_image = Some(image.clone());
+        }
         fresh.cpu.read_state(r)?;
         fresh.bus.read_state(r)?;
         fresh.ppu.read_state(r)?;
@@ -42,6 +54,18 @@ impl Dmg {
         fresh.stat_line_prev = r.get_bool()?;
         fresh.frame_count = r.get_u64()?;
         fresh.input.read_state(r)?;
+        // Extension block (decision A_11, E14_04).
+        let model = Model::from_byte(r.get_u8()?).ok_or(StateError::InvalidState)?;
+        let boot_mapped = r.get_bool()?;
+        if model != self.model {
+            return Err(StateError::RomMismatch);
+        }
+        if boot_mapped && fresh.boot_image.is_none() {
+            return Err(StateError::RomMismatch);
+        }
+        if !boot_mapped && fresh.boot_image.is_some() {
+            fresh.bus.write(0xFF50, 0x01); // a non-zero write to BOOT unmaps the boot ROM
+        }
         std::mem::swap(&mut fresh.trace, &mut self.trace);
         *self = fresh;
         self.trace.clear();
@@ -85,11 +109,130 @@ mod tests {
         Dmg::new(&rom()).expect("valid")
     }
 
+    /// 32 KiB ROM-only cartridge image: byte 0 is $AA, the rest is $00 (E14_04).
+    fn e14_04_cart() -> Vec<u8> {
+        let mut image = vec![0x00u8; 32 * 1024];
+        image[0] = 0xAA;
+        image
+    }
+
+    /// Synthetic boot ROM: NOPs, JP $00FC at $0000, then LD A,$01 and LDH ($50),A at $00FC (E14_04).
+    fn e14_04_boot() -> Vec<u8> {
+        let mut boot = vec![0x00u8; 256];
+        boot[0x00] = 0xC3;
+        boot[0x01] = 0xFC;
+        boot[0x02] = 0x00;
+        boot[0xFC] = 0x3E;
+        boot[0xFD] = 0x01;
+        boot[0xFE] = 0xE0;
+        boot[0xFF] = 0x50;
+        boot
+    }
+
+    fn e14_04_with_boot() -> Dmg {
+        Dmg::with_boot_rom(&e14_04_cart(), &e14_04_boot()).expect("valid boot ROM")
+    }
+
+    fn e14_04_run_mcycles(dmg: &mut Dmg, count: usize) {
+        for _ in 0..count {
+            for _ in 0..4 {
+                dmg.tick();
+            }
+        }
+    }
+
+    #[test]
+    fn e14_04_round_trip_while_boot_rom_is_mapped() {
+        let mut a = e14_04_with_boot();
+        e14_04_run_mcycles(&mut a, 3);
+        assert!(a.bus.boot_mapped());
+        let bytes = a.save_state_vec().expect("room");
+        let mut b = e14_04_with_boot();
+        b.load_state(&bytes).expect("valid");
+        assert!(b.bus.boot_mapped());
+        assert_eq!(b.cpu.regs(), a.cpu.regs());
+        e14_04_run_mcycles(&mut a, 100);
+        e14_04_run_mcycles(&mut b, 100);
+        assert_eq!(b.cpu.regs(), a.cpu.regs());
+        assert_eq!(b.bus.boot_mapped(), a.bus.boot_mapped());
+        assert_eq!(
+            b.save_state_vec().expect("room"),
+            a.save_state_vec().expect("room")
+        );
+    }
+
+    #[test]
+    fn e14_04_unmapped_boot_state_round_trip() {
+        let mut a = e14_04_with_boot();
+        e14_04_run_mcycles(&mut a, 40);
+        assert!(!a.bus.boot_mapped());
+        let bytes = a.save_state_vec().expect("room");
+        let mut b = e14_04_with_boot();
+        b.load_state(&bytes).expect("valid");
+        assert!(!b.bus.boot_mapped());
+        assert_eq!(b.bus.read(0x0000), 0xAA);
+        let mut plain = Dmg::new(&e14_04_cart()).expect("valid");
+        plain.load_state(&bytes).expect("valid");
+        assert_eq!(plain.cpu.regs(), a.cpu.regs());
+    }
+
+    #[test]
+    fn e14_04_mapped_boot_state_needs_a_boot_rom() {
+        let mut a = e14_04_with_boot();
+        e14_04_run_mcycles(&mut a, 3);
+        let bytes = a.save_state_vec().expect("room");
+        let mut plain = Dmg::new(&e14_04_cart()).expect("valid");
+        let before = plain.save_state_vec().expect("room");
+        assert_eq!(plain.load_state(&bytes), Err(StateError::RomMismatch));
+        assert_eq!(plain.save_state_vec().expect("room"), before);
+    }
+
+    #[test]
+    fn e14_04_model_byte_7_is_invalid_and_leaves_machine_unchanged() {
+        let mut a = running(1);
+        let bytes = a.save_state_vec().expect("room");
+        let mut data = bytes.clone();
+        data[bytes.len() - 2] = 7;
+        assert_eq!(a.load_state(&data), Err(StateError::InvalidState));
+        assert_eq!(a.save_state_vec().expect("room"), bytes);
+    }
+
+    #[test]
+    fn e14_04_boot_flag_byte_2_is_invalid() {
+        let mut a = running(1);
+        let bytes = a.save_state_vec().expect("room");
+        let mut data = bytes.clone();
+        data[bytes.len() - 1] = 2;
+        assert_eq!(a.load_state(&data), Err(StateError::InvalidState));
+        assert_eq!(a.save_state_vec().expect("room"), bytes);
+    }
+
+    #[test]
+    fn e14_04_other_model_is_rom_mismatch() {
+        let mut a = running(1);
+        let bytes = a.save_state_vec().expect("room");
+        let mut data = bytes.clone();
+        data[bytes.len() - 2] = 1;
+        assert_eq!(a.load_state(&data), Err(StateError::RomMismatch));
+        assert_eq!(a.save_state_vec().expect("room"), bytes);
+    }
+
+    #[test]
+    fn e14_04_version_1_header_is_bad_version() {
+        let mut a = running(1);
+        let bytes = a.save_state_vec().expect("room");
+        assert_eq!(bytes[4], 2);
+        let mut data = bytes.clone();
+        data[4] = 1;
+        assert_eq!(a.load_state(&data), Err(StateError::BadVersion));
+        assert_eq!(a.save_state_vec().expect("room"), bytes);
+    }
+
     #[test]
     fn e09_02_dmg_save_load_save_is_byte_identical() {
         let a = running(2);
         let bytes = a.save_state_vec().expect("room");
-        assert_eq!(&bytes[4..9], &[1, 0, 0, 0, 0]);
+        assert_eq!(&bytes[4..9], &[2, 0, 0, 0, 0]);
         let mut b = fresh();
         b.load_state(&bytes).expect("valid");
         assert_eq!(b.save_state_vec().expect("room"), bytes);
@@ -145,7 +288,7 @@ mod tests {
         let mut bad_magic = bytes.clone();
         bad_magic[0] ^= 0xFF;
         let mut bad_version = bytes.clone();
-        bad_version[4] = 2;
+        bad_version[4] = 1;
         let mut bad_cartridge = bytes.clone();
         bad_cartridge[8] = 0x13;
         for (data, expected) in [
@@ -163,7 +306,7 @@ mod tests {
         let mut a = running(1);
         let bytes = a.save_state_vec().expect("room");
         let n = bytes.len();
-        for (index, value) in [(n - 11, 4u8), (n - 10, 2u8)] {
+        for (index, value) in [(n - 13, 4u8), (n - 12, 2u8)] {
             let mut data = bytes.clone();
             data[index] = value;
             assert_eq!(

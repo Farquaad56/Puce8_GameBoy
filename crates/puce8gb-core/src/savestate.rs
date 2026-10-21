@@ -9,8 +9,8 @@
 /// Magic bytes at the start of every state.
 /// UNKNOWN - to confirm: A_05 only fixes the length (4 bytes); this value is a placeholder choice.
 pub const MAGIC: [u8; 4] = *b"P8GB";
-/// Format version written in the header (A_05: starts at 1).
-pub const VERSION: u32 = 1;
+/// Format version written in the header (A_05: starts at 1; 2 since E14_04, which adds the extension block of A_11).
+pub const VERSION: u32 = 2;
 /// Header length in bytes: magic (4) + version (4) + cartridge type (1).
 pub const HEADER_LEN: usize = 9;
 
@@ -217,14 +217,14 @@ mod tests {
     #[test]
     fn e09_01_header_layout_and_round_trip() {
         assert_eq!(HEADER_LEN, 9);
-        assert_eq!(VERSION, 1);
+        assert_eq!(VERSION, 2);
         let mut buf = [0xEEu8; 16];
         let mut w = StateWriter::new(&mut buf);
         w.put_header(0x13).expect("room");
         assert_eq!(w.position(), HEADER_LEN);
         assert_eq!(
             &buf[..HEADER_LEN],
-            &[0x50, 0x38, 0x47, 0x42, 0x01, 0x00, 0x00, 0x00, 0x13]
+            &[0x50, 0x38, 0x47, 0x42, 0x02, 0x00, 0x00, 0x00, 0x13]
         );
         assert_eq!(buf[HEADER_LEN], 0xEE);
         let mut r = StateReader::new(&buf);
@@ -242,7 +242,7 @@ mod tests {
             Err(StateError::BadMagic)
         );
         let mut bad = good;
-        bad[4] = 2;
+        bad[4] = 1;
         assert_eq!(
             StateReader::new(&bad).get_header(0x13),
             Err(StateError::BadVersion)
