@@ -69,6 +69,121 @@ impl Bus {
         self.mapper.write_state(w)
     }
 
+    /// Cgb block of the save state (E15_19): compat flag, VBK, VRAM bank 1 (8192), SVBK, WRAM banks
+    /// 2-7 (24576), BG and OBJ palette RAM (64 + 64), BCPS, OCPS, OPRI, KEY1 armed flag, double speed
+    /// flag, HDMA1-4 (4), HDMA active flag, remaining blocks, source (u16), destination offset
+    /// (u16), in-HBlank flag, CPU pause counter (u16), RP, $FF72-$FF75. Written only for the Cgb model.
+    pub(crate) fn write_cgb_state(&self, w: &mut StateWriter<'_>) -> Result<(), StateError> {
+        w.put_bool(self.compat)?;
+        w.put_u8(self.vbk)?;
+        w.put_bytes(&self.vram1)?;
+        w.put_u8(self.svbk)?;
+        w.put_bytes(&self.wram_hi)?;
+        w.put_bytes(&self.bg_pal)?;
+        w.put_bytes(&self.obj_pal)?;
+        w.put_u8(self.bcps)?;
+        w.put_u8(self.ocps)?;
+        w.put_u8(self.opri)?;
+        w.put_bool(self.key1_armed)?;
+        w.put_bool(self.double_speed)?;
+        w.put_bytes(&self.hdma_regs)?;
+        w.put_bool(self.hdma_active)?;
+        w.put_u8(self.hdma_left)?;
+        w.put_u16(self.hdma_src)?;
+        w.put_u16(self.hdma_dst)?;
+        w.put_bool(self.hdma_in_hblank)?;
+        w.put_u16(self.hdma_stall)?;
+        w.put_u8(self.rp)?;
+        w.put_u8(self.ff72)?;
+        w.put_u8(self.ff73)?;
+        w.put_u8(self.ff74)?;
+        w.put_u8(self.ff75)
+    }
+
+    /// Reads what `write_cgb_state` wrote. Booleans and ranges are validated and the bus is left
+    /// unchanged on error. A compat flag that disagrees with the cartridge header is a `RomMismatch`.
+    pub(crate) fn read_cgb_state(&mut self, r: &mut StateReader<'_>) -> Result<(), StateError> {
+        let compat = r.get_bool()?;
+        if compat != (self.rom[0x0143] & 0x80 == 0) {
+            return Err(StateError::RomMismatch);
+        }
+        let vbk = r.get_u8()?;
+        if vbk > 1 {
+            return Err(StateError::InvalidState);
+        }
+        let vram1 = r.get_bytes(0x2000)?.to_vec().into_boxed_slice();
+        let svbk = r.get_u8()?;
+        if svbk > 7 {
+            return Err(StateError::InvalidState);
+        }
+        let wram_hi = r.get_bytes(0x6000)?.to_vec().into_boxed_slice();
+        let mut bg_pal = [0u8; 64];
+        bg_pal.copy_from_slice(r.get_bytes(64)?);
+        let mut obj_pal = [0u8; 64];
+        obj_pal.copy_from_slice(r.get_bytes(64)?);
+        let bcps = r.get_u8()?;
+        let ocps = r.get_u8()?;
+        if bcps & 0x40 != 0 || ocps & 0x40 != 0 {
+            return Err(StateError::InvalidState);
+        }
+        let opri = r.get_u8()?;
+        if opri > 1 {
+            return Err(StateError::InvalidState);
+        }
+        let key1_armed = r.get_bool()?;
+        let double_speed = r.get_bool()?;
+        let mut hdma_regs = [0u8; 4];
+        hdma_regs.copy_from_slice(r.get_bytes(4)?);
+        let hdma_active = r.get_bool()?;
+        let hdma_left = r.get_u8()?;
+        if hdma_left > 128 || (hdma_active && hdma_left == 0) {
+            return Err(StateError::InvalidState);
+        }
+        let hdma_src = r.get_u16()?;
+        let hdma_dst = r.get_u16()?;
+        if hdma_dst > 0x1FF0 || hdma_dst & 0x000F != 0 {
+            return Err(StateError::InvalidState);
+        }
+        let hdma_in_hblank = r.get_bool()?;
+        let hdma_stall = r.get_u16()?;
+        let rp = r.get_u8()?;
+        if rp & 0x3E != 0 {
+            return Err(StateError::InvalidState);
+        }
+        let ff72 = r.get_u8()?;
+        let ff73 = r.get_u8()?;
+        let ff74 = r.get_u8()?;
+        let ff75 = r.get_u8()?;
+        if ff75 & 0x8F != 0 {
+            return Err(StateError::InvalidState);
+        }
+        self.compat = compat;
+        self.vbk = vbk;
+        self.vram1 = vram1;
+        self.svbk = svbk;
+        self.wram_hi = wram_hi;
+        self.bg_pal = bg_pal;
+        self.obj_pal = obj_pal;
+        self.bcps = bcps;
+        self.ocps = ocps;
+        self.opri = opri;
+        self.key1_armed = key1_armed;
+        self.double_speed = double_speed;
+        self.hdma_regs = hdma_regs;
+        self.hdma_active = hdma_active;
+        self.hdma_left = hdma_left;
+        self.hdma_src = hdma_src;
+        self.hdma_dst = hdma_dst;
+        self.hdma_in_hblank = hdma_in_hblank;
+        self.hdma_stall = hdma_stall;
+        self.rp = rp;
+        self.ff72 = ff72;
+        self.ff73 = ff73;
+        self.ff74 = ff74;
+        self.ff75 = ff75;
+        Ok(())
+    }
+
     /// Reads what `write_state` wrote. The mapper variant and RAM sizes must match the loaded
     /// cartridge (`RomMismatch`). The bus is left unchanged on error.
     pub fn read_state(&mut self, r: &mut StateReader<'_>) -> Result<(), StateError> {

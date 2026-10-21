@@ -67,6 +67,32 @@ impl Ppu {
         w.put_bool(self.line_committed)
     }
 
+    /// Cgb attribute state of the PPU (E15_19): fifo_attr (16), tile_attr, line_attr (160),
+    /// line_obj_attr (160). Written only for the Cgb model.
+    pub(crate) fn write_cgb_state(&self, w: &mut StateWriter<'_>) -> Result<(), StateError> {
+        w.put_bytes(&self.fifo_attr)?;
+        w.put_u8(self.tile_attr)?;
+        w.put_bytes(&self.line_attr)?;
+        w.put_bytes(&self.line_obj_attr)
+    }
+
+    /// Reads what `write_cgb_state` wrote; the PPU is left unchanged on error. Attribute bytes
+    /// are not indexes, every value is accepted.
+    pub(crate) fn read_cgb_state(&mut self, r: &mut StateReader<'_>) -> Result<(), StateError> {
+        let mut fifo_attr = [0u8; FIFO_CAP];
+        fifo_attr.copy_from_slice(r.get_bytes(FIFO_CAP)?);
+        let tile_attr = r.get_u8()?;
+        let mut line_attr = [0u8; LINE_PIXELS as usize];
+        line_attr.copy_from_slice(r.get_bytes(LINE_PIXELS as usize)?);
+        let mut line_obj_attr = [0u8; LINE_PIXELS as usize];
+        line_obj_attr.copy_from_slice(r.get_bytes(LINE_PIXELS as usize)?);
+        self.fifo_attr = fifo_attr;
+        self.tile_attr = tile_attr;
+        self.line_attr = line_attr;
+        self.line_obj_attr = line_obj_attr;
+        Ok(())
+    }
+
     /// Reads what `write_state` wrote; the PPU is left unchanged on error.
     pub fn read_state(&mut self, r: &mut StateReader<'_>) -> Result<(), StateError> {
         let mut frame = [0u32; FRAMEBUFFER_SIZE];

@@ -14,11 +14,12 @@ use crate::savestate::{StateError, StateReader, StateWriter};
 impl Dmg {
     /// Upper bound of a serialized state: fixed parts (about 111 KiB) plus the largest
     /// cartridge RAM (128 KiB) plus a full audio ring (16 KiB), rounded up.
-    pub const MAX_STATE_BYTES: usize = 262_144;
+    // E15_19: the Cgb block adds about 32 KiB (VRAM bank 1, WRAM banks 2-7, palettes), so the bound is 320 KiB.
+    pub const MAX_STATE_BYTES: usize = 327_680;
 
     pub(super) fn write_machine_state(&self, w: &mut StateWriter<'_>) -> Result<(), StateError> {
-        // Temporary guard: only Dmg machines can be saved. Removed by E15_19 and E16_17.
-        if self.model != Model::Dmg {
+        // Temporary guard: the Sgb model cannot be saved yet. Removed by E16_17 (the Cgb guard was removed by E15_19).
+        if self.model == Model::Sgb {
             return Err(StateError::InvalidState);
         }
         w.put_header(self.bus.peek(0x0147))?;
@@ -32,17 +33,24 @@ impl Dmg {
         self.input.write_state(w)?;
         // Extension block (decision A_11, E14_04): model byte, then the boot ROM mapped flag.
         w.put_u8(self.model.to_byte())?;
-        w.put_bool(self.bus.boot_mapped())
+        w.put_bool(self.bus.boot_mapped())?;
+        // Cgb block (E15_19): only for the Cgb model, so Dmg states keep their size and layout.
+        if self.model == Model::Cgb {
+            self.bus.write_cgb_state(w)?;
+            self.ppu.write_cgb_state(w)?;
+        }
+        Ok(())
     }
 
     pub(super) fn read_machine_state(&mut self, r: &mut StateReader<'_>) -> Result<(), StateError> {
         r.get_header(self.bus.peek(0x0147))?;
         let mut fresh = Dmg::new(&self.bus.rom).map_err(|_| StateError::InvalidState)?;
         fresh.model = self.model;
+        fresh.bus.cgb = self.bus.cgb; // Cgb register arms stay active in the fresh machine (E15_19)
         if let Some(image) = &self.boot_image {
             fresh
                 .bus
-                .set_boot_rom(image, Dmg::DMG_BOOT_ROM_LEN)
+                .set_boot_rom(image, self.model.boot_rom_len())
                 .map_err(|_| StateError::InvalidState)?;
             fresh.boot_image = Some(image.clone());
         }
@@ -63,6 +71,11 @@ impl Dmg {
         let boot_mapped = r.get_bool()?;
         if model != self.model {
             return Err(StateError::RomMismatch);
+        }
+        // Cgb block (E15_19), read after the model check so a Cgb state loaded into a Dmg machine is a RomMismatch.
+        if model == Model::Cgb {
+            fresh.bus.read_cgb_state(r)?;
+            fresh.ppu.read_cgb_state(r)?;
         }
         if boot_mapped && fresh.boot_image.is_none() {
             return Err(StateError::RomMismatch);
@@ -148,13 +161,167 @@ mod tests {
     #[test]
     fn e15_04_only_dmg_machines_can_be_saved() {
         let cfg = crate::machine::MachineConfig {
+            model: Model::Sgb,
+            boot_rom: None,
+        };
+        let sgb = Dmg::with_config(&e14_04_cart(), cfg).expect("valid");
+        assert_eq!(sgb.save_state_vec(), Err(StateError::InvalidState));
+        let dmg = Dmg::new(&e14_04_cart()).expect("valid");
+        assert!(dmg.save_state_vec().is_ok());
+    }
+
+    fn e15_19_cgb(flag: u8) -> Dmg {
+        let mut image = rom();
+        image[0x143] = flag;
+        let cfg = crate::machine::MachineConfig {
             model: Model::Cgb,
             boot_rom: None,
         };
-        let cgb = Dmg::with_config(&e14_04_cart(), cfg).expect("valid");
-        assert_eq!(cgb.save_state_vec(), Err(StateError::InvalidState));
-        let dmg = Dmg::new(&e14_04_cart()).expect("valid");
-        assert!(dmg.save_state_vec().is_ok());
+        Dmg::with_config(&image, cfg).expect("valid")
+    }
+
+    fn e15_19_dmg_bytes(flag: u8) -> Vec<u8> {
+        let mut image = rom();
+        image[0x143] = flag;
+        Dmg::new(&image)
+            .expect("valid")
+            .save_state_vec()
+            .expect("room")
+    }
+
+    /// Size of the Cgb block: bus 32922 bytes + PPU attributes 337 bytes.
+    const E15_19_CGB_BLOCK: usize = 33_259;
+
+    fn e15_19_prepare(m: &mut Dmg) {
+        m.bus.write(0xFF70, 3);
+        m.bus.write(0xD123, 0x77); // WRAM bank 3
+        m.bus.write(0xFF56, 0xC1);
+        m.bus.write(0xFF72, 0x12);
+        m.bus.write(0xFF73, 0x34);
+        m.bus.write(0xFF74, 0x56);
+        m.bus.write(0xFF75, 0x70);
+        m.bus.write(0xFF51, 0xC1);
+        m.bus.write(0xFF52, 0x00);
+        m.bus.write(0xFF53, 0x00);
+        m.bus.write(0xFF54, 0x00);
+        m.bus.write(0xFF55, 0xFF); // HBlank transfer of 128 blocks, still running after a few lines
+    }
+
+    #[test]
+    fn e15_19_cgb_round_trip_continues_identically() {
+        let mut a = e15_19_cgb(0x80);
+        e15_19_prepare(&mut a);
+        for _ in 0..(456 * 20) {
+            a.tick();
+        }
+        let status = a.bus.read(0xFF55);
+        assert!(status != 0xFF && status & 0x80 == 0, "status {status:#04x}");
+        let bytes = a.save_state_vec().expect("room");
+        let mut b = e15_19_cgb(0x80);
+        b.load_state(&bytes).expect("valid");
+        assert_eq!(b.bus.read(0xFF55), status);
+        assert_eq!(b.bus.read(0xFF70), 0xFB);
+        assert_eq!(b.bus.read(0xD123), 0x77);
+        assert_eq!(b.bus.read(0xFF56), 0xFF);
+        assert_eq!(b.bus.read(0xFF72), 0x12);
+        assert_eq!(b.bus.read(0xFF73), 0x34);
+        assert_eq!(b.bus.read(0xFF74), 0x56);
+        assert_eq!(b.bus.read(0xFF75), 0xFF);
+        assert_eq!(b.save_state_vec().expect("room"), bytes);
+        for _ in 0..2 {
+            a.run_frame();
+            b.run_frame();
+        }
+        assert_eq!(a.framebuffer(), b.framebuffer());
+        assert_eq!(
+            a.save_state_vec().expect("room"),
+            b.save_state_vec().expect("room")
+        );
+    }
+
+    #[test]
+    fn e15_19_cgb_state_is_the_dmg_state_plus_the_cgb_block() {
+        let cgb = e15_19_cgb(0x80).save_state_vec().expect("room");
+        assert_eq!(cgb.len(), e15_19_dmg_bytes(0x80).len() + E15_19_CGB_BLOCK);
+        assert!(cgb.len() <= Dmg::MAX_STATE_BYTES);
+        assert_eq!(cgb[cgb.len() - E15_19_CGB_BLOCK - 2], 1); // model byte
+    }
+
+    #[test]
+    fn e15_19_dmg_state_layout_is_unchanged() {
+        let bytes = e15_19_dmg_bytes(0x00);
+        assert_eq!(&bytes[4..9], &[2, 0, 0, 0, 0]);
+        assert_eq!(&bytes[bytes.len() - 2..], &[0, 0]); // model Dmg, boot ROM not mapped
+        let cfg = crate::machine::MachineConfig {
+            model: Model::Dmg,
+            boot_rom: None,
+        };
+        let same = Dmg::with_config(&rom(), cfg).expect("valid");
+        assert_eq!(same.save_state_vec().expect("room").len(), bytes.len());
+    }
+
+    #[test]
+    fn e15_19_cgb_state_into_a_dmg_machine_is_rom_mismatch_and_leaves_it_unchanged() {
+        let bytes = e15_19_cgb(0x80).save_state_vec().expect("room");
+        let mut image = rom();
+        image[0x143] = 0x80;
+        let mut dmg = Dmg::new(&image).expect("valid");
+        let before = dmg.save_state_vec().expect("room");
+        assert_eq!(dmg.load_state(&bytes), Err(StateError::RomMismatch));
+        assert_eq!(dmg.save_state_vec().expect("room"), before);
+    }
+
+    #[test]
+    fn e15_19_truncated_cgb_state_is_bad_size_and_leaves_the_machine_unchanged() {
+        let mut a = e15_19_cgb(0x80);
+        let bytes = a.save_state_vec().expect("room");
+        let base = bytes.len() - E15_19_CGB_BLOCK;
+        for len in [
+            base,
+            base + 1,
+            base + 10_000,
+            bytes.len() - 337,
+            bytes.len() - 1,
+        ] {
+            assert_eq!(
+                a.load_state(&bytes[..len]),
+                Err(StateError::BadSize),
+                "len {len}"
+            );
+            assert_eq!(a.save_state_vec().expect("room"), bytes);
+        }
+    }
+
+    #[test]
+    fn e15_19_corrupted_cgb_bytes_are_invalid_state_and_leave_the_machine_unchanged() {
+        let mut a = e15_19_cgb(0x80);
+        let bytes = a.save_state_vec().expect("room");
+        let base = bytes.len() - E15_19_CGB_BLOCK;
+        for (index, value) in [(base, 5u8), (base + 1, 2u8)] {
+            let mut data = bytes.clone();
+            data[index] = value; // compat flag 5, then VBK 2
+            assert_eq!(
+                a.load_state(&data),
+                Err(StateError::InvalidState),
+                "index {index}"
+            );
+            assert_eq!(a.save_state_vec().expect("room"), bytes);
+        }
+    }
+
+    #[test]
+    fn e15_19_compat_machine_round_trips_and_rejects_a_color_rom() {
+        let mut a = e15_19_cgb(0x00);
+        a.run_frame();
+        let bytes = a.save_state_vec().expect("room");
+        let mut b = e15_19_cgb(0x00);
+        b.load_state(&bytes).expect("valid");
+        assert!(b.compat());
+        a.run_frame();
+        b.run_frame();
+        assert_eq!(a.framebuffer(), b.framebuffer());
+        let mut color = e15_19_cgb(0x80);
+        assert_eq!(color.load_state(&bytes), Err(StateError::RomMismatch));
     }
 
     #[test]
