@@ -611,7 +611,9 @@ mod tests {
             0xFF6B, 0xFF6C, 0xFF70,
         ] {
             assert_eq!(dmg.bus.read(addr), 0xFF, "dmg {addr:#06x}");
-            assert_eq!(cgb.bus.read(addr), 0xFF, "cgb {addr:#06x}"); // registers not implemented yet
+            if addr != 0xFF70 {
+                assert_eq!(cgb.bus.read(addr), 0xFF, "cgb {addr:#06x}"); // registers not implemented yet; SVBK $FF70 is implemented by E15_06
+            }
         }
     }
 
