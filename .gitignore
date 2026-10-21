@@ -12,3 +12,5 @@ t_*.txt
 out.txt
 
 boot_roms/
+/boot_roms/
+*.bootrom

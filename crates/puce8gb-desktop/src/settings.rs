@@ -25,6 +25,12 @@ pub struct Settings {
     pub lcd_mode: LcdMode,
     pub recent: Vec<String>,
     pub last_dir: String,
+    /// Boot ROM Enable flag (E14_06); off means Skip.
+    pub boot_enabled: bool,
+    /// Boot ROM file paths, empty when not set (E14_06).
+    pub boot_dmg: String,
+    pub boot_gbc: String,
+    pub boot_sgb: String,
 }
 
 impl Default for Settings {
@@ -38,6 +44,10 @@ impl Default for Settings {
             lcd_mode: LcdMode::Off,
             recent: Vec::new(),
             last_dir: String::new(),
+            boot_enabled: false,
+            boot_dmg: String::new(),
+            boot_gbc: String::new(),
+            boot_sgb: String::new(),
         }
     }
 }
@@ -75,6 +85,16 @@ impl Settings {
         }
         if !self.last_dir.contains(['\n', '\r']) {
             text.push_str(&format!("last_dir={}\n", self.last_dir));
+        }
+        text.push_str(&format!("boot_enabled={}\n", self.boot_enabled));
+        for (name, path) in [
+            ("boot_dmg", &self.boot_dmg),
+            ("boot_gbc", &self.boot_gbc),
+            ("boot_sgb", &self.boot_sgb),
+        ] {
+            if !path.contains(['\n', '\r']) {
+                text.push_str(&format!("{name}={path}\n"));
+            }
         }
         for button in BUTTONS {
             text.push_str(&format!(
@@ -115,6 +135,16 @@ impl Settings {
                 recent_lines.push(value.to_string());
             } else if name == "last_dir" {
                 settings.last_dir = value.to_string();
+            } else if name == "boot_enabled" {
+                if let Ok(enabled) = value.parse::<bool>() {
+                    settings.boot_enabled = enabled;
+                }
+            } else if name == "boot_dmg" {
+                settings.boot_dmg = value.to_string();
+            } else if name == "boot_gbc" {
+                settings.boot_gbc = value.to_string();
+            } else if name == "boot_sgb" {
+                settings.boot_sgb = value.to_string();
             } else if let Some(button_text) = name.strip_prefix("key_") {
                 let button = BUTTONS
                     .iter()
@@ -310,6 +340,35 @@ mod tests {
     fn e13_03_blank_and_duplicate_recent_lines_are_dropped() {
         let parsed = Settings::from_text("recent=a\nrecent=\nrecent=b\nrecent=a\n");
         assert_eq!(parsed.recent, vec![String::from("a"), String::from("b")]);
+    }
+
+    #[test]
+    fn e14_06_boot_settings_round_trip() {
+        let custom = Settings {
+            boot_enabled: true,
+            boot_dmg: String::from("H:\\boot\\dmg.bin"),
+            boot_gbc: String::from("H:\\boot\\gbc.bin"),
+            boot_sgb: String::from("H:\\boot\\sgb.bin"),
+            ..Settings::default()
+        };
+        assert_eq!(Settings::from_text(&custom.to_text()), custom);
+    }
+
+    #[test]
+    fn e14_06_boot_defaults_are_off_and_empty() {
+        let parsed = Settings::from_text("volume=40\n");
+        assert!(!parsed.boot_enabled);
+        assert!(parsed.boot_dmg.is_empty());
+        assert!(parsed.boot_gbc.is_empty());
+        assert!(parsed.boot_sgb.is_empty());
+        assert!(!Settings::default().boot_enabled);
+    }
+
+    #[test]
+    fn e14_06_invalid_boot_enabled_value_keeps_the_default() {
+        let parsed = Settings::from_text("boot_enabled=maybe\nvolume=40\n");
+        assert!(!parsed.boot_enabled);
+        assert_eq!(parsed.volume, 40);
     }
 
     #[test]

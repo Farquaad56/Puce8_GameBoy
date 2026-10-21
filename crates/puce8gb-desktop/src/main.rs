@@ -1,6 +1,7 @@
 //! Desktop frontend: an eframe window showing the core framebuffer (E07_01).
 mod audio;
 mod battery;
+mod boot_rom;
 mod disasm;
 mod emu;
 mod fps;
@@ -80,6 +81,10 @@ struct App {
     last_dir: String,
     rom_report: Option<rom_check::RomReport>,
     rom_info_open: bool,
+    boot_enabled: bool,
+    boot_dmg: String,
+    boot_gbc: String,
+    boot_sgb: String,
 }
 
 impl App {
@@ -129,6 +134,10 @@ impl App {
             last_dir: loaded.last_dir.clone(),
             rom_report: None,
             rom_info_open: false,
+            boot_enabled: loaded.boot_enabled,
+            boot_dmg: loaded.boot_dmg.clone(),
+            boot_gbc: loaded.boot_gbc.clone(),
+            boot_sgb: loaded.boot_sgb.clone(),
         };
         app.apply_palette();
         app.lcd.set_mode(loaded.lcd_mode);
@@ -150,6 +159,10 @@ impl App {
             lcd_mode: self.lcd.mode(),
             recent: self.recent.to_lines(),
             last_dir: self.last_dir.clone(),
+            boot_enabled: self.boot_enabled,
+            boot_dmg: self.boot_dmg.clone(),
+            boot_gbc: self.boot_gbc.clone(),
+            boot_sgb: self.boot_sgb.clone(),
         };
         let _ = std::fs::write(&self.settings_file, settings.to_text());
     }
