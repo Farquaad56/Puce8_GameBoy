@@ -176,6 +176,23 @@ impl App {
         )));
     }
 
+    /// Opens the native file dialog and loads the chosen ROM (E13_04). The UI waits while the
+    /// dialog is open; the emulation thread keeps running.
+    fn open_rom_dialog(&mut self) {
+        let mut dialog =
+            rfd::FileDialog::new().add_filter("Game Boy ROM", &rom_check::ROM_EXTENSIONS[..]);
+        if !self.last_dir.is_empty() {
+            dialog = dialog.set_directory(&self.last_dir);
+        }
+        if let Some(path) = dialog.pick_file() {
+            if let Some(parent) = path.parent() {
+                self.last_dir = parent.display().to_string();
+            }
+            self.load_rom(&path);
+            self.save_settings();
+        }
+    }
+
     fn load_rom(&mut self, path: &std::path::Path) {
         match std::fs::read(path) {
             Ok(bytes) => {
@@ -291,6 +308,9 @@ impl eframe::App for App {
             self.last_input = input;
         }
         if !typing {
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
+                self.open_rom_dialog();
+            }
             if ctx.input(|i| i.key_pressed(egui::Key::P)) {
                 self.toggle_pause();
             }
@@ -339,6 +359,15 @@ impl eframe::App for App {
         }
         let top_panel = egui::Panel::top("menu").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui
+                        .add(egui::Button::new("Open ROM...").shortcut_text("Ctrl+O"))
+                        .clicked()
+                    {
+                        self.open_rom_dialog();
+                        ui.close();
+                    }
+                });
                 ui.menu_button("Emulation", |ui| {
                     let pause_label = if self.paused {
                         "Resume (P)"

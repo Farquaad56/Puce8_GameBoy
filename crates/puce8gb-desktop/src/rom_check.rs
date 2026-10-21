@@ -122,6 +122,22 @@ pub fn issue_text(issue: &RomIssue) -> String {
     }
 }
 
+/// File extensions accepted by the open dialog (E13_04).
+pub const ROM_EXTENSIONS: [&str; 4] = ["gb", "gbc", "sgb", "zip"];
+
+/// True when the path has one of the ROM_EXTENSIONS (case-insensitive).
+#[allow(dead_code)] // used by E13_05
+pub fn is_rom_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            ROM_EXTENSIONS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(ext))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,5 +267,27 @@ mod tests {
         };
         assert_eq!(issue_text(&error), "Error: boom");
         assert_eq!(issue_text(&warn), "Warning: careful");
+    }
+
+    #[test]
+    fn e13_04_is_rom_path_accepts_known_extensions() {
+        assert!(is_rom_path("a.GB"));
+        assert!(is_rom_path("b.gbc"));
+        assert!(is_rom_path("c.zip"));
+        assert!(is_rom_path("d.sgb"));
+    }
+
+    #[test]
+    fn e13_04_is_rom_path_rejects_other_files() {
+        assert!(!is_rom_path("d.txt"));
+        assert!(!is_rom_path("noext"));
+        assert!(!is_rom_path("x.gb.bak"));
+        assert!(!is_rom_path(""));
+    }
+
+    #[test]
+    fn e13_04_rom_extensions_list() {
+        assert_eq!(ROM_EXTENSIONS.len(), 4);
+        assert!(ROM_EXTENSIONS.contains(&"zip"));
     }
 }
