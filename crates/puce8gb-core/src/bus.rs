@@ -10,7 +10,16 @@ use crate::timer::Timer;
 
 /// IO register file FF00-FFFF size, including IF ($FF0F) and IE ($FFFF) (decision A_02).
 pub const IO_SIZE: usize = 0x100;
+#[cfg(test)]
+mod boot_tests;
 mod state;
+
+/// Error returned by `Bus::set_boot_rom` (E14_02).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootRomError {
+    /// The boot ROM image does not have the expected length.
+    BadSize,
+}
 
 /// Header checksum address in bank 0 (note 07a).
 pub const ROM_HEADER_CHECKSUM: usize = 0x14D;
@@ -107,6 +116,10 @@ pub struct Bus {
     pub input: Input,
     /// Low nibble of P1 at the previous check, for falling-edge detection (E05_01).
     p1_prev: u8,
+    /// Boot ROM image overlaid on $0000-$00FF while `boot_mapped` is true (E14_02, decision A_11).
+    boot_rom: Option<Box<[u8]>>,
+    /// True while the boot ROM is visible; a non-zero write to $FF50 clears it (E14_02).
+    boot_mapped: bool,
 }
 
 impl Bus {
@@ -142,6 +155,8 @@ impl Bus {
             timer: Timer::default(), // DIV/TIMA/TMA/TAC are set in reset() (note 08)
             input: Input::default(), // no button pressed at power-up (E05_01)
             p1_prev: 0x0F,           // P1 low nibble before the first check (E05_01)
+            boot_rom: None,          // no boot ROM installed by default (E14_02)
+            boot_mapped: false,      // cartridge visible from power-up (E14_02)
         }
     }
 
@@ -242,6 +257,31 @@ impl Bus {
         self.p1_prev = p1_read(self.io[0x00], &self.input) & 0x0F; // P1 low nibble at power-up (E05_01)
     }
 
+    /// Installs a boot ROM image and maps it over $0000-$00FF (E14_02). The image must have
+    /// exactly `expected_len` bytes, else nothing changes.
+    pub fn set_boot_rom(&mut self, data: &[u8], expected_len: usize) -> Result<(), BootRomError> {
+        if data.len() != expected_len {
+            return Err(BootRomError::BadSize);
+        }
+        self.boot_rom = Some(data.to_vec().into_boxed_slice());
+        self.boot_mapped = true;
+        Ok(())
+    }
+
+    /// Maps the installed boot ROM again (no effect when none is installed) (E14_02).
+    pub fn remap_boot(&mut self) {
+        self.boot_mapped = self.boot_rom.is_some();
+    }
+
+    /// Boot ROM byte at `addr` ($FF when out of range); never allocates (E14_02).
+    fn boot_byte(&self, addr: u16) -> u8 {
+        self.boot_rom
+            .as_deref()
+            .and_then(|rom| rom.get(usize::from(addr)))
+            .copied()
+            .unwrap_or(0xFF)
+    }
+
     /// CPU accesses that collide with the OAM DMA: OAM and the bus of the DMA source. Hardware-verified by mooneye call_timing (DMA from VRAM leaves WRAM/echo usable). The value a colliding read returns is the DMA byte on a real DMG: UNKNOWN - to confirm, $FF is used. DMA sources $E0-$FF map to $C0-$DF (FIX_06).
     fn dma_blocks(&self, addr: u16) -> bool {
         if !self.dma_active {
@@ -257,6 +297,9 @@ impl Bus {
     pub fn read(&self, addr: u16) -> u8 {
         if self.dma_blocks(addr) {
             return 0xFF; // OAM DMA collision: reads $FF (E03_15 spec, FIX_02); HRAM/I/O/IE stay accessible
+        }
+        if self.boot_mapped && addr <= 0x00FF {
+            return self.boot_byte(addr); // boot ROM overlay (E14_02)
         }
         match addr {
             0x0000..=0x7FFF => self.mapper.read(addr), // cartridge ROM region through the mapper (E05_07); past the image reads $FF
@@ -358,6 +401,11 @@ impl Bus {
                 } // blocked by the PPU mode: writes are ignored (E03_10 spec, FIX_10)
             }
             0xFEA0..=0xFEFF => {} // unusable range: writes are ignored (note 03a)
+            0xFF50 => {
+                if val != 0 {
+                    self.boot_mapped = false; // BOOT ($FF50): a non-zero write unmaps the boot ROM; only remap_boot brings it back (E14_02)
+                }
+            } // reading $FF50 is unchanged (E14_02)
             0xFF44 => {} // LY ($FF44) is read-only; writes are ignored (C01_15, note 04a "LY")
             0xFF41 => self.io[0x41] = val & 0x78, // STAT ($FF41): only the select bits 6..3 are writable (E03_08 spec); bit 2 and bits 1..0 read back live; LYC ($FF45) is plain R/W through the IO file
             0xFF00 => {
@@ -547,6 +595,9 @@ impl Bus {
     /// Read the raw memory at `addr` with no side effect and no gate (decision A_02):
     /// for debuggers and viewers. PPU-mode blocking and OAM DMA gating: E03_15.
     pub fn peek(&self, addr: u16) -> u8 {
+        if self.boot_mapped && addr <= 0x00FF {
+            return self.boot_byte(addr); // boot ROM overlay (E14_02)
+        }
         match addr {
             0x0000..=0x7FFF => self.mapper.read(addr), // cartridge ROM region through the mapper (E05_07); past the image reads $FF
             0x8000..=0x9FFF => self.vram[(addr - 0x8000) as usize],
