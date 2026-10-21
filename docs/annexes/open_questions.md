@@ -140,3 +140,7 @@ E04_07: Pan Docs Audio Details does not state the APU power-on/power-off effects
 - E15_01 UNKNOWN - to confirm : etat de HDMA1-4 apres un debordement de l'adresse de destination HDMA. Source : CGBR L101-L103.
 - E15_01 UNKNOWN - to confirm : detail des bits de BCPS/BCPD/OCPS/OCPD ($FF68-$FF6B), a lire dans le chapitre palettes. Source : HWRL L59-L62.
 - E15_02 UNKNOWN - to confirm : l'effet d'une ecriture de OPRI ($FF6C) faite en mode CGB ou DMG apres le demontage du boot ROM, et l'effet d'un PSM NMI qui remappe le boot ROM sur ce registre. Source : CGBR L258-L261.
+- E15_03 UNKNOWN - to confirm : effet sur DIV de l'attente apres une bascule de vitesse. Source : TIM L19.
+- E15_03 UNKNOWN - to confirm : interruptions pendant la pause de la bascule de vitesse (deja signale en E15_01, a confirmer par test). Source : CGBR L198.
+- E15_03 UNKNOWN - to confirm : source HDMA en Echo RAM, OAM, $FExx, I/O ou HRAM. Source : CGBR L35-L40.
+- E15_03 UNKNOWN - to confirm : format des bits de PCM12 $FF76 et PCM34 $FF77. Source : HWRL L64-L65.
