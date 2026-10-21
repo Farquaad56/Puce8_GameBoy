@@ -48,6 +48,7 @@ impl Cpu {
                 _ => {
                     let _ = bus.read(self.pc); // second byte: read and ignored
                     self.pc = self.pc.wrapping_add(1);
+                    bus.stop_speed_switch(); // Cgb speed switch when KEY1 is armed, otherwise nothing (E15_16)
                     self.done();
                     return true;
                 }
@@ -228,6 +229,40 @@ mod tests {
         cpu.tick(&mut bus); // fetch and execute the INC A at CODE+2
         assert_eq!(cpu.a, 0x01);
         assert_eq!(cpu.pc, CODE.wrapping_add(3));
+    }
+
+    #[test]
+    fn e15_16_stop_with_key1_armed_toggles_the_speed() {
+        let mut bus = testutil::new_bus();
+        bus.cgb = true;
+        let mut cpu = cpu_at_code(&mut bus, &[0x10, 0x00, 0x00]);
+        assert_eq!(bus.read(0xFF4D), 0x7E);
+        bus.write(0xFF4D, 0x01);
+        assert_eq!(bus.read(0xFF4D), 0x7F);
+        for _ in 0..2 {
+            cpu.tick(&mut bus);
+        }
+        assert_eq!(bus.read(0xFF4D), 0xFE); // bit 7 = 1 (double speed), bit 0 = 0
+        assert!(bus.double_speed());
+        cpu.pc = CODE;
+        for _ in 0..2 {
+            cpu.tick(&mut bus);
+        }
+        assert_eq!(bus.read(0xFF4D), 0xFE); // STOP without arming: speed unchanged
+        assert!(bus.double_speed());
+    }
+
+    #[test]
+    fn e15_16_dmg_model_stop_is_unchanged() {
+        let mut bus = testutil::new_bus();
+        let mut cpu = cpu_at_code(&mut bus, &[0x10, 0x00, 0x00]);
+        bus.write(0xFF4D, 0x01);
+        for _ in 0..2 {
+            cpu.tick(&mut bus);
+        }
+        assert_eq!(cpu.pc, CODE.wrapping_add(2));
+        assert_eq!(bus.read(0xFF4D), 0xFF);
+        assert!(!bus.double_speed());
     }
 
     #[test]

@@ -21,6 +21,8 @@ mod cgb_opri_tests;
 #[cfg(test)]
 mod cgb_palette_tests;
 #[cfg(test)]
+mod cgb_speed_tests;
+#[cfg(test)]
 mod cgb_vram_tests;
 #[cfg(test)]
 mod cgb_wram_tests;
@@ -171,6 +173,10 @@ pub struct Bus {
     hdma_dst: u16,
     /// True while the PPU was in HBlank at the previous check, for edge detection (E15_15).
     hdma_in_hblank: bool,
+    /// KEY1 ($FF4D) bit 0: speed switch armed, executed by the next STOP (E15_16, note 11c).
+    key1_armed: bool,
+    /// KEY1 bit 7: true in double speed. Only a field for now, not saved (state saving: E15_19); the clock effect: E15_17.
+    pub(crate) double_speed: bool,
 }
 
 impl Bus {
@@ -225,7 +231,9 @@ impl Bus {
             hdma_src: 0,
             hdma_dst: 0,
             hdma_in_hblank: false,
-            svbk: 0, // SVBK bits 0-2 (E15_06)
+            key1_armed: false,
+            double_speed: false, // the Cgb starts in normal speed (note 11c)
+            svbk: 0,             // SVBK bits 0-2 (E15_06)
         }
     }
 
@@ -262,6 +270,8 @@ impl Bus {
         self.hdma_src = 0;
         self.hdma_dst = 0;
         self.hdma_in_hblank = false;
+        self.key1_armed = false; // E15_16
+        self.double_speed = false;
         self.vbk = 0; // VRAM bank 0 selected by the CPU (E15_07)
                       // Palette RAM (E15_08, note 11b): the boot ROM leaves every BG color white; $FF is used for
                       // each byte (bit 15 is ignored, so $FFFF is white). OBJ colors are uninitialized on hardware:
@@ -450,6 +460,26 @@ impl Bus {
             self.vram_cpu_write(0x8000 | ((dst + i) & 0x1FFF), byte);
         }
         self.hdma_stall = self.hdma_stall.saturating_add(blocks * 8);
+    }
+
+    /// True when the Cgb model runs in double speed (E15_16).
+    pub fn double_speed(&self) -> bool {
+        self.double_speed
+    }
+
+    /// Called by the CPU when STOP executes (E15_16, note 11c): on the Cgb with KEY1 bit 0 set the
+    /// speed toggles, bit 0 clears, DIV resets and the CPU is suspended 2050 M-cycles. Whether DIV
+    /// stays frozen during that pause (the note says it does not count) is not emulated, the
+    /// effect of the interrupts during the pause is UNKNOWN - to confirm (not documented). Any other
+    /// STOP changes nothing.
+    pub(crate) fn stop_speed_switch(&mut self) {
+        const SPEED_SWITCH_PAUSE: u16 = 2050;
+        if self.cgb && self.key1_armed {
+            self.double_speed = !self.double_speed;
+            self.key1_armed = false;
+            self.timer.write_div(0);
+            self.hdma_stall = self.hdma_stall.saturating_add(SPEED_SWITCH_PAUSE);
+        }
     }
 
     /// $FF55 write (E15_14, E15_15, note 11c). Bit 7 = 1 arms an HBlank transfer of ((val & $7F) + 1)
@@ -645,6 +675,9 @@ impl Bus {
                 WaveAccess::Open(i) => self.io[0x30 + usize::from(i & 15)],
             },
             0xFF02 => self.io[0x02] | 0x7E, // SC ($FF02): bits 6-1 are unused and read 1 on DMG (mooneye unused_hwio-GS, FIX_05)
+            0xFF4D if self.cgb => {
+                0x7E | (u8::from(self.double_speed) << 7) | u8::from(self.key1_armed)
+            } // KEY1: unused bits read 1 (E15_16, note 11a)
             0xFF55 if self.cgb => self.hdma_status(), // HDMA5 (E15_15)
             0xFF70 if self.cgb => 0xF8 | self.svbk, // SVBK: bits 3-7 read 1, bits 0-2 as written (E15_06, note 11a); a written 0 reading back as 0 is UNKNOWN - to confirm
             0xFF4F if self.cgb => 0xFE | self.vbk, // VBK: bits 7-1 read 1, bit 0 is the bank (E15_07, note 11a)
@@ -777,6 +810,7 @@ impl Bus {
                 WaveAccess::Closed => {}
                 WaveAccess::Open(i) => self.io[0x30 + usize::from(i & 15)] = val,
             },
+            0xFF4D if self.cgb => self.key1_armed = val & 1 == 1, // KEY1: only bit 0 is writable (E15_16)
             0xFF51..=0xFF54 if self.cgb => self.hdma_regs[usize::from(addr - 0xFF51)] = val, // HDMA1-4, write-only (E15_14)
             0xFF55 if self.cgb => self.hdma_write_control(val), // HDMA5 (E15_14, E15_15)
             0xFF70 if self.cgb => self.svbk = val & 0x07, // SVBK: only bits 0-2 are kept (E15_06, note 11a)
@@ -948,6 +982,9 @@ impl Bus {
             0xFF06 => self.timer.tma(), // TMA ($FF06, note 01b)
             0xFF07 => 0xF8 | self.timer.tac(),
             0xFF02 => self.io[0x02] | 0x7E, // same as read() (FIX_05)
+            0xFF4D if self.cgb => {
+                0x7E | (u8::from(self.double_speed) << 7) | u8::from(self.key1_armed)
+            } // same as read() (E15_16)
             0xFF55 if self.cgb => self.hdma_status(), // same as read() (E15_15)
             0xFF70 if self.cgb => 0xF8 | self.svbk, // same as read() (E15_06)
             0xFF4F if self.cgb => 0xFE | self.vbk, // same as read() (E15_07)
