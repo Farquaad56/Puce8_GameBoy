@@ -491,6 +491,9 @@ impl Machine for Dmg {
             .set_video_access(self.ppu.vram_accessible(), self.ppu.oam_accessible()); // CPU access gate (E03_10)
         self.bus
             .set_video_write_access(self.ppu.vram_writable(), self.ppu.oam_writable()); // CPU write gate (FIX_10)
+                                                                                        // HBlank HDMA (E15_15, note 11c): one block on each entry into mode 0 of a visible line; mode 1 (lines 144-153) and an LCD that is off never match.
+        self.bus
+            .hdma_hblank_tick(self.ppu.lcd_on() && self.ppu.mode() == 0);
         if line_changed && !was_vblank && self.ppu.vblank() {
             self.bus.io[0x0F] |= 0x01; // IF bit 0: vblank request (note 02b)
         }
@@ -597,6 +600,27 @@ mod tests {
             }
         }
         hash
+    }
+
+    #[test]
+    fn e15_15_machine_copies_one_block_per_hblank() {
+        let rom = e15_13_rom(0x80, &E15_13_SCROLL_PROGRAM);
+        let mut cgb = e15_13_machine(Model::Cgb, &rom);
+        for i in 0..32u16 {
+            cgb.bus.write(0xC100 + i, 0x40 + i as u8);
+        }
+        cgb.bus.write(0xFF51, 0xC1);
+        cgb.bus.write(0xFF52, 0x00);
+        cgb.bus.write(0xFF53, 0x01);
+        cgb.bus.write(0xFF54, 0x00);
+        cgb.bus.write(0xFF55, 0x81); // 2 blocks: source $C100, destination $8100
+        assert_eq!(cgb.bus.read(0xFF55), 0x01);
+        cgb.run_frame();
+        for i in 0..32u16 {
+            assert_eq!(cgb.bus.vram_bank(0, 0x8100 + i), 0x40 + i as u8);
+        }
+        assert_eq!(cgb.bus.vram_bank(0, 0x8120), 0x00);
+        assert_eq!(cgb.bus.read(0xFF55), 0xFF);
     }
 
     fn e15_13_machine(model: Model, rom: &[u8]) -> Dmg {

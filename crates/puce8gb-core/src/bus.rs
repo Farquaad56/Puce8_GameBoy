@@ -13,6 +13,8 @@ pub const IO_SIZE: usize = 0x100;
 #[cfg(test)]
 mod boot_tests;
 #[cfg(test)]
+mod cgb_hdma_hblank_tests;
+#[cfg(test)]
 mod cgb_hdma_tests;
 #[cfg(test)]
 mod cgb_opri_tests;
@@ -160,6 +162,15 @@ pub struct Bus {
     hdma_regs: [u8; 4],
     /// M-cycles during which the CPU is suspended by a running HDMA transfer (E15_14).
     hdma_stall: u16,
+    /// True while an HBlank HDMA transfer is armed and not cancelled (E15_15, note 11c).
+    hdma_active: bool,
+    /// Blocks of 16 bytes still to copy by the HBlank transfer; 0 = none (E15_15). After a cancel it keeps the remaining count for the $FF55 readback.
+    hdma_left: u8,
+    /// Current source address and destination offset in VRAM ($0000-$1FF0) of the HBlank transfer (E15_15).
+    hdma_src: u16,
+    hdma_dst: u16,
+    /// True while the PPU was in HBlank at the previous check, for edge detection (E15_15).
+    hdma_in_hblank: bool,
 }
 
 impl Bus {
@@ -209,6 +220,11 @@ impl Bus {
             compat: false,
             hdma_regs: [0; 4], // power-up value UNKNOWN - to confirm (E15_14)
             hdma_stall: 0,
+            hdma_active: false,
+            hdma_left: 0,
+            hdma_src: 0,
+            hdma_dst: 0,
+            hdma_in_hblank: false,
             svbk: 0, // SVBK bits 0-2 (E15_06)
         }
     }
@@ -241,6 +257,11 @@ impl Bus {
         self.svbk = 0; // bank 1 selected, SVBK reads $F8 (E15_06, note 11a)
         self.hdma_regs = [0; 4]; // E15_14
         self.hdma_stall = 0; // E15_14
+        self.hdma_active = false; // E15_15
+        self.hdma_left = 0;
+        self.hdma_src = 0;
+        self.hdma_dst = 0;
+        self.hdma_in_hblank = false;
         self.vbk = 0; // VRAM bank 0 selected by the CPU (E15_07)
                       // Palette RAM (E15_08, note 11b): the boot ROM leaves every BG color white; $FF is used for
                       // each byte (bit 15 is ignored, so $FFFF is white). OBJ colors are uninitialized on hardware:
@@ -431,6 +452,61 @@ impl Bus {
         self.hdma_stall = self.hdma_stall.saturating_add(blocks * 8);
     }
 
+    /// $FF55 write (E15_14, E15_15, note 11c). Bit 7 = 1 arms an HBlank transfer of ((val & $7F) + 1)
+    /// blocks; bit 7 = 0 cancels an active HBlank transfer, otherwise it runs a general-purpose
+    /// transfer. Arming while already in HBlank copies nothing until the next HBlank starts:
+    /// UNKNOWN - to confirm (not documented).
+    fn hdma_write_control(&mut self, val: u8) {
+        if val & 0x80 != 0 {
+            self.hdma_src =
+                ((u16::from(self.hdma_regs[0]) << 8) | u16::from(self.hdma_regs[1])) & 0xFFF0;
+            self.hdma_dst =
+                ((u16::from(self.hdma_regs[2]) << 8) | u16::from(self.hdma_regs[3])) & 0x1FF0;
+            self.hdma_left = (val & 0x7F) + 1;
+            self.hdma_active = true;
+        } else if self.hdma_active {
+            self.hdma_active = false; // cancel: the remaining count stays readable
+        } else {
+            self.hdma_left = 0;
+            self.hdma_general(u16::from(val & 0x7F) + 1);
+        }
+    }
+
+    /// $FF55 read (E15_15, note 11c): $FF when no transfer is left; remaining blocks - 1 in bits 0-6
+    /// with bit 7 = 0 while active; the same with bit 7 = 1 after a cancel.
+    fn hdma_status(&self) -> u8 {
+        if self.hdma_left == 0 {
+            0xFF
+        } else if self.hdma_active {
+            self.hdma_left - 1
+        } else {
+            0x80 | (self.hdma_left - 1)
+        }
+    }
+
+    /// Called once per dot with "the LCD is on and the PPU is in mode 0" (E15_15): on the rising edge
+    /// of HBlank, one block of an armed HBlank transfer is copied and the CPU is suspended 8 M-cycles
+    /// (normal speed; double speed: E15_17). VBlank (mode 1) and an LCD that is off never copy.
+    /// A destination that runs past $9FFF wraps inside VRAM, UNKNOWN - to confirm (not documented).
+    pub(crate) fn hdma_hblank_tick(&mut self, in_hblank: bool) {
+        let edge = in_hblank && !self.hdma_in_hblank;
+        self.hdma_in_hblank = in_hblank;
+        if !edge || !self.hdma_active {
+            return;
+        }
+        for i in 0..16u16 {
+            let byte = self.peek(self.hdma_src.wrapping_add(i));
+            self.vram_cpu_write(0x8000 | ((self.hdma_dst + i) & 0x1FFF), byte);
+        }
+        self.hdma_src = self.hdma_src.wrapping_add(16);
+        self.hdma_dst = (self.hdma_dst + 16) & 0x1FF0;
+        self.hdma_stall = self.hdma_stall.saturating_add(8);
+        self.hdma_left -= 1;
+        if self.hdma_left == 0 {
+            self.hdma_active = false;
+        }
+    }
+
     /// True when a running HDMA transfer suspends the CPU for this M-cycle; consumes one cycle (E15_14).
     pub(crate) fn hdma_stalled(&mut self) -> bool {
         if self.hdma_stall > 0 {
@@ -569,6 +645,7 @@ impl Bus {
                 WaveAccess::Open(i) => self.io[0x30 + usize::from(i & 15)],
             },
             0xFF02 => self.io[0x02] | 0x7E, // SC ($FF02): bits 6-1 are unused and read 1 on DMG (mooneye unused_hwio-GS, FIX_05)
+            0xFF55 if self.cgb => self.hdma_status(), // HDMA5 (E15_15)
             0xFF70 if self.cgb => 0xF8 | self.svbk, // SVBK: bits 3-7 read 1, bits 0-2 as written (E15_06, note 11a); a written 0 reading back as 0 is UNKNOWN - to confirm
             0xFF4F if self.cgb => 0xFE | self.vbk, // VBK: bits 7-1 read 1, bit 0 is the bank (E15_07, note 11a)
             0xFF68 if self.cgb => 0x40 | self.bcps, // BCPS: unused bit 6 read value is UNKNOWN - to confirm, 1 is used (E15_08)
@@ -701,12 +778,7 @@ impl Bus {
                 WaveAccess::Open(i) => self.io[0x30 + usize::from(i & 15)] = val,
             },
             0xFF51..=0xFF54 if self.cgb => self.hdma_regs[usize::from(addr - 0xFF51)] = val, // HDMA1-4, write-only (E15_14)
-            0xFF55 if self.cgb => {
-                // Bit 7 = 0: general-purpose transfer of ((val & $7F) + 1) x 16 bytes (E15_14). Bit 7 = 1 (HBlank mode): E15_15.
-                if val & 0x80 == 0 {
-                    self.hdma_general(u16::from(val & 0x7F) + 1);
-                }
-            }
+            0xFF55 if self.cgb => self.hdma_write_control(val), // HDMA5 (E15_14, E15_15)
             0xFF70 if self.cgb => self.svbk = val & 0x07, // SVBK: only bits 0-2 are kept (E15_06, note 11a)
             0xFF4F if self.cgb => self.vbk = val & 0x01, // VBK: only bit 0 matters (E15_07, note 11a)
             0xFF68 if self.cgb => self.bcps = val & 0xBF, // BCPS: bit 7 auto-increment, bits 5-0 index (E15_08)
@@ -876,6 +948,7 @@ impl Bus {
             0xFF06 => self.timer.tma(), // TMA ($FF06, note 01b)
             0xFF07 => 0xF8 | self.timer.tac(),
             0xFF02 => self.io[0x02] | 0x7E, // same as read() (FIX_05)
+            0xFF55 if self.cgb => self.hdma_status(), // same as read() (E15_15)
             0xFF70 if self.cgb => 0xF8 | self.svbk, // same as read() (E15_06)
             0xFF4F if self.cgb => 0xFE | self.vbk, // same as read() (E15_07)
             0xFF68 if self.cgb => 0x40 | self.bcps, // same as read() (E15_08)
