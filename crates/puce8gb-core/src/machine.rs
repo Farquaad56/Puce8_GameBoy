@@ -186,6 +186,9 @@ pub struct Dmg {
     pub input: Input,
     /// Dot phase within the current M-cycle; 0..3, wraps to 0 every 4 dots (decision A_01).
     dot_phase: u8,
+    /// Number of CPU-clock M-cycles elapsed since power-up, counted in `tick`; 4 dots in normal
+    /// speed, 2 dots in double speed (E15_17). Not saved in the save state.
+    cpu_cycles: u64,
     /// Previous value of the STAT interrupt line for rising-edge detection (E03_08): IF bit 1
     /// is set only on a 0 -> 1 transition; while the line stays high no new request is raised.
     stat_line_prev: bool,
@@ -264,6 +267,7 @@ impl Dmg {
             media: Media,
             input: Input::default(),
             dot_phase: 0,
+            cpu_cycles: 0,
             stat_line_prev: false, // no STAT request pending at power-up (E03_08)
             frame_count: 0,
             trace: Trace::default(),
@@ -328,6 +332,11 @@ impl Dmg {
             || (stat & 0x08 != 0 && self.ppu.stat_mode() == 0) // bits 3/4/5 irqs all follow the 4-dot lagged mode (mooneye intr_1_2 / intr_2_0, FIX_09)
     }
 
+    /// CPU-clock M-cycles elapsed since power-up (E15_17).
+    pub fn cpu_cycles(&self) -> u64 {
+        self.cpu_cycles
+    }
+
     /// True when this is a Cgb machine in DMG compatibility mode (E15_13): the cartridge has
     /// $0143 bit 7 clear, so the DMG rendering path and the user's DMG palette are used. This is a
     /// deliberate simplification: the real boot ROM picks colors from a title hash table (decision A_13).
@@ -382,7 +391,16 @@ impl Machine for Dmg {
         // The CPU advances one M-cycle every 4 dots (note 01_timing.md); the other chips
         // are filled in by later tasks.
         self.dot_phase = (self.dot_phase + 1) % 4;
-        if self.dot_phase == 0 {
+        // CPU clock (E15_17, decision A_13): one M-cycle every 4 dots in normal speed, every 2 dots
+        // in double speed. The CPU, the timer and the OAM DMA follow it; the PPU, the APU and the
+        // cartridge clock keep their dot-based rate.
+        let cpu_clock = if self.bus.double_speed() {
+            self.dot_phase.is_multiple_of(2)
+        } else {
+            self.dot_phase == 0
+        };
+        if cpu_clock {
+            self.cpu_cycles = self.cpu_cycles.wrapping_add(1);
             // A running HDMA transfer suspends the CPU (E15_14, note 11c); the other chips keep running.
             if !self.bus.hdma_stalled() {
                 self.trace_instruction_start();
@@ -398,6 +416,9 @@ impl Machine for Dmg {
             }
             // OAM DMA advances one byte per M-cycle, after the CPU and the timer (decision A_01 order, E03_06 spec).
             self.bus.dma_step();
+        }
+        // Dot-based M-cycle block (APU, mixer, cartridge clock): 4 dots in both speeds (E15_17).
+        if self.dot_phase == 0 {
             // APU frame sequencer: one step per falling edge of DIV bit 4, read after the timer ticked (E04_01 spec, note 05b); no dependency on the PPU, so it lives in the M-cycle block. The returned EV_* events are consumed by later tasks.
             if let Some((addr, v)) = self.bus.apu_write.take() {
                 self.audio.apu.write_reg(addr, v);
@@ -406,7 +427,13 @@ impl Machine for Dmg {
                 self.bus.corrupt_wave_ram(i); // DMG retrigger corruption (E04_07)
             }
             self.audio.apu.wave.ram = self.bus.wave_ram();
-            self.audio.apu.tick(self.bus.timer.div());
+            // In double speed DIV counts twice as fast while the sound timings stay normal (note 11c), so the frame sequencer follows DIV bit 5 instead of bit 4. The exact bit is UNKNOWN - to confirm (not in the note).
+            let div = self.bus.timer.div();
+            self.audio.apu.tick(if self.bus.double_speed() {
+                div >> 1
+            } else {
+                div
+            });
             self.bus.set_apu_status(self.audio.apu.status());
             self.bus.wave_access = self.audio.apu.wave.access(); // wave RAM access rule (E04_07)
             let (nr50, nr51) = self.bus.audio_pan();
@@ -621,6 +648,51 @@ mod tests {
         }
         assert_eq!(cgb.bus.vram_bank(0, 0x8120), 0x00);
         assert_eq!(cgb.bus.read(0xFF55), 0xFF);
+    }
+
+    #[test]
+    fn e15_17_cpu_cycles_per_frame_are_17556_normal_and_35112_double() {
+        let rom = e15_13_rom(0x80, &[0x18, 0xFE]); // JR -2 loop
+        let mut normal = e15_13_machine(Model::Cgb, &rom);
+        let start = normal.cpu_cycles();
+        normal.run_frame();
+        assert_eq!(normal.cpu_cycles() - start, 17556);
+        let mut double = e15_13_machine(Model::Cgb, &rom);
+        double.bus.double_speed = true;
+        let start = double.cpu_cycles();
+        double.run_frame();
+        assert_eq!(double.cpu_cycles() - start, 35112);
+    }
+
+    #[test]
+    fn e15_17_ppu_frame_length_is_the_same_in_both_speeds() {
+        let rom = e15_13_rom(0x80, &[0x18, 0xFE]);
+        let mut normal = e15_13_machine(Model::Cgb, &rom);
+        let mut double = e15_13_machine(Model::Cgb, &rom);
+        double.bus.double_speed = true;
+        for _ in 0..3 {
+            normal.run_frame();
+            double.run_frame();
+            assert_eq!(normal.ppu.ly(), double.ppu.ly());
+            assert_eq!(normal.ppu.line_dot(), double.ppu.line_dot());
+            assert_eq!(normal.frame_count(), double.frame_count());
+        }
+    }
+
+    #[test]
+    fn e15_17_div_advances_twice_as_fast_in_double_speed() {
+        let rom = e15_13_rom(0x80, &[0x18, 0xFE]);
+        let mut normal = e15_13_machine(Model::Cgb, &rom);
+        let mut double = e15_13_machine(Model::Cgb, &rom);
+        double.bus.double_speed = true;
+        normal.bus.write(0xFF04, 0);
+        double.bus.write(0xFF04, 0);
+        normal.run_frame();
+        double.run_frame();
+        let n = normal.bus.read(0xFF04); // 17556 M-cycles / 64 = 274 -> 18 (8-bit)
+        let d = double.bus.read(0xFF04); // 35112 M-cycles / 64 = 548 -> 36 (8-bit)
+        let diff = d.wrapping_sub(n.wrapping_mul(2));
+        assert!(diff <= 1 || diff == 255, "normal {n} double {d}");
     }
 
     fn e15_13_machine(model: Model, rom: &[u8]) -> Dmg {

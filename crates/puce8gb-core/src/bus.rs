@@ -13,6 +13,8 @@ pub const IO_SIZE: usize = 0x100;
 #[cfg(test)]
 mod boot_tests;
 #[cfg(test)]
+mod cgb_double_speed_tests;
+#[cfg(test)]
 mod cgb_hdma_hblank_tests;
 #[cfg(test)]
 mod cgb_hdma_tests;
@@ -459,7 +461,9 @@ impl Bus {
             let byte = self.peek(src.wrapping_add(i));
             self.vram_cpu_write(0x8000 | ((dst + i) & 0x1FFF), byte);
         }
-        self.hdma_stall = self.hdma_stall.saturating_add(blocks * 8);
+        self.hdma_stall = self
+            .hdma_stall
+            .saturating_add(blocks * if self.double_speed { 16 } else { 8 }); // 16 M-cycles per block in double speed (E15_17, note 11c)
     }
 
     /// True when the Cgb model runs in double speed (E15_16).
@@ -530,7 +534,9 @@ impl Bus {
         }
         self.hdma_src = self.hdma_src.wrapping_add(16);
         self.hdma_dst = (self.hdma_dst + 16) & 0x1FF0;
-        self.hdma_stall = self.hdma_stall.saturating_add(8);
+        self.hdma_stall = self
+            .hdma_stall
+            .saturating_add(if self.double_speed { 16 } else { 8 }); // E15_17
         self.hdma_left -= 1;
         if self.hdma_left == 0 {
             self.hdma_active = false;
