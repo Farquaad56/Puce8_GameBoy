@@ -153,6 +153,8 @@ pub struct Ppu {
     fine_scroll: u8,
     /// Pixel FIFO of color indices for the current line, up to 16 entries (note 04b "FIFO de pixels").
     fifo: [u8; FIFO_CAP],
+    /// Cgb attribute byte of each FIFO entry, same indexes as `fifo` (E15_10); 0 on the DMG path.
+    fifo_attr: [u8; FIFO_CAP],
     fifo_head: usize,
     fifo_count: usize,
     /// Tile column (0..31) whose row is cached in `tile_low`/`tile_high`; 0xFF forces a load.
@@ -160,6 +162,8 @@ pub struct Ppu {
     /// Cached low and high bit-plane bytes of the current tile row (note 04a "Tile data format").
     tile_low: u8,
     tile_high: u8,
+    /// Cgb attribute byte of the tile cached in `tile_low`/`tile_high` (E15_10); 0 on the DMG path.
+    tile_attr: u8,
     /// Window internal line counter (E03_12 spec): advances only on lines where a window pixel is
     /// produced; reset to 0 at the start of each frame and on an LCD off -> on restart.
     win_line: u8,
@@ -172,6 +176,9 @@ pub struct Ppu {
     /// Per-pixel marker for the sprite merge (E03_04 spec): set once a pixel has been resolved by
     /// the best winner among the selected sprites; cleared at the start of each visible line.
     line_resolved: [bool; LINE_PIXELS as usize],
+    /// Cgb BG/window attribute byte of each output pixel of the line (E15_10): bits 0-2 palette,
+    /// bit 7 BG priority (used by E15_12). 0 on the DMG path. Not part of the save state yet (E15_19).
+    line_attr: [u8; LINE_PIXELS as usize],
     /// Dots of mode 3 penalty incurred this line by sprite fetches (E03_13 spec): the fetcher is
     /// paused for that many dots, so mode 3 lasts longer and mode 0 shorter. Computed once per
     /// visible line from the selected sprites; cleared at the start of each visible line.
@@ -202,14 +209,17 @@ impl Default for Ppu {
             produce_count: 0,
             fine_scroll: 0, // SCX is $00 at power-up (note 08): no fine scroll
             fifo: [0x00; FIFO_CAP],
+            fifo_attr: [0x00; FIFO_CAP],
             fifo_head: 0,
             fifo_count: 0,
             fetcher_col: 0xFF, // sentinel: force a tile load on the first production (E03_03)
             tile_low: 0,
             tile_high: 0,
+            tile_attr: 0,
             win_line: 0,      // window internal line counter starts at 0 (E03_12 spec)
             win_drawn: false, // no window pixel produced on the current line yet (E03_12 spec)
             sprites_rendered: false, // the sprite merge is due on line 0 (E03_04 spec)
+            line_attr: [0x00; LINE_PIXELS as usize],
             line_resolved: [false; LINE_PIXELS as usize], // no pixel resolved by a sprite yet (E03_04 spec)
             obj_penalty: 0, // no sprite penalty incurred before the first OAM scan (E03_13 spec)
             line_committed: false, // no finished line written into the framebuffer yet (E03_05 spec)
@@ -282,6 +292,7 @@ impl Ppu {
         self.fine_scroll = 0; // re-latched from SCX at the first dot of mode 3 (E03_11 spec)
         self.fifo_head = 0;
         self.fifo_count = 0;
+        self.tile_attr = 0; // no tile attribute cached (E15_10)
         self.fetcher_col = 0xFF; // sentinel: force a tile load on the first production (E03_03)
         self.win_drawn = false; // no window pixel produced on this line yet (E03_12 spec)
         self.sprites_rendered = false; // the sprite merge is due again on this line (E03_04 spec)
@@ -468,7 +479,33 @@ impl Ppu {
         self.line_committed = true;
     }
 
-    /// One dot of pixel fetching (E03_03): during mode 3 the fetcher produces one color index
+    /// Cgb color mode counterpart of `commit_line` (E15_10): writes the finished line into
+    /// framebuffer row LY through the palette RAM. A BG or window pixel uses BG palette number
+    /// `line_attr & 7`; a sprite pixel uses OBJ palette 0 for now (E15_11 selects the real OBJ
+    /// palette). Color = palette * 8 + color index * 2 in the palette RAM, through `rgb555_to_pixel`.
+    /// Acts once per visible line, like `commit_line`. The machine calls it from E15_13 on.
+    #[allow(dead_code)] // wired into Machine::tick by E15_13
+    pub(crate) fn commit_line_cgb(&mut self, bg_pal: &[u8; 64], obj_pal: &[u8; 64]) {
+        if !self.lcd_on
+            || u32::from(self.ly) >= u32::from(VBLANK_FIRST_LINE)
+            || self.line_committed
+            || u32::from(self.pixels_output) < u32::from(LINE_PIXELS)
+        {
+            return;
+        }
+        let row = usize::from(self.ly) * usize::from(LINE_PIXELS);
+        for (x, px) in self.line_buf.iter().enumerate() {
+            let (ram, palette) = if px.obj {
+                (obj_pal, 0usize)
+            } else {
+                (bg_pal, usize::from(self.line_attr[x] & 7))
+            };
+            let offset = palette * 8 + usize::from(px.color) * 2;
+            self.frame[row + x] = rgb555_to_pixel(ram[offset], ram[offset + 1]);
+        }
+        self.line_committed = true;
+    }
+
     /// per dot into its FIFO and, once the initial FETCH_INITIAL_DOTS dots are done, one pixel
     /// leaves the FIFO per dot into `line_buf`. The low 3 bits of SCX are latched at the first
     /// dot of mode 3; the first SCX mod 8 produced pixels are discarded from the leftmost tile
@@ -479,6 +516,15 @@ impl Ppu {
     /// mode 3"). The tile map and tile data are read directly from VRAM, bypassing CPU access
     /// blocking (E03_10 spec). Windows arrive with E03_12.
     pub(crate) fn fetch_pixels(&mut self, vram: &[u8], scx: u8, scy: u8) {
+        self.fetch_pixels_cgb(vram, None, scx, scy);
+    }
+
+    /// Same as `fetch_pixels`; with `vram1` = Some(VRAM bank 1) the fetcher runs in Cgb color mode
+    /// (E15_10, note 11b): the attribute byte of each tile is read from bank 1 at the same address
+    /// as the tile number (bit 3 tile data bank, bit 5 X flip, bit 6 Y flip, bits 0-2 palette,
+    /// bit 7 BG priority), and LCDC bit 0 no longer blanks the background. With None this is
+    /// exactly the DMG path. The timing of mode 3 is identical in both modes.
+    pub(crate) fn fetch_pixels_cgb(&mut self, vram: &[u8], vram1: Option<&[u8]>, scx: u8, scy: u8) {
         if !self.lcd_on || self.mode != 3 {
             return; // only the pixel phase of a visible line (E03_03 spec); LCD off forces mode 0
         }
@@ -493,10 +539,10 @@ impl Ppu {
         {
             // The fetcher produces one pixel per dot until the line is done (note 04b); the first
             // SCX mod 8 pixels are discarded from the leftmost tile (E03_11 spec).
-            let color = self.next_color(vram, scx, scy);
+            let color = self.next_color(vram, vram1, scx, scy);
             if u32::from(self.produce_count) >= u32::from(self.fine_scroll) {
                 // Discarded pixels are not pushed into the FIFO (E03_11 spec).
-                self.fifo_push(color);
+                self.fifo_push(color, self.tile_attr);
             }
             self.produce_count += 1;
         }
@@ -506,8 +552,9 @@ impl Ppu {
             // One pixel leaves the FIFO per dot (E03_03 spec); the fine scroll pause delays the first
             // output by SCX mod 8 dots, so mode 3 lasts 172 + SCX mod 8 (E03_11 spec), and the sprite
             // fetch penalty of this line delays it further by `obj_penalty` dots (E03_13 spec).
-            let color = self.fifo_pop();
-            // Background pixel: no sprite on top yet (E03_04 spec); the sprite merge may replace it.
+            let (color, attr) = self.fifo_pop();
+            self.line_attr[self.pixels_output as usize] = attr; // attribute byte of this pixel (E15_10)
+                                                                // Background pixel: no sprite on top yet (E03_04 spec); the sprite merge may replace it.
             self.line_buf[self.pixels_output as usize] = PixelOut {
                 color,
                 obj: false,
@@ -519,27 +566,32 @@ impl Ppu {
 
     /// Color index of the next background pixel produced by the fetcher (E03_03 spec):
     /// 0 when the BG is disabled, otherwise from the tile data read directly from VRAM.
-    fn next_color(&mut self, vram: &[u8], scx: u8, scy: u8) -> u8 {
-        if self.lcdc & LCDC_BG_ENABLE == 0 {
-            return 0; // BG disabled: color index 0 (E03_03 spec)
+    fn next_color(&mut self, vram: &[u8], vram1: Option<&[u8]>, scx: u8, scy: u8) -> u8 {
+        if vram1.is_none() && self.lcdc & LCDC_BG_ENABLE == 0 {
+            return 0; // BG disabled (DMG path only: in Cgb color mode bit 0 is the priority flag, E15_10): color index 0 (E03_03 spec)
         }
         let x = u32::from(self.produce_count);
         let col = ((u32::from(scx) >> 3) + (x >> 3)) & 31; // background pixel X, in tiles (E03_03 spec)
         if col != u32::from(self.fetcher_col) {
             // New tile column: read its row from VRAM directly (E03_03 spec).
-            self.load_tile_row(vram, scy, col as u8);
+            self.load_tile_row(vram, vram1, scy, col as u8);
             self.fetcher_col = col as u8;
         }
         let pixel_in_tile = x & 7; // position within the tile: the fine scroll is handled by discarding produced pixels (E03_11 spec)
-        let low_bit = (self.tile_low >> (7 - pixel_in_tile)) & 1;
-        let high_bit = (self.tile_high >> (7 - pixel_in_tile)) & 1;
+        let bit = if self.tile_attr & 0x20 != 0 {
+            pixel_in_tile // X flip: attribute bit 5 (E15_10)
+        } else {
+            7 - pixel_in_tile
+        };
+        let low_bit = (self.tile_low >> bit) & 1;
+        let high_bit = (self.tile_high >> bit) & 1;
         (high_bit << 1) | low_bit // bit plane 0 = low, bit plane 1 = high (note 04a "Tile data format")
     }
 
     /// Read the tile row covering background line LY + SCY and tile column `col` from VRAM
     /// directly (E03_03 spec): one byte for the tile index in the map, then two bytes of tile
     /// data. The CPU access blocking does not apply to these reads (E03_10 spec).
-    fn load_tile_row(&mut self, vram: &[u8], scy: u8, col: u8) {
+    fn load_tile_row(&mut self, vram: &[u8], vram1: Option<&[u8]>, scy: u8, col: u8) {
         let y = (u32::from(self.ly) + u32::from(scy)) & 0xFF; // background pixel Y (E03_03 spec)
         let tile_row = y >> 3;
         let line_in_tile = y & 7;
@@ -548,7 +600,21 @@ impl Ppu {
         } else {
             0x9800 - 0x8000 // default map area $9800 (E03_03 spec)
         };
-        let tile_index = vram[(map_base + tile_row * 32 + u32::from(col)) as usize];
+        let map_addr = (map_base + tile_row * 32 + u32::from(col)) as usize;
+        let tile_index = vram[map_addr];
+        // Cgb color mode: the attribute byte is at the same address in VRAM bank 1 (E15_10, note 11b).
+        let attr = vram1.map_or(0, |bank1| bank1[map_addr]);
+        self.tile_attr = attr;
+        let data = if attr & 0x08 != 0 {
+            vram1.unwrap_or(vram) // bit 3: tile data from bank 1
+        } else {
+            vram
+        };
+        let line_in_tile = if attr & 0x40 != 0 {
+            7 - line_in_tile // Y flip: bit 6
+        } else {
+            line_in_tile
+        };
         let data_base = if self.lcdc & LCDC_TILE_DATA != 0 {
             // unsigned index from $8000, one tile is 16 bytes (E03_04 spec)
             u32::from(tile_index) * 16
@@ -557,26 +623,28 @@ impl Ppu {
             (0x1000i32 + i32::from(tile_index as i8) * 16) as u32
         };
         let row = data_base + line_in_tile * 2;
-        self.tile_low = vram[row as usize]; // first byte: low bit plane (note 04a "Tile data format")
-        self.tile_high = vram[row as usize + 1]; // second byte: high bit plane (note 04a)
+        self.tile_low = data[row as usize]; // first byte: low bit plane (note 04a "Tile data format")
+        self.tile_high = data[row as usize + 1]; // second byte: high bit plane (note 04a)
     }
 
     /// Push a color index into the pixel FIFO; a full FIFO drops the pixel (note 04b).
-    fn fifo_push(&mut self, color: u8) {
+    fn fifo_push(&mut self, color: u8, attr: u8) {
         if self.fifo_count == FIFO_CAP {
             return; // FIFO full (note 04b); cannot happen with one pixel per dot in this task
         }
         let tail = (self.fifo_head + self.fifo_count) % FIFO_CAP;
         self.fifo[tail] = color;
+        self.fifo_attr[tail] = attr;
         self.fifo_count += 1;
     }
 
     /// Pop the oldest color index from the pixel FIFO.
-    fn fifo_pop(&mut self) -> u8 {
+    fn fifo_pop(&mut self) -> (u8, u8) {
         let color = self.fifo[self.fifo_head];
+        let attr = self.fifo_attr[self.fifo_head];
         self.fifo_head = (self.fifo_head + 1) % FIFO_CAP;
         self.fifo_count -= 1;
-        color
+        (color, attr)
     }
 
     /// PPU mode for a given scanline and dot position (E03_01): lines 144..=153 are VBlank
@@ -630,28 +698,48 @@ impl Ppu {
     }
 
     /// Window line condition (E03_12 spec): window enabled in LCDC bits 5 and 0 (DMG), and LY >= WY.
-    fn window_line_ok(&self, wy: u8) -> bool {
-        self.lcdc & LCDC_WIN_ENABLE != 0 && self.lcdc & LCDC_BG_ENABLE != 0 && self.ly >= wy
+    fn window_line_ok(&self, wy: u8, cgb: bool) -> bool {
+        self.lcdc & LCDC_WIN_ENABLE != 0
+            && (cgb || self.lcdc & LCDC_BG_ENABLE != 0) // in Cgb color mode bit 0 is only the priority flag (E15_10, note 11b)
+            && self.ly >= wy
     }
 
     /// Color index of window pixel x_w (E03_12 spec): from the window tile map row `win_line`
     /// with no SCX/SCY offset; tile data addressing and 2bpp decoding as for the background.
-    fn window_color(&self, vram: &[u8], lcdc: u8, x_w: u32) -> u8 {
+    fn window_color(&self, vram: &[u8], vram1: Option<&[u8]>, lcdc: u8, x_w: u32) -> (u8, u8) {
         let map_base = if lcdc & LCDC_WIN_MAP != 0 {
             0x9C00 - 0x8000 // window tile map area $9C00 (E03_12 spec, note 04a "Selection des tile maps")
         } else {
             0x9800 - 0x8000 // default window tile map area $9800 (E03_12 spec)
         };
         let row = u32::from(self.win_line);
-        let tile_index = vram[(map_base + ((row >> 3) * 32 + ((x_w / 8) & 31))) as usize];
+        let map_addr = (map_base + ((row >> 3) * 32 + ((x_w / 8) & 31))) as usize;
+        let tile_index = vram[map_addr];
+        // Cgb color mode: attribute byte at the same address in VRAM bank 1 (E15_10, note 11b).
+        let attr = vram1.map_or(0, |bank1| bank1[map_addr]);
+        let data = if attr & 0x08 != 0 {
+            vram1.unwrap_or(vram) // bit 3: tile data from bank 1
+        } else {
+            vram
+        };
         let data_base = if lcdc & LCDC_TILE_DATA != 0 {
             u32::from(tile_index) * 16 // unsigned index from $8000, one tile is 16 bytes (E03_12 spec)
         } else {
             (0x1000i32 + i32::from(tile_index as i8) * 16) as u32 // signed index from $9000 (E03_12 spec)
         };
-        let bit = (7 - (x_w % 8)) as usize; // pixel position within the tile, MSB first (note 04a "Tile data format")
-        let row_off = (data_base + (row % 8) * 2) as usize;
-        ((vram[row_off + 1] >> bit) & 1) << 1 | (vram[row_off] >> bit) & 1
+        let bit = if attr & 0x20 != 0 {
+            (x_w % 8) as usize // X flip: attribute bit 5 (E15_10)
+        } else {
+            (7 - (x_w % 8)) as usize
+        }; // pixel position within the tile, MSB first (note 04a "Tile data format")
+        let line = if attr & 0x40 != 0 {
+            7 - (row % 8) // Y flip: attribute bit 6 (E15_10)
+        } else {
+            row % 8
+        };
+        let row_off = (data_base + line * 2) as usize;
+        let color = ((data[row_off + 1] >> bit) & 1) << 1 | (data[row_off] >> bit) & 1;
+        (color, attr)
     }
 
     /// One dot of window fetching (E03_12 spec): when the window is displayed on this line
@@ -659,10 +747,16 @@ impl Ppu {
     /// that position on comes from the window tile data at row `win_line`. A visible window
     /// pixel sets `win_drawn` so the internal line counter advances at the end of the line.
     pub(crate) fn fetch_window(&mut self, vram: &[u8], wx: u8, wy: u8) {
+        self.fetch_window_cgb(vram, None, wx, wy);
+    }
+
+    /// Same as `fetch_window`; with `vram1` = Some(VRAM bank 1) the window tiles use the Cgb
+    /// attributes like the background (E15_10). With None this is exactly the DMG path.
+    pub(crate) fn fetch_window_cgb(&mut self, vram: &[u8], vram1: Option<&[u8]>, wx: u8, wy: u8) {
         if !self.lcd_on || self.mode != 3 {
             return; // only the pixel phase of a visible line (E03_12 spec); LCD off forces mode 0
         }
-        if !self.window_line_ok(wy) {
+        if !self.window_line_ok(wy, vram1.is_some()) {
             return; // window not displayed on this line: disabled in LCDC or LY < WY (E03_12 spec)
         }
         let pos = u32::from(self.pixels_output); // pixels output so far on this line
@@ -670,8 +764,10 @@ impl Ppu {
         if pos > start {
             let x_w = pos - 1 - start; // window pixel X, from the left edge of the window (E03_12 spec)
                                        // Window pixel: no sprite on top yet (E03_04 spec); the sprite merge may replace it.
+            let (win_color, win_attr) = self.window_color(vram, vram1, self.lcdc, x_w);
+            self.line_attr[(pos - 1) as usize] = win_attr; // window tile attributes (E15_10)
             self.line_buf[(pos - 1) as usize] = PixelOut {
-                color: self.window_color(vram, self.lcdc, x_w),
+                color: win_color,
                 obj: false,
                 pal1: false,
             };
@@ -834,6 +930,146 @@ impl Ppu {
 mod tests {
     use super::*;
     use crate::machine::FRAME_DOTS;
+
+    /// VRAM bank pair for the Cgb attribute tests (E15_10): the map entry (0,0) at $9800 is tile 1,
+    /// its attribute byte in bank 1 is `attr`, and row `data_row` of tile 1 (unsigned base $8000)
+    /// holds lo=$80 hi=$00 in bank `data_bank` only: color id 1 at the leftmost pixel.
+    fn e15_10_vram(attr: u8, data_bank: usize, data_row: usize) -> ([u8; 0x2000], [u8; 0x2000]) {
+        let mut vram0 = [0x00u8; 0x2000];
+        let mut vram1 = [0x00u8; 0x2000];
+        vram0[0x1800] = 1; // tile number of map entry (0,0)
+        vram1[0x1800] = attr; // attribute of map entry (0,0)
+        let bank = if data_bank == 0 {
+            &mut vram0
+        } else {
+            &mut vram1
+        };
+        bank[0x10 + data_row * 2] = 0x80; // tile 1, low bit plane
+        (vram0, vram1)
+    }
+
+    /// Runs line 0 like Machine::tick will in Cgb color mode: one tick, then one dot of pixel
+    /// fetching and window fetching per dot (E15_10). SCX = SCY = WY = 0.
+    fn e15_10_line(vram0: &[u8; 0x2000], vram1: &[u8; 0x2000], lcdc: u8, wx: u8) -> Ppu {
+        let mut p = Ppu {
+            lcdc,
+            ..Default::default()
+        };
+        for dot in 0..LINE_DOTS {
+            if dot > 0 {
+                p.tick();
+            }
+            p.fetch_pixels_cgb(vram0, Some(vram1), 0, 0);
+            p.fetch_window_cgb(vram0, Some(vram1), wx, 0);
+        }
+        p
+    }
+
+    #[test]
+    fn e15_10_attribute_zero_keeps_the_tile_as_is() {
+        let (vram0, vram1) = e15_10_vram(0x00, 0, 0);
+        let p = e15_10_line(&vram0, &vram1, 0x91, 0);
+        assert_eq!(p.pixels_output, LINE_PIXELS);
+        assert_eq!(p.line_buf[0].color, 1);
+        assert_eq!(p.line_buf[7].color, 0);
+        assert_eq!(p.line_buf[8].color, 0); // map entry (1,0) is tile 0, empty
+    }
+
+    #[test]
+    fn e15_10_x_flip_mirrors_the_row() {
+        let (vram0, vram1) = e15_10_vram(0x20, 0, 0);
+        let p = e15_10_line(&vram0, &vram1, 0x91, 0);
+        assert_eq!(p.line_buf[0].color, 0);
+        assert_eq!(p.line_buf[7].color, 1);
+    }
+
+    #[test]
+    fn e15_10_y_flip_uses_row_7_of_the_tile() {
+        // Data only in row 7; line 0 of the screen shows row 7 when the Y flip bit is set.
+        let (vram0, vram1) = e15_10_vram(0x40, 0, 7);
+        let p = e15_10_line(&vram0, &vram1, 0x91, 0);
+        assert_eq!(p.line_buf[0].color, 1);
+        let (vram0, vram1) = e15_10_vram(0x00, 0, 7);
+        let p = e15_10_line(&vram0, &vram1, 0x91, 0);
+        assert_eq!(p.line_buf[0].color, 0);
+    }
+
+    #[test]
+    fn e15_10_attribute_bit_3_reads_the_tile_from_bank_1() {
+        let (vram0, vram1) = e15_10_vram(0x08, 1, 0);
+        let p = e15_10_line(&vram0, &vram1, 0x91, 0);
+        assert_eq!(p.line_buf[0].color, 1); // found in bank 1
+        let (vram0, vram1) = e15_10_vram(0x00, 1, 0);
+        let p = e15_10_line(&vram0, &vram1, 0x91, 0);
+        assert_eq!(p.line_buf[0].color, 0); // bank 0 is empty
+    }
+
+    #[test]
+    fn e15_10_palette_number_selects_the_bg_palette_entry() {
+        let (vram0, vram1) = e15_10_vram(0x03, 0, 0); // palette 3
+        let mut p = e15_10_line(&vram0, &vram1, 0x91, 0);
+        let mut bg_pal = [0x00u8; 64];
+        bg_pal[3 * 8 + 2] = 0x1F; // palette 3, color 1: $001F = pure red
+        bg_pal[3 * 8 + 3] = 0x00;
+        p.commit_line_cgb(&bg_pal, &[0x00; 64]);
+        assert_eq!(p.frame[0], 0xFFFF_0000); // [255, 0, 0]
+        assert_eq!(p.frame[1], 0xFF00_0000); // palette 3, color 0 is black here
+    }
+
+    #[test]
+    fn e15_10_priority_bit_is_kept_per_pixel() {
+        let (vram0, vram1) = e15_10_vram(0x80, 0, 0);
+        let p = e15_10_line(&vram0, &vram1, 0x91, 0);
+        assert_eq!(p.line_attr[0], 0x80);
+        assert_eq!(p.line_attr[7], 0x80);
+        assert_eq!(p.line_attr[8], 0x00); // next tile column has attribute 0
+    }
+
+    #[test]
+    fn e15_10_bg_is_drawn_when_lcdc_bit_0_is_clear_in_color_mode() {
+        let (vram0, vram1) = e15_10_vram(0x00, 0, 0);
+        let p = e15_10_line(&vram0, &vram1, 0x90, 0); // LCDC bit 0 clear
+        assert_eq!(p.line_buf[0].color, 1);
+        // The DMG path still blanks the background in that case.
+        let mut dmg = Ppu {
+            lcdc: 0x90,
+            ..Default::default()
+        };
+        for dot in 0..LINE_DOTS {
+            if dot > 0 {
+                dmg.tick();
+            }
+            dmg.fetch_pixels(&vram0, 0, 0);
+        }
+        assert_eq!(dmg.line_buf[0].color, 0);
+    }
+
+    #[test]
+    fn e15_10_dmg_path_ignores_attributes() {
+        let (vram0, _vram1) = e15_10_vram(0xFF, 0, 0);
+        let mut p = Ppu::default();
+        for dot in 0..LINE_DOTS {
+            if dot > 0 {
+                p.tick();
+            }
+            p.fetch_pixels(&vram0, 0, 0);
+            p.fetch_window(&vram0, 0, 0);
+        }
+        assert_eq!(p.line_buf[0].color, 1);
+        assert_eq!(p.line_buf[7].color, 0);
+        assert!(p.line_attr.iter().all(|&a| a == 0));
+    }
+
+    #[test]
+    fn e15_10_window_tiles_use_the_attributes_too() {
+        // LCDC $B9: LCD on, window on (bit 5), unsigned tile data, BG map $9C00 (bit 3, all tile 0),
+        // window map $9800 (bit 6 clear) where entry (0,0) is tile 1 with X flip.
+        let (vram0, vram1) = e15_10_vram(0x20, 0, 0);
+        let p = e15_10_line(&vram0, &vram1, 0xB9, 7);
+        assert_eq!(p.line_buf[0].color, 0);
+        assert_eq!(p.line_buf[7].color, 1);
+        assert_eq!(p.line_attr[0], 0x20);
+    }
 
     #[test]
     fn e15_09_white_and_black() {
