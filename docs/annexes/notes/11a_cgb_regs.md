@@ -34,7 +34,7 @@ Fait : la CGB demarre en vitesse normale ; en double vitesse CPU, timer, serie e
 Source : CGBR L172-L196
 Statut : CONFIRME
 
-Fait : en cas de STOP de bascule, la possibilite d'interruptions pendant la pause n'est pas documentee (TODO dans pandocs).
+Fait : en cas de STOP de bascule, la possibilite d'interruptions pendant la pause n'est pas documentee dans pandocs.
 Source : CGBR L197
 Statut : UNKNOWN - to confirm
 
