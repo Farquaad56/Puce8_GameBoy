@@ -13,6 +13,8 @@ pub const IO_SIZE: usize = 0x100;
 #[cfg(test)]
 mod boot_tests;
 #[cfg(test)]
+mod cgb_opri_tests;
+#[cfg(test)]
 mod cgb_palette_tests;
 #[cfg(test)]
 mod cgb_vram_tests;
@@ -146,6 +148,8 @@ pub struct Bus {
     bcps: u8,
     /// OCPS ($FF6A): same layout as BCPS (E15_08).
     ocps: u8,
+    /// OPRI ($FF6C) bit 0: 0 = OBJ priority by OAM index (CGB style), 1 = by X coordinate (DMG style) (E15_11).
+    opri: u8,
 }
 
 impl Bus {
@@ -191,6 +195,7 @@ impl Bus {
             obj_pal: [0xFF; 64],     // UNKNOWN - to confirm (E15_08)
             bcps: 0,
             ocps: 0,
+            opri: 0,
             svbk: 0, // SVBK bits 0-2 (E15_06)
         }
     }
@@ -230,6 +235,13 @@ impl Bus {
         self.obj_pal[0] = 0x00;
         self.bcps = 0;
         self.ocps = 0;
+        // OPRI after the boot ROM (E15_11, note 11b): 0 (CGB style) for a Cgb cartridge, 1 (DMG
+        // style) when $0143 has bit 7 clear (the boot ROM writes $01 for DMG-only games).
+        self.opri = if self.rom.get(0x0143).is_some_and(|flag| flag & 0x80 != 0) {
+            0
+        } else {
+            1
+        };
         self.hram.fill(0x00);
         // Cartridge RAM is NOT kept across reset (E05_07): rebuild the mapper from the ROM;
         // the frontend reloads battery RAM with load_battery_ram.
@@ -349,6 +361,12 @@ impl Bus {
         self.timer = Timer::default();
         self.p1_prev = p1_read(self.io[0x00], &self.input) & 0x0F;
         self.remap_boot();
+    }
+
+    /// True when sprite priority follows the X coordinate (OPRI bit 0 set on the Cgb model) (E15_11).
+    /// The Dmg model has no OPRI: the machine passes true itself.
+    pub fn opri_dmg_style(&self) -> bool {
+        self.cgb && self.opri & 1 == 1
     }
 
     /// Byte of the palette RAM selected by BCPS (`obj` false) or OCPS (`obj` true) (E15_08).
@@ -526,6 +544,7 @@ impl Bus {
                     0xFF
                 }
             }
+            0xFF6C if self.cgb => 0xFE | self.opri, // OPRI: bit 0 only; the unused bits reading 1 is UNKNOWN - to confirm (E15_11)
             0xFF03 | 0xFF08..=0xFF0E | 0xFF4C..=0xFF7F => 0xFF, // unmapped I/O reads $FF (mooneye unused_hwio-GS, FIX_05)
             0xFF01..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
@@ -642,6 +661,7 @@ impl Bus {
             0xFF6A if self.cgb => self.ocps = val & 0xBF, // OCPS (E15_08)
             0xFF69 if self.cgb => self.cram_write(false, val), // BCPD (E15_08)
             0xFF6B if self.cgb => self.cram_write(true, val), // OCPD (E15_08)
+            0xFF6C if self.cgb => self.opri = val & 0x01, // OPRI: only bit 0 is kept (E15_11)
             0xFF03 | 0xFF08..=0xFF0E | 0xFF4C..=0xFF7F => {} // unmapped I/O: writes are ignored (mooneye unused_hwio-GS, FIX_05)
             0xFF01..=0xFF7F => {
                 self.io[(addr - 0xFF00) as usize] = val;
@@ -810,6 +830,7 @@ impl Bus {
             0xFF6A if self.cgb => 0x40 | self.ocps, // same as read() (E15_08)
             0xFF69 if self.cgb => self.cram_data(false), // peek ignores the PPU blocking (E15_08)
             0xFF6B if self.cgb => self.cram_data(true), // same as BCPD (E15_08)
+            0xFF6C if self.cgb => 0xFE | self.opri, // same as read() (E15_11)
             0xFF03 | 0xFF08..=0xFF0E | 0xFF4C..=0xFF7F => 0xFF, // same as read() (FIX_05)
             0xFF01..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],

@@ -179,6 +179,10 @@ pub struct Ppu {
     /// Cgb BG/window attribute byte of each output pixel of the line (E15_10): bits 0-2 palette,
     /// bit 7 BG priority (used by E15_12). 0 on the DMG path. Not part of the save state yet (E15_19).
     line_attr: [u8; LINE_PIXELS as usize],
+    /// OAM attribute byte of the sprite that won each output pixel of the line (E15_11): bits 0-2
+    /// are the Cgb OBJ palette number. Only meaningful where `line_buf[x].obj` is set. Not part of
+    /// the save state yet (E15_19).
+    line_obj_attr: [u8; LINE_PIXELS as usize],
     /// Dots of mode 3 penalty incurred this line by sprite fetches (E03_13 spec): the fetcher is
     /// paused for that many dots, so mode 3 lasts longer and mode 0 shorter. Computed once per
     /// visible line from the selected sprites; cleared at the start of each visible line.
@@ -220,6 +224,7 @@ impl Default for Ppu {
             win_drawn: false, // no window pixel produced on the current line yet (E03_12 spec)
             sprites_rendered: false, // the sprite merge is due on line 0 (E03_04 spec)
             line_attr: [0x00; LINE_PIXELS as usize],
+            line_obj_attr: [0x00; LINE_PIXELS as usize],
             line_resolved: [false; LINE_PIXELS as usize], // no pixel resolved by a sprite yet (E03_04 spec)
             obj_penalty: 0, // no sprite penalty incurred before the first OAM scan (E03_13 spec)
             line_committed: false, // no finished line written into the framebuffer yet (E03_05 spec)
@@ -481,8 +486,8 @@ impl Ppu {
 
     /// Cgb color mode counterpart of `commit_line` (E15_10): writes the finished line into
     /// framebuffer row LY through the palette RAM. A BG or window pixel uses BG palette number
-    /// `line_attr & 7`; a sprite pixel uses OBJ palette 0 for now (E15_11 selects the real OBJ
-    /// palette). Color = palette * 8 + color index * 2 in the palette RAM, through `rgb555_to_pixel`.
+    /// `line_attr & 7`; a sprite pixel uses OBJ palette number `line_obj_attr & 7` (E15_11).
+    /// Color = palette * 8 + color index * 2 in the palette RAM, through `rgb555_to_pixel`.
     /// Acts once per visible line, like `commit_line`. The machine calls it from E15_13 on.
     #[allow(dead_code)] // wired into Machine::tick by E15_13
     pub(crate) fn commit_line_cgb(&mut self, bg_pal: &[u8; 64], obj_pal: &[u8; 64]) {
@@ -496,7 +501,7 @@ impl Ppu {
         let row = usize::from(self.ly) * usize::from(LINE_PIXELS);
         for (x, px) in self.line_buf.iter().enumerate() {
             let (ram, palette) = if px.obj {
-                (obj_pal, 0usize)
+                (obj_pal, usize::from(self.line_obj_attr[x] & 7))
             } else {
                 (bg_pal, usize::from(self.line_attr[x] & 7))
             };
@@ -784,6 +789,21 @@ impl Ppu {
     /// l'adressage $8000"); CPU access blocking does not apply (E03_10 spec). Mode 3 penalties arrive
     /// with E03_13.
     pub(crate) fn render_sprites(&mut self, oam: &[u8], vram: &[u8]) {
+        self.render_sprites_cgb(oam, vram, None, true);
+    }
+
+    /// Same as `render_sprites`; with `vram1` = Some(VRAM bank 1) the sprites run in Cgb color mode
+    /// (E15_11, note 11b): OAM attribute bit 3 selects the tile data bank, bits 0-2 the OBJ palette
+    /// number (kept in `line_obj_attr`), and the DMG palette bit 4 is ignored. `dmg_priority` is the
+    /// OPRI bit: true = the lowest X wins an overlap, false = the lowest OAM index wins. With
+    /// `vram1` None and `dmg_priority` true this is exactly the DMG path.
+    pub(crate) fn render_sprites_cgb(
+        &mut self,
+        oam: &[u8],
+        vram: &[u8],
+        vram1: Option<&[u8]>,
+        dmg_priority: bool,
+    ) {
         if !self.lcd_on
             || u32::from(self.ly) >= u32::from(VBLANK_FIRST_LINE)
             || self.sprites_rendered
@@ -809,7 +829,9 @@ impl Ppu {
         for (i, slot) in order.iter_mut().enumerate().take(count) {
             *slot = self.line_sprites[i];
         }
-        for i in 1..count {
+        // OPRI: DMG style priority sorts by X ascending, CGB style keeps the OAM order (E15_11).
+        let sort_to = if dmg_priority { count } else { 0 };
+        for i in 1..sort_to {
             let mut j = i;
             while j > 0 && self.sprite_x(oam, order[j - 1]) > self.sprite_x(oam, order[j]) {
                 order.swap(j - 1, j);
@@ -817,7 +839,7 @@ impl Ppu {
             }
         }
         for &pos in order.iter().take(count) {
-            self.render_sprite(oam, vram, usize::from(pos), height);
+            self.render_sprite(oam, vram, vram1, usize::from(pos), height);
         }
     }
 
@@ -829,7 +851,14 @@ impl Ppu {
     /// Merge one selected sprite's non-transparent pixels into `line_buf` (E03_04 spec). A pixel is
     /// resolved at most once per line: the first sprite to reach it in best-to-worst order wins, and
     /// a sprite hidden behind background colors 1..3 by its BG priority bit leaves the background.
-    fn render_sprite(&mut self, oam: &[u8], vram: &[u8], idx: usize, height: u8) {
+    fn render_sprite(
+        &mut self,
+        oam: &[u8],
+        vram: &[u8],
+        vram1: Option<&[u8]>,
+        idx: usize,
+        height: u8,
+    ) {
         let base = idx * 4;
         let left = i32::from(oam[base + 1]) - 8; // leftmost screen column (E03_04 spec: covers X-8..X-1)
         if left + 7 < 0 || left >= i32::from(LINE_PIXELS) {
@@ -843,7 +872,7 @@ impl Ppu {
         }
         let tile_index = oam[base + 2];
         let attrs = oam[base + 3];
-        let pal1 = attrs & 0x10 != 0; // bit 4: OBP1 (E03_04 spec)
+        let pal1 = vram1.is_none() && attrs & 0x10 != 0; // bit 4: OBP1 (E03_04 spec)
         let flip_y = attrs & 0x40 != 0; // bit 6 (E03_04 spec)
         let flip_x = attrs & 0x20 != 0; // bit 5 (E03_04 spec)
         let bg_prio = attrs & 0x80 != 0; // bit 7: BG colors 1..3 are drawn over the sprite (E03_04 spec)
@@ -863,6 +892,12 @@ impl Ppu {
             u32::from(tile_index) // unsigned $8000 addressing, always (note 04a "les objets utilisent toujours l'adressage $8000")
         };
         let row_off = (tile_no * 16 + (sprite_row & 7) * 2) as usize; // tile N stores its rows at VRAM offset N*16, one tile is 16 bytes (E03_04 spec, note 04a "Tile data format")
+                                                                      // Cgb color mode: attribute bit 3 selects the tile data bank (E15_11).
+        let data = if vram1.is_some() && attrs & 0x08 != 0 {
+            vram1.unwrap_or(vram)
+        } else {
+            vram
+        };
         for dx in 0..8u32 {
             let sx = left + i32::from(dx as u8); // screen column (E03_04 spec)
             if sx < 0 || sx >= i32::from(LINE_PIXELS) {
@@ -870,7 +905,7 @@ impl Ppu {
             }
             let col_in_tile = if flip_x { 7 - dx } else { dx }; // X flip reverses columns (E03_04 spec)
             let bit = (7 - col_in_tile) as usize; // MSB first within the tile row (note 04a "Tile data format")
-            let color = ((vram[row_off + 1] >> bit) & 1) << 1 | (vram[row_off] >> bit) & 1; // note 04a "Tile data format"
+            let color = ((data[row_off + 1] >> bit) & 1) << 1 | (data[row_off] >> bit) & 1; // note 04a "Tile data format"
             if color == 0 {
                 continue; // sprite color index 0 is transparent (E03_04 spec)
             }
@@ -882,6 +917,7 @@ impl Ppu {
             if bg_prio && self.line_buf[p].color != 0 {
                 continue; // BG colors 1..3 are drawn over the sprite: the background stays (E03_04 spec)
             }
+            self.line_obj_attr[p] = attrs; // OBJ palette number for the Cgb commit (E15_11)
             self.line_buf[p] = PixelOut {
                 color,
                 obj: true,
@@ -930,6 +966,92 @@ impl Ppu {
 mod tests {
     use super::*;
     use crate::machine::FRAME_DOTS;
+
+    /// Runs line 0 with sprites in Cgb color mode (E15_11): OAM scan, then per dot a tick plus the
+    /// pixel fetch and the sprite merge. LCDC $93: LCD on, unsigned tile data, sprites on, BG on.
+    fn e15_11_line(
+        vram0: &[u8; 0x2000],
+        vram1: &[u8; 0x2000],
+        oam: &[u8; 160],
+        dmg_priority: bool,
+    ) -> Ppu {
+        let mut p = Ppu {
+            lcdc: 0x93,
+            ..Ppu::default()
+        };
+        p.scan_oam(oam);
+        for dot in 0..LINE_DOTS {
+            if dot > 0 {
+                p.tick();
+            }
+            p.fetch_pixels_cgb(vram0, Some(vram1), 0, 0);
+            p.render_sprites_cgb(oam, vram0, Some(vram1), dmg_priority);
+        }
+        p
+    }
+
+    /// One sprite at screen columns 0..7 on line 0 using tile 1, with the given attribute byte (E15_11).
+    fn e15_11_oam_one_sprite(attr: u8) -> [u8; 160] {
+        let mut oam = [0u8; 160];
+        oam[0] = 16; // Y=16: screen line 0 with LY=0
+        oam[1] = 8; // X=8: screen columns 0..7
+        oam[2] = 1; // tile 1
+        oam[3] = attr;
+        oam
+    }
+
+    #[test]
+    fn e15_11_attribute_bit_3_takes_the_tile_from_bank_1() {
+        let vram0 = [0x00u8; 0x2000];
+        let mut vram1 = [0x00u8; 0x2000];
+        vram1[0x10] = 0x80; // tile 1 row 0 low plane: color id 1 at the leftmost pixel, bank 1 only
+        let p = e15_11_line(&vram0, &vram1, &e15_11_oam_one_sprite(0x08), false);
+        assert!(p.line_buf[0].obj);
+        assert_eq!(p.line_buf[0].color, 1);
+        let p = e15_11_line(&vram0, &vram1, &e15_11_oam_one_sprite(0x00), false);
+        assert!(!p.line_buf[0].obj); // bank 0 holds no tile data: the sprite is transparent
+    }
+
+    #[test]
+    fn e15_11_obj_palette_number_selects_the_palette_entry() {
+        let mut vram0 = [0x00u8; 0x2000];
+        vram0[0x10] = 0x80; // tile 1 row 0: color id 1 at the leftmost pixel
+        let vram1 = [0x00u8; 0x2000];
+        // Attribute $12: palette number 2, and the DMG palette bit 4 set (it must be ignored).
+        let mut p = e15_11_line(&vram0, &vram1, &e15_11_oam_one_sprite(0x12), false);
+        assert!(!p.line_buf[0].pal1);
+        let mut obj_pal = [0x00u8; 64];
+        obj_pal[2 * 8 + 2] = 0x1F; // OBJ palette 2, color 1: $001F = pure red
+        obj_pal[2 * 8 + 3] = 0x00;
+        p.commit_line_cgb(&[0x00; 64], &obj_pal);
+        assert_eq!(p.frame[0], 0xFFFF_0000); // [255, 0, 0]
+        assert_eq!(p.frame[1], 0xFF00_0000); // transparent sprite pixel: BG palette 0 color 0 is black here
+    }
+
+    #[test]
+    fn e15_11_opri_selects_oam_order_or_x_order() {
+        let mut vram0 = [0x00u8; 0x2000];
+        vram0[0x10] = 0xFF; // tile 1 row 0: color id 1 on all 8 pixels
+        vram0[0x20 + 1] = 0xFF; // tile 2 row 0: color id 2 on all 8 pixels
+        let vram1 = [0x00u8; 0x2000];
+        let mut oam = [0u8; 160];
+        oam[0] = 16; // OAM entry 0: tile 1, X=10 (columns 2..9)
+        oam[1] = 10;
+        oam[2] = 1;
+        oam[4] = 16; // OAM entry 1: tile 2, X=8 (columns 0..7)
+        oam[5] = 8;
+        oam[6] = 2;
+        // OPRI = 0 (CGB style): the lower OAM index wins even though its X is larger.
+        let p = e15_11_line(&vram0, &vram1, &oam, false);
+        assert_eq!(p.line_buf[0].color, 2); // only entry 1 covers column 0
+        assert_eq!(p.line_buf[5].color, 1); // overlap: entry 0 wins
+        assert_eq!(p.line_buf[9].color, 1); // only entry 0 covers column 9
+                                            // OPRI = 1 (DMG style): the smaller X wins the overlap.
+        let p = e15_11_line(&vram0, &vram1, &oam, true);
+        assert_eq!(p.line_buf[0].color, 2);
+        assert_eq!(p.line_buf[5].color, 2); // overlap: entry 1 (X=8) wins
+        assert_eq!(p.line_buf[9].color, 1);
+    }
 
     /// VRAM bank pair for the Cgb attribute tests (E15_10): the map entry (0,0) at $9800 is tile 1,
     /// its attribute byte in bank 1 is `attr`, and row `data_row` of tile 1 (unsigned base $8000)
