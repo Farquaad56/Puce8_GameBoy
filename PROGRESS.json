@@ -2,9 +2,9 @@
   "current_task": "E13_08",
   "awaiting_gate": false,
   "gate_task": "E12_04",
-  "failures": 0,
+  "failures": 2,
   "sessions": 0,
-  "updated": "2026-10-21 12:51:04",
+  "updated": "2026-10-21 12:51:51",
   "tasks": {
     "E00_01": "DONE",
     "E00_02": "DONE",
