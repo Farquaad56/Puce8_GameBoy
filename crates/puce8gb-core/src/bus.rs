@@ -150,6 +150,9 @@ pub struct Bus {
     ocps: u8,
     /// OPRI ($FF6C) bit 0: 0 = OBJ priority by OAM index (CGB style), 1 = by X coordinate (DMG style) (E15_11).
     opri: u8,
+    /// True for a Cgb machine running a DMG-only cartridge ($0143 bit 7 clear) (E15_13): the DMG
+    /// rendering path is used and OPRI reads and acts as 1.
+    pub(crate) compat: bool,
 }
 
 impl Bus {
@@ -196,6 +199,7 @@ impl Bus {
             bcps: 0,
             ocps: 0,
             opri: 0,
+            compat: false,
             svbk: 0, // SVBK bits 0-2 (E15_06)
         }
     }
@@ -363,10 +367,15 @@ impl Bus {
         self.remap_boot();
     }
 
+    /// VRAM bank 1 of the Cgb model, read by the PPU in color mode (E15_13).
+    pub(crate) fn vram1(&self) -> &[u8] {
+        &self.vram1
+    }
+
     /// True when sprite priority follows the X coordinate (OPRI bit 0 set on the Cgb model) (E15_11).
     /// The Dmg model has no OPRI: the machine passes true itself.
     pub fn opri_dmg_style(&self) -> bool {
-        self.cgb && self.opri & 1 == 1
+        self.cgb && (self.compat || self.opri & 1 == 1) // compat mode acts as OPRI = 1 (E15_13)
     }
 
     /// Byte of the palette RAM selected by BCPS (`obj` false) or OCPS (`obj` true) (E15_08).
@@ -661,7 +670,7 @@ impl Bus {
             0xFF6A if self.cgb => self.ocps = val & 0xBF, // OCPS (E15_08)
             0xFF69 if self.cgb => self.cram_write(false, val), // BCPD (E15_08)
             0xFF6B if self.cgb => self.cram_write(true, val), // OCPD (E15_08)
-            0xFF6C if self.cgb => self.opri = val & 0x01, // OPRI: only bit 0 is kept (E15_11)
+            0xFF6C if self.cgb && !self.compat => self.opri = val & 0x01, // OPRI: only bit 0 is kept; in compat mode it stays 1 (E15_11, E15_13)
             0xFF03 | 0xFF08..=0xFF0E | 0xFF4C..=0xFF7F => {} // unmapped I/O: writes are ignored (mooneye unused_hwio-GS, FIX_05)
             0xFF01..=0xFF7F => {
                 self.io[(addr - 0xFF00) as usize] = val;

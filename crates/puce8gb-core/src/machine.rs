@@ -271,6 +271,8 @@ impl Dmg {
             boot_image: None,
         };
         dmg.bus.cgb = cfg.model == Model::Cgb; // CGB post-boot I/O values (E15_05)
+                                               // DMG compatibility mode (E15_13): a Cgb machine running a cartridge whose $0143 bit 7 is clear.
+        dmg.bus.compat = cfg.model == Model::Cgb && rom[0x0143] & 0x80 == 0;
         if let Some(boot) = cfg.boot_rom {
             dmg.bus
                 .set_boot_rom(&boot, cfg.model.boot_rom_len())
@@ -324,6 +326,13 @@ impl Dmg {
             || (stat & 0x20 != 0 && self.ppu.ly() == VBLANK_FIRST_LINE && self.ppu.line_dot() < 4) // bit 5 also fires at the very start of line 144, together with vblank (mooneye vblank_stat_intr-GS, FIX_07); how long the line stays high: UNKNOWN - to confirm, 4 dots used
             || (stat & 0x10 != 0 && self.ppu.stat_mode() == 1) // bit 4: VBlank
             || (stat & 0x08 != 0 && self.ppu.stat_mode() == 0) // bits 3/4/5 irqs all follow the 4-dot lagged mode (mooneye intr_1_2 / intr_2_0, FIX_09)
+    }
+
+    /// True when this is a Cgb machine in DMG compatibility mode (E15_13): the cartridge has
+    /// $0143 bit 7 clear, so the DMG rendering path and the user's DMG palette are used. This is a
+    /// deliberate simplification: the real boot ROM picks colors from a title hash table (decision A_13).
+    pub fn compat(&self) -> bool {
+        self.bus.compat
     }
 
     /// Console model of this machine (E14_04).
@@ -424,16 +433,48 @@ impl Machine for Dmg {
         }
         // One dot of pixel fetching per dot (E03_03): the fetcher reads VRAM directly, so it is
         // not affected by the CPU access blocking set below. SCX/SCY are $FF43/$FF42 (note 04a).
-        self.ppu
-            .fetch_pixels(&self.bus.vram, self.bus.io[0x43], self.bus.io[0x42]);
+        // Cgb color mode (E15_13): a Cgb machine whose cartridge is not DMG-only renders with the
+        // attributes of VRAM bank 1 and the palette RAM; every other machine keeps the DMG path.
+        let color_mode = self.bus.cgb && !self.bus.compat;
+        if color_mode {
+            let vram1 = self.bus.vram1();
+            self.ppu.fetch_pixels_cgb(
+                &self.bus.vram,
+                Some(vram1),
+                self.bus.io[0x43],
+                self.bus.io[0x42],
+            );
+        } else {
+            self.ppu
+                .fetch_pixels(&self.bus.vram, self.bus.io[0x43], self.bus.io[0x42]);
+        }
         // One dot of window fetching per dot (E03_12): when the pixel position has reached WX - 7
         // with the window line condition met, the pixels from that position on come from the
         // window tile map row win_line. WY/WX are $FF4A/$FF4B (note 04a).
-        self.ppu
-            .fetch_window(&self.bus.vram, self.bus.io[0x4B], self.bus.io[0x4A]);
-        self.ppu.render_sprites(&self.bus.oam, &self.bus.vram);
-        self.ppu
-            .commit_line(self.bus.io[0x47], self.bus.io[0x48], self.bus.io[0x49]); // BGP, OBP0, OBP1 (E03_05 spec)
+        if color_mode {
+            let vram1 = self.bus.vram1();
+            self.ppu.fetch_window_cgb(
+                &self.bus.vram,
+                Some(vram1),
+                self.bus.io[0x4B],
+                self.bus.io[0x4A],
+            );
+            self.ppu.render_sprites_cgb(
+                &self.bus.oam,
+                &self.bus.vram,
+                Some(vram1),
+                self.bus.opri_dmg_style(),
+            );
+            self.ppu
+                .commit_line_cgb(&self.bus.bg_pal, &self.bus.obj_pal); // BG and OBJ palette RAM (E15_08, E15_10)
+        } else {
+            self.ppu
+                .fetch_window(&self.bus.vram, self.bus.io[0x4B], self.bus.io[0x4A]);
+            self.ppu.render_sprites(&self.bus.oam, &self.bus.vram);
+            self.ppu
+                .commit_line(self.bus.io[0x47], self.bus.io[0x48], self.bus.io[0x49]);
+            // BGP, OBP0, OBP1 (E03_05 spec)
+        }
         self.bus.ly = self.ppu.ly(); // LY ($FF44) mirror (E03_01); the coincidence flag reads it too (E03_08)
         self.bus.ppu_mode = self.ppu.stat_mode(); // PPU mode mirror for the STAT readback (E03_08 spec, decision A_02; FIX_08)
                                                   // LY==LYC flag: frozen while the LCD is off, recomputed live as soon as it is on (mooneye stat_lyc_onoff, FIX_08).
@@ -501,6 +542,124 @@ impl Machine for Dmg {
 mod tests {
     use super::*;
     use crate::audio::wave::WaveAccess;
+
+    /// 32 KiB ROM with `flag` at $0143, a jump to $0150 at $0100 and `program` at $0150 (E15_13).
+    fn e15_13_rom(flag: u8, program: &[u8]) -> Vec<u8> {
+        let mut rom = vec![0u8; 0x8000];
+        rom[0x0143] = flag;
+        rom[0x0100..0x0103].copy_from_slice(&[0xC3, 0x50, 0x01]);
+        rom[0x0150..0x0150 + program.len()].copy_from_slice(program);
+        rom
+    }
+
+    /// Stripe pattern in VRAM tile 0, then a loop copying LY into SCX (a picture that depends on the timing).
+    const E15_13_SCROLL_PROGRAM: [u8; 17] = [
+        0x21, 0x00, 0x80, // LD HL,$8000
+        0x3E, 0xAA, // LD A,$AA
+        0x0E, 0x20, // LD C,$20
+        0x22, // LD (HL+),A
+        0x0D, // DEC C
+        0x20, 0xFC, // JR NZ,-4
+        0xF0, 0x44, // LDH A,($44)
+        0xE0, 0x43, // LDH ($43),A
+        0x18, 0xFA, // JR -6
+    ];
+
+    /// Waits for LY = $90 (VBlank, palette RAM is accessible), then sets BG palette 0 color 0 to
+    /// pure red ($001F) through BCPS/BCPD with auto-increment, then loops forever.
+    const E15_13_PALETTE_PROGRAM: [u8; 22] = [
+        0xF0, 0x44, // LDH A,($44)
+        0xFE, 0x90, // CP $90
+        0x20, 0xFA, // JR NZ,-6
+        0x3E, 0x80, // LD A,$80
+        0xE0, 0x68, // LDH ($68),A   BCPS = $80
+        0x3E, 0x1F, // LD A,$1F
+        0xE0, 0x69, // LDH ($69),A   low byte
+        0x3E, 0x00, // LD A,$00
+        0xE0, 0x69, // LDH ($69),A   high byte
+        0x18, 0xFE, // JR -2
+        0x00, 0x00, // padding
+    ];
+
+    /// FNV-1a hash of every framebuffer pixel over `frames` frames (E15_13).
+    fn e15_13_hash(dmg: &mut Dmg, frames: usize) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for _ in 0..frames {
+            dmg.run_frame();
+            for pixel in dmg.framebuffer() {
+                for byte in pixel.to_le_bytes() {
+                    hash ^= u64::from(byte);
+                    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            }
+        }
+        hash
+    }
+
+    fn e15_13_machine(model: Model, rom: &[u8]) -> Dmg {
+        let cfg = MachineConfig {
+            model,
+            boot_rom: None,
+        };
+        Dmg::with_config(rom, cfg).expect("valid")
+    }
+
+    #[test]
+    fn e15_13_cgb_with_a_dmg_cartridge_renders_like_the_dmg() {
+        let rom = e15_13_rom(0x00, &E15_13_SCROLL_PROGRAM);
+        let mut dmg = e15_13_machine(Model::Dmg, &rom);
+        let mut cgb = e15_13_machine(Model::Cgb, &rom);
+        assert_eq!(e15_13_hash(&mut dmg, 10), e15_13_hash(&mut cgb, 10));
+    }
+
+    #[test]
+    fn e15_13_compat_flag_follows_model_and_cartridge() {
+        let dmg_cart = e15_13_rom(0x00, &E15_13_SCROLL_PROGRAM);
+        let cgb_cart = e15_13_rom(0x80, &E15_13_SCROLL_PROGRAM);
+        let only_cgb_cart = e15_13_rom(0xC0, &E15_13_SCROLL_PROGRAM);
+        assert!(e15_13_machine(Model::Cgb, &dmg_cart).compat());
+        assert!(!e15_13_machine(Model::Cgb, &cgb_cart).compat());
+        assert!(!e15_13_machine(Model::Cgb, &only_cgb_cart).compat());
+        assert!(!e15_13_machine(Model::Dmg, &dmg_cart).compat());
+        assert!(!e15_13_machine(Model::Dmg, &cgb_cart).compat());
+    }
+
+    #[test]
+    fn e15_13_opri_is_one_and_fixed_in_compat_mode() {
+        let mut compat = e15_13_machine(Model::Cgb, &e15_13_rom(0x00, &E15_13_SCROLL_PROGRAM));
+        assert_eq!(compat.bus.read(0xFF6C), 0xFF);
+        compat.bus.write(0xFF6C, 0x00);
+        assert_eq!(compat.bus.read(0xFF6C), 0xFF);
+        assert!(compat.bus.opri_dmg_style());
+        let mut color = e15_13_machine(Model::Cgb, &e15_13_rom(0x80, &E15_13_SCROLL_PROGRAM));
+        assert_eq!(color.bus.read(0xFF6C), 0xFE);
+        color.bus.write(0xFF6C, 0x01);
+        assert_eq!(color.bus.read(0xFF6C), 0xFF);
+        color.bus.write(0xFF6C, 0x00);
+        assert_eq!(color.bus.read(0xFF6C), 0xFE);
+        assert!(!color.bus.opri_dmg_style());
+    }
+
+    #[test]
+    fn e15_13_color_mode_renders_through_the_palette_ram() {
+        let rom = e15_13_rom(0x80, &E15_13_PALETTE_PROGRAM);
+        let mut cgb = e15_13_machine(Model::Cgb, &rom);
+        cgb.run_frame();
+        cgb.run_frame();
+        assert_eq!(cgb.bus.bg_pal[0], 0x1F);
+        assert_eq!(cgb.bus.bg_pal[1], 0x00);
+        assert_eq!(cgb.framebuffer()[0], 0xFFFF_0000); // BG palette 0 color 0 = red
+    }
+
+    #[test]
+    fn e15_13_compat_mode_accepts_palette_writes_without_visual_effect() {
+        let rom = e15_13_rom(0x00, &E15_13_PALETTE_PROGRAM);
+        let mut cgb = e15_13_machine(Model::Cgb, &rom);
+        cgb.run_frame();
+        cgb.run_frame();
+        assert_eq!(cgb.bus.bg_pal[0], 0x1F); // the write was accepted
+        assert_eq!(cgb.framebuffer()[0], 0xFFFF_FFFF); // DMG path: BGP color 0 = white (dmg_palette[0])
+    }
 
     /// 32 KiB cartridge image of zeros whose CGB flag byte $0143 is `flag` (E15_05).
     fn e15_05_cart(flag: u8) -> Vec<u8> {
