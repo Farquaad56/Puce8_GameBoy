@@ -1,6 +1,6 @@
 //! Argument parsing for the `run` command (task C01_43):
 //! `run <rom> [--max-cycles N] [--expect-serial TEXT] [--trace N] [--ly-fixed HEX]`
-//! `[--frames N] [--dump-ppm FILE]`.
+//! `[--frames N] [--dump-ppm FILE] [--boot-rom FILE]`.
 
 /// Default execution budget in T-cycles: 100_000_000.
 const DEFAULT_MAX_CYCLES: u64 = 100_000_000;
@@ -28,6 +28,8 @@ pub struct RunArgs {
     pub save_state: Option<String>,
     /// Load this save state file before running the frames (`--load-state FILE`, E09_03).
     pub load_state: Option<String>,
+    /// Boot ROM file to start from (`--boot-rom FILE`, E14_05).
+    pub boot_rom: Option<String>,
     /// Suppress the serial echo on stdout; set by the suite runner, not a CLI flag (E06_01).
     pub quiet: bool,
 }
@@ -46,6 +48,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
     let mut hash = false;
     let mut save_state: Option<String> = None;
     let mut load_state: Option<String> = None;
+    let mut boot_rom: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -59,6 +62,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
             "--hash" => hash = true,
             "--save-state" => save_state = Some(value(args, &mut i, "--save-state")?),
             "--load-state" => load_state = Some(value(args, &mut i, "--load-state")?),
+            "--boot-rom" => boot_rom = Some(value(args, &mut i, "--boot-rom")?),
             other if other.starts_with("--") => return Err(format!("unknown flag: {other}")),
             positional => {
                 if rom.is_none() {
@@ -82,6 +86,9 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
     if load_state.is_some() && frames.is_none() {
         return Err("--load-state requires --frames".to_string());
     }
+    if boot_rom.is_some() && (save_state.is_some() || load_state.is_some()) {
+        return Err("--boot-rom cannot be combined with --save-state or --load-state".to_string());
+    }
     Ok(RunArgs {
         rom,
         max_cycles,
@@ -93,6 +100,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
         hash,
         save_state,
         load_state,
+        boot_rom,
         quiet: false,
     })
 }
@@ -130,6 +138,42 @@ mod tests {
 
     fn arg(s: &str) -> String {
         s.to_string()
+    }
+
+    #[test]
+    fn e14_05_boot_rom_default_is_none() {
+        let a = parse_run_args(&[arg("game.gb")]).expect("a rom path parses");
+        assert_eq!(a.boot_rom, None);
+    }
+
+    #[test]
+    fn e14_05_boot_rom_flag_stores_the_path() {
+        let a = parse_run_args(&[arg("game.gb"), arg("--boot-rom"), arg("x.bin")])
+            .expect("the flag parses");
+        assert_eq!(a.boot_rom.as_deref(), Some("x.bin"));
+    }
+
+    #[test]
+    fn e14_05_boot_rom_missing_value_is_a_usage_error() {
+        let err = err_of(&[arg("game.gb"), arg("--boot-rom")]);
+        assert_eq!(err, "--boot-rom requires a value");
+    }
+
+    #[test]
+    fn e14_05_boot_rom_conflicts_with_state_flags() {
+        let err = err_of(&[
+            arg("game.gb"),
+            arg("--frames"),
+            arg("1"),
+            arg("--save-state"),
+            arg("s.bin"),
+            arg("--boot-rom"),
+            arg("b.bin"),
+        ]);
+        assert_eq!(
+            err,
+            "--boot-rom cannot be combined with --save-state or --load-state"
+        );
     }
 
     /// The error message of a parse that must fail.

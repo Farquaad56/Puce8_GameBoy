@@ -32,8 +32,62 @@ fn args(max_cycles: u64, expect_serial: Option<&str>) -> RunArgs {
         hash: false,
         save_state: None,
         load_state: None,
+        boot_rom: None,
         quiet: false,
     }
+}
+
+/// Synthetic 256-byte boot ROM: JP $00FC at $0000, then LD A,$01 and LDH ($50),A at $00FC (E14_05).
+fn e14_05_boot() -> Vec<u8> {
+    let mut boot = vec![0x00u8; 256];
+    boot[0x00] = 0xC3;
+    boot[0x01] = 0xFC;
+    boot[0x02] = 0x00;
+    boot[0xFC] = 0x3E;
+    boot[0xFD] = 0x01;
+    boot[0xFE] = 0xE0;
+    boot[0xFF] = 0x50;
+    boot
+}
+
+#[test]
+fn e14_05_boot_machine_hands_off_within_one_frame() {
+    let rom = vec![0x00u8; 0x8000];
+    let mut dmg = build_machine(&rom, Some(&e14_05_boot())).expect("valid boot ROM");
+    assert_eq!(dmg.cpu.pc, 0x0000);
+    dmg.run_frame();
+    assert!(dmg.cpu.pc >= 0x0100, "pc {:04X}", dmg.cpu.pc);
+    assert!(!dmg.bus.boot_mapped());
+}
+
+#[test]
+fn e14_05_short_boot_rom_is_a_boot_error() {
+    let rom = vec![0x00u8; 0x8000];
+    assert_eq!(
+        build_machine(&rom, Some(&[0u8; 10])).err(),
+        Some(BuildError::BadBoot)
+    );
+}
+
+#[test]
+fn e14_05_bad_rom_is_not_a_boot_error() {
+    assert_eq!(
+        build_machine(&[0u8; 100], Some(&e14_05_boot())).err(),
+        Some(BuildError::BadRom)
+    );
+}
+
+#[test]
+fn e14_05_without_boot_rom_the_plain_machine_is_built() {
+    let rom = vec![0x00u8; 0x8000];
+    let dmg = build_machine(&rom, None).expect("valid ROM");
+    assert_eq!(dmg.cpu.pc, 0x0100);
+    assert!(!dmg.bus.boot_mapped());
+}
+
+#[test]
+fn e14_05_bad_boot_exit_code_is_6() {
+    assert_eq!(EXIT_BAD_BOOT, 6);
 }
 
 #[test]

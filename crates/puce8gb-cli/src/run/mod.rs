@@ -9,7 +9,7 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use puce8gb_core::savestate::HEADER_LEN;
-use puce8gb_core::{Dmg, Machine, StateError};
+use puce8gb_core::{Dmg, LoadError, Machine, StateError};
 
 use crate::run_args::RunArgs;
 // Re-exported for later tasks (C01_47+); bin-only crate, so unused names need an allow.
@@ -21,6 +21,9 @@ mod tests;
 
 /// Exit code for an invalid save state file (E09_03); 2, 3, 4 and 64 are taken. UNKNOWN - to confirm.
 const EXIT_BAD_STATE: u8 = 5;
+
+/// Exit code for a rejected boot ROM (E14_05); 2, 3, 4, 5 and 64 are taken. UNKNOWN - to confirm.
+const EXIT_BAD_BOOT: u8 = 6;
 
 /// Outcome of a ROM execution (task C01_44).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,6 +261,72 @@ pub fn exit_code(o: &Outcome, args: &RunArgs) -> u8 {
     }
 }
 
+/// Why `build_machine` failed (E14_05).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildError {
+    /// The ROM image cannot be loaded.
+    BadRom,
+    /// The boot ROM image is rejected by the core.
+    BadBoot,
+}
+
+/// Builds the machine for the `run` command (E14_05): plain `Dmg::new` without a boot ROM,
+/// `Dmg::with_boot_rom` with one. No file access: the caller reads the bytes.
+pub fn build_machine(rom: &[u8], boot: Option<&[u8]>) -> Result<Dmg, BuildError> {
+    match boot {
+        None => Dmg::new(rom).map_err(|_| BuildError::BadRom),
+        Some(boot) => Dmg::with_boot_rom(rom, boot).map_err(|err| {
+            if err == LoadError::BadBootRom {
+                BuildError::BadBoot
+            } else {
+                BuildError::BadRom
+            }
+        }),
+    }
+}
+
+/// Runs a ROM with a boot ROM (E14_05): frames mode when `--frames` is given, else the
+/// M-cycle loop of `run_machine`. Only this function and `execute` touch files.
+fn execute_with_boot(args: &RunArgs, rom: &[u8], boot: &[u8]) -> ExitCode {
+    let mut dmg = match build_machine(rom, Some(boot)) {
+        Ok(dmg) => dmg,
+        Err(BuildError::BadBoot) => {
+            eprintln!("error: boot ROM rejected");
+            return ExitCode::from(EXIT_BAD_BOOT);
+        }
+        Err(BuildError::BadRom) => {
+            eprintln!("error: cannot load ROM");
+            return ExitCode::from(3);
+        }
+    };
+    if let Some(v) = args.ly_fixed {
+        dmg.debug_set_ly_override(Some(v));
+    }
+    if let Some(frames) = args.frames {
+        for _ in 0..frames {
+            dmg.run_frame();
+        }
+        let frame = dmg.framebuffer().to_vec();
+        if let Some(path) = &args.dump_ppm {
+            let written =
+                fs::File::create(path).and_then(|mut f| crate::ppm::write_ppm(&frame, &mut f));
+            if let Err(err) = written {
+                eprintln!("error: cannot write {path}: {err}");
+                return ExitCode::from(3);
+            }
+        }
+        if args.hash {
+            println!("{}", crate::hash::hash_line(&frame));
+        }
+        return ExitCode::from(exit_code(&Outcome::FramesDone, args));
+    }
+    let outcome = run_machine(&mut dmg, args);
+    if let Outcome::Unimplemented { opcode, pc } = &outcome {
+        println!("{}", unimplemented_message(*opcode, *pc));
+    }
+    ExitCode::from(exit_code(&outcome, args))
+}
+
 /// Read the ROM file and run it (task C01_44). Only this function touches files; an
 /// unimplemented opcode is reported on stdout before exit (C01_46).
 pub fn execute(args: &RunArgs) -> ExitCode {
@@ -268,6 +337,16 @@ pub fn execute(args: &RunArgs) -> ExitCode {
             return ExitCode::from(3);
         }
     };
+    if let Some(boot_path) = &args.boot_rom {
+        let boot = match fs::read(boot_path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                eprintln!("error: cannot read {boot_path}: {err}");
+                return ExitCode::from(3);
+            }
+        };
+        return execute_with_boot(args, &rom, &boot);
+    }
     if let Some(frames) = args.frames {
         let load = match &args.load_state {
             Some(path) => match fs::read(path) {

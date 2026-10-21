@@ -41,6 +41,7 @@ fn entry_args(entry: &Entry) -> RunArgs {
         hash: false,
         save_state: None,
         load_state: None,
+        boot_rom: None,
         quiet: true,
     }
 }
@@ -339,6 +340,7 @@ mod tests {
                 hash: false,
                 save_state: None,
                 load_state: None,
+                boot_rom: None,
                 quiet: true,
             },
             2,
