@@ -605,15 +605,12 @@ mod tests {
         assert_eq!(dmg.bus.io[0x4D], 0xFF);
         assert_eq!(dmg.bus.io[0x4F], 0xFF);
         assert_eq!(dmg.bus.io[0x70], 0xFF);
-        let cgb = e15_05_machine(Model::Cgb, &e15_05_cart(0x80));
         for addr in [
             0xFF4Du16, 0xFF4F, 0xFF51, 0xFF52, 0xFF53, 0xFF54, 0xFF55, 0xFF68, 0xFF69, 0xFF6A,
             0xFF6B, 0xFF6C, 0xFF70,
         ] {
             assert_eq!(dmg.bus.read(addr), 0xFF, "dmg {addr:#06x}");
-            if addr != 0xFF70 {
-                assert_eq!(cgb.bus.read(addr), 0xFF, "cgb {addr:#06x}"); // registers not implemented yet; SVBK $FF70 is implemented by E15_06
-            }
+            // Cgb reads are tested per register by the e15_06 and later tests, as each register gets implemented.
         }
     }
 
