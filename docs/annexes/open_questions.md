@@ -135,3 +135,7 @@ E04_07: Pan Docs Audio Details does not state the APU power-on/power-off effects
 - E14_01 boot ROM: can a write to $FF50 be undone (boot ROM remapped), and what does a later write do? Not stated in pandocs. UNKNOWN - to confirm
 - E14_01 boot ROM: CPU register values before the boot ROM runs (power-on). Not stated in pandocs. UNKNOWN - to confirm
 - E14_01 boot ROM: I/O register values before the boot ROM runs (power-on). Not stated in pandocs. UNKNOWN - to confirm
+- E15_01 UNKNOWN - to confirm : valeur lue dans KEY0 $FF4C et role du bit 3 (mode PGB). Source : CGBR L224-L248.
+- E15_01 UNKNOWN - to confirm : interruptions possibles pendant la pause de STOP lors de la bascule de vitesse. Source : CGBR L197.
+- E15_01 UNKNOWN - to confirm : etat de HDMA1-4 apres un debordement de l'adresse de destination HDMA. Source : CGBR L101-L103.
+- E15_01 UNKNOWN - to confirm : detail des bits de BCPS/BCPD/OCPS/OCPD ($FF68-$FF6B), a lire dans le chapitre palettes. Source : HWRL L59-L62.
