@@ -122,6 +122,34 @@ pub fn issue_text(issue: &RomIssue) -> String {
     }
 }
 
+/// What to do with a ROM image before it reaches the core (E13_06, decision A_10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadDecision {
+    /// No issue: load the ROM.
+    Load,
+    /// Warnings only: load the ROM and show the joined warning texts in the status bar.
+    LoadWithWarning(String),
+    /// An error prevents loading: show the text of the first Error in the status bar.
+    Reject(String),
+}
+
+/// Decides what to do with a ROM image (E13_06): any Error rejects, warnings only warn.
+pub fn decide(bytes: &[u8]) -> LoadDecision {
+    let (_, issues) = inspect(bytes);
+    if let Some(issue) = issues
+        .iter()
+        .find(|issue| issue.severity == Severity::Error)
+    {
+        return LoadDecision::Reject(issue_text(issue));
+    }
+    let texts: Vec<String> = issues.iter().map(issue_text).collect();
+    if texts.is_empty() {
+        LoadDecision::Load
+    } else {
+        LoadDecision::LoadWithWarning(texts.join("; "))
+    }
+}
+
 /// File extensions accepted by the open dialog (E13_04).
 pub const ROM_EXTENSIONS: [&str; 4] = ["gb", "gbc", "sgb", "zip"];
 
@@ -289,5 +317,29 @@ mod tests {
     fn e13_04_rom_extensions_list() {
         assert_eq!(ROM_EXTENSIONS.len(), 4);
         assert!(ROM_EXTENSIONS.contains(&"zip"));
+    }
+
+    #[test]
+    fn e13_06_good_rom_gives_load() {
+        let rom = make_rom(b"TEST", 0, 32768);
+        assert_eq!(decide(&rom), LoadDecision::Load);
+    }
+
+    #[test]
+    fn e13_06_wrong_checksum_gives_load_with_warning_containing_checksum() {
+        let mut rom = make_rom(b"TEST", 0, 32768);
+        rom[CHECKSUM_FIRST] ^= 0x01;
+        match decide(&rom) {
+            LoadDecision::LoadWithWarning(text) => assert!(text.contains("checksum")),
+            other => panic!("expected a warning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn e13_06_too_small_rom_gives_reject_starting_with_error() {
+        match decide(&vec![0u8; 0x100]) {
+            LoadDecision::Reject(text) => assert!(text.starts_with("Error: ROM too small")),
+            other => panic!("expected a reject, got {other:?}"),
+        }
     }
 }

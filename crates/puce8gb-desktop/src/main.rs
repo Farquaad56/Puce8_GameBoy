@@ -194,10 +194,24 @@ impl App {
     }
 
     /// Loads a ROM from disk. On success the path is remembered in the recent list and the
-    /// settings are saved (E13_05). Returns false when the file cannot be read.
+    /// settings are saved (E13_05). A rejected ROM only updates the status bar; nothing is
+    /// sent to the emulation thread, so the current game keeps running (E13_06). Returns
+    /// false when the file cannot be read or the ROM is rejected.
     fn load_rom(&mut self, path: &std::path::Path) -> bool {
-        match std::fs::read(path) {
-            Ok(bytes) => {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                self.status = format!("Cannot read {}: {err}", path.display());
+                return false;
+            }
+        };
+        // The ROM check runs before the core sees the image (E13_06, decision A_10).
+        match rom_check::decide(&bytes) {
+            rom_check::LoadDecision::Reject(text) => {
+                self.status = text;
+                false
+            }
+            decision => {
                 let display = path.display().to_string();
                 self.title = rom_info::window_title(&rom_info::rom_title(&bytes));
                 self.path_input = display.clone();
@@ -207,14 +221,15 @@ impl App {
                 self.frame.clear();
                 self.frame_dirty = true;
                 self.last_input = Input::default();
-                self.status = format!("Loading {display}");
+                if let rom_check::LoadDecision::LoadWithWarning(warning) = decision {
+                    // Load as today, then show the warning texts in the status bar (E13_06).
+                    self.status = warning;
+                } else {
+                    self.status = format!("Loading {display}");
+                }
                 self.recent.push(&display);
                 self.save_settings();
                 true
-            }
-            Err(err) => {
-                self.status = format!("Cannot read {}: {err}", path.display());
-                false
             }
         }
     }
