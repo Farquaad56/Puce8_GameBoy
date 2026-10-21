@@ -33,6 +33,8 @@ pub enum LoadError {
     NoBatteryRam,
     /// The battery RAM data length differs from the RAM size (E05_06).
     BatteryRamSizeMismatch { expected: usize, actual: usize },
+    /// The boot ROM image does not have the expected length (E14_03).
+    BadBootRom,
 }
 
 /// Core machine interface (decisions A_01/A_04/A_05).
@@ -99,6 +101,9 @@ impl Dmg {
     /// Minimum ROM length: the header occupies $0100-$014F of bank 0 (note 07a).
     pub const MIN_ROM_LEN: usize = 0x150;
 
+    /// Length of a monochrome boot ROM image in bytes (note 10).
+    pub const DMG_BOOT_ROM_LEN: usize = 256;
+
     /// Sets the four output colors of shades 0..3 (E11_01); not part of the save state.
     pub fn set_dmg_palette(&mut self, colors: [u32; 4]) {
         self.ppu.set_dmg_palette(colors);
@@ -159,6 +164,26 @@ impl Dmg {
         Ok(dmg)
     }
 
+    /// Builds a machine that starts from the power-on state at PC=$0000 with the boot ROM
+    /// mapped (E14_03). The boot ROM must be exactly `DMG_BOOT_ROM_LEN` bytes.
+    pub fn with_boot_rom(rom: &[u8], boot: &[u8]) -> Result<Dmg, LoadError> {
+        let mut dmg = Dmg::new(rom)?;
+        dmg.bus
+            .set_boot_rom(boot, Self::DMG_BOOT_ROM_LEN)
+            .map_err(|_| LoadError::BadBootRom)?;
+        dmg.reset(); // a boot ROM is installed: restarts from the power-on state
+        Ok(dmg)
+    }
+
+    /// Power-on state used when a boot ROM is installed (E14_03, note 10): CPU registers, SP and
+    /// PC at 0, every I/O register 0 (UNKNOWN values are 0), LCD off, APU powered off, boot ROM
+    /// mapped.
+    fn apply_power_on(&mut self) {
+        self.cpu = Cpu::default();
+        self.bus.power_on();
+        self.bus.apu_write = Some((0xFF26, 0x00)); // the APU model starts powered off like NR52
+    }
+
     /// Debug tool for trace comparison, task C01_49: force every $FF44 read to `v`, or
     /// restore the normal PPU scanline with None.
     #[doc(hidden)]
@@ -214,6 +239,9 @@ impl Machine for Dmg {
         self.bus
             .set_video_write_access(self.ppu.vram_writable(), self.ppu.oam_writable());
         // CPU write gate (FIX_10)
+        if self.bus.has_boot_rom() {
+            self.apply_power_on(); // boot ROM installed: restart from the power-on state (E14_03)
+        }
     }
 
     fn tick(&mut self) {
@@ -349,6 +377,86 @@ impl Machine for Dmg {
 mod tests {
     use super::*;
     use crate::audio::wave::WaveAccess;
+
+    /// 32 KiB ROM-only cartridge image: byte 0 is $AA, the rest is $00 (E14_03).
+    fn e14_03_cart() -> Vec<u8> {
+        let mut image = vec![0x00u8; 32 * 1024];
+        image[0] = 0xAA;
+        image
+    }
+
+    /// Synthetic boot ROM: NOPs, JP $00FC at $0000, then LD A,$01 and LDH ($50),A at $00FC (E14_03).
+    fn e14_03_boot() -> Vec<u8> {
+        let mut boot = vec![0x00u8; 256];
+        boot[0x00] = 0xC3;
+        boot[0x01] = 0xFC;
+        boot[0x02] = 0x00;
+        boot[0xFC] = 0x3E;
+        boot[0xFD] = 0x01;
+        boot[0xFE] = 0xE0;
+        boot[0xFF] = 0x50;
+        boot
+    }
+
+    /// Runs at most 40 M-cycles until the boot ROM is unmapped; true when it happened (E14_03).
+    fn e14_03_run_until_unmapped(dmg: &mut Dmg) -> bool {
+        for _ in 0..40 {
+            for _ in 0..4 {
+                dmg.tick();
+            }
+            if !dmg.bus.boot_mapped() {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn e14_03_boot_rom_runs_then_hands_off() {
+        let mut dmg = Dmg::with_boot_rom(&e14_03_cart(), &e14_03_boot()).expect("valid boot ROM");
+        assert_eq!(dmg.cpu.pc, 0x0000);
+        assert!(dmg.bus.boot_mapped());
+        assert_eq!(dmg.bus.read(0x0000), 0xC3);
+        assert!(e14_03_run_until_unmapped(&mut dmg));
+        assert_eq!(dmg.cpu.pc, 0x0100);
+        assert_eq!(dmg.cpu.a, 0x01);
+        assert_eq!(dmg.bus.read(0x0000), 0xAA);
+    }
+
+    #[test]
+    fn e14_03_bad_boot_size_is_an_error() {
+        let result = Dmg::with_boot_rom(&e14_03_cart(), &[0u8; 255]);
+        assert_eq!(result.err(), Some(LoadError::BadBootRom));
+    }
+
+    #[test]
+    fn e14_03_new_without_boot_rom_is_unchanged() {
+        let dmg = Dmg::new(&e14_03_cart()).expect("valid cartridge");
+        assert_eq!(dmg.cpu.pc, 0x0100);
+        assert!(!dmg.bus.boot_mapped());
+        assert_eq!(dmg.bus.read(0x0000), 0xAA);
+    }
+
+    #[test]
+    fn e14_03_power_on_state() {
+        let dmg = Dmg::with_boot_rom(&e14_03_cart(), &e14_03_boot()).expect("valid boot ROM");
+        assert_eq!(dmg.cpu.pc, 0x0000);
+        assert_eq!(dmg.cpu.sp, 0x0000);
+        assert_eq!(dmg.cpu.a, 0x00);
+        assert_eq!(dmg.cpu.f, 0x00);
+        assert_eq!(dmg.bus.io[0x40], 0x00);
+        assert_eq!(dmg.bus.io[0x0F], 0x00);
+    }
+
+    #[test]
+    fn e14_03_reset_restarts_from_the_boot_rom() {
+        let mut dmg = Dmg::with_boot_rom(&e14_03_cart(), &e14_03_boot()).expect("valid boot ROM");
+        assert!(e14_03_run_until_unmapped(&mut dmg));
+        dmg.reset();
+        assert!(dmg.bus.boot_mapped());
+        assert_eq!(dmg.cpu.pc, 0x0000);
+        assert_eq!(dmg.bus.read(0x0000), 0xC3);
+    }
 
     /// ROM image of `len` bytes, all zero except the header checksum byte $014D.
     fn rom(len: usize, checksum: u8) -> Vec<u8> {

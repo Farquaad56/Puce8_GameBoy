@@ -273,6 +273,26 @@ impl Bus {
         self.boot_mapped = self.boot_rom.is_some();
     }
 
+    /// True when a boot ROM image is installed (E14_03).
+    pub fn has_boot_rom(&self) -> bool {
+        self.boot_rom.is_some()
+    }
+
+    /// True while the boot ROM is visible over $0000-$00FF (E14_03).
+    pub fn boot_mapped(&self) -> bool {
+        self.boot_mapped
+    }
+
+    /// Power-on state of the Bus-owned I/O (E14_03, note 10): every I/O register is 0 (all values
+    /// UNKNOWN in note 10 are 0, so the LCD is off), the timer restarts from zero and the boot
+    /// ROM is mapped when one is installed. Call it after `reset`.
+    pub fn power_on(&mut self) {
+        self.io.fill(0x00);
+        self.timer = Timer::default();
+        self.p1_prev = p1_read(self.io[0x00], &self.input) & 0x0F;
+        self.remap_boot();
+    }
+
     /// Boot ROM byte at `addr` ($FF when out of range); never allocates (E14_02).
     fn boot_byte(&self, addr: u16) -> u8 {
         self.boot_rom
