@@ -67,6 +67,35 @@ impl Model {
     }
 }
 
+impl Model {
+    /// Expected boot ROM length in bytes (E15_04): Dmg 256, Sgb 256, Cgb 2304.
+    /// The Cgb length is UNKNOWN - to confirm (note 10 says 2048, the CLI/desktop code uses 2304).
+    pub fn boot_rom_len(self) -> usize {
+        match self {
+            Model::Dmg | Model::Sgb => Dmg::DMG_BOOT_ROM_LEN,
+            Model::Cgb => 2304,
+        }
+    }
+}
+
+/// Options used to build a machine (E15_04).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MachineConfig {
+    /// Console model to emulate.
+    pub model: Model,
+    /// Optional boot ROM image; its length must equal `Model::boot_rom_len`.
+    pub boot_rom: Option<Vec<u8>>,
+}
+
+/// Picks the model from the cartridge header (E15_04): Cgb when bit 7 of byte $0143 is set,
+/// otherwise Dmg. Never returns Sgb. A ROM shorter than $0144 bytes gives Dmg.
+pub fn auto_model(rom: &[u8]) -> Model {
+    match rom.get(0x0143) {
+        Some(flag) if flag & 0x80 != 0 => Model::Cgb,
+        _ => Model::Dmg,
+    }
+}
+
 /// Core machine interface (decisions A_01/A_04/A_05).
 pub trait Machine {
     /// Reset to the documented post-boot state at PC=$0100 without running the boot ROM
@@ -125,7 +154,7 @@ pub struct Dmg {
     frame_count: u64,
     /// Instruction trace ring (E08_04); empty and inactive until enabled.
     pub(crate) trace: Trace,
-    /// Console model (E14_04); always Dmg for now.
+    /// Console model (E14_04, E15_04).
     model: Model,
     /// Copy of the installed boot ROM image, kept so a loaded state can rebuild it (E14_04).
     boot_image: Option<Vec<u8>>,
@@ -177,8 +206,14 @@ impl Dmg {
         }
     }
 
-    /// Load a ROM image and build the machine in its post-boot state.
+    /// Load a ROM image and build a Dmg machine in its post-boot state.
     pub fn new(rom: &[u8]) -> Result<Dmg, LoadError> {
+        Dmg::with_config(rom, MachineConfig::default())
+    }
+
+    /// Builds a machine for `cfg.model` (E15_04). With a boot ROM the machine starts from the
+    /// power-on state at PC=$0000. A Cgb machine still behaves like a Dmg for now.
+    pub fn with_config(rom: &[u8], cfg: MachineConfig) -> Result<Dmg, LoadError> {
         if rom.len() < Self::MIN_ROM_LEN {
             return Err(LoadError::TooShort);
         }
@@ -193,23 +228,27 @@ impl Dmg {
             stat_line_prev: false, // no STAT request pending at power-up (E03_08)
             frame_count: 0,
             trace: Trace::default(),
-            model: Model::Dmg,
+            model: cfg.model,
             boot_image: None,
         };
-        dmg.reset();
+        if let Some(boot) = cfg.boot_rom {
+            dmg.bus
+                .set_boot_rom(&boot, cfg.model.boot_rom_len())
+                .map_err(|_| LoadError::BadBootRom)?;
+            dmg.boot_image = Some(boot);
+        }
+        dmg.reset(); // with a boot ROM installed this restarts from the power-on state
         Ok(dmg)
     }
 
     /// Builds a machine that starts from the power-on state at PC=$0000 with the boot ROM
     /// mapped (E14_03). The boot ROM must be exactly `DMG_BOOT_ROM_LEN` bytes.
     pub fn with_boot_rom(rom: &[u8], boot: &[u8]) -> Result<Dmg, LoadError> {
-        let mut dmg = Dmg::new(rom)?;
-        dmg.bus
-            .set_boot_rom(boot, Self::DMG_BOOT_ROM_LEN)
-            .map_err(|_| LoadError::BadBootRom)?;
-        dmg.boot_image = Some(boot.to_vec());
-        dmg.reset(); // a boot ROM is installed: restarts from the power-on state
-        Ok(dmg)
+        let cfg = MachineConfig {
+            model: Model::Dmg,
+            boot_rom: Some(boot.to_vec()),
+        };
+        Dmg::with_config(rom, cfg)
     }
 
     /// Power-on state used when a boot ROM is installed (E14_03, note 10): CPU registers, SP and
@@ -419,6 +458,73 @@ impl Machine for Dmg {
 mod tests {
     use super::*;
     use crate::audio::wave::WaveAccess;
+
+    #[test]
+    fn e15_04_auto_model_from_cgb_flag() {
+        for (flag, expected) in [
+            (0x00u8, Model::Dmg),
+            (0x80, Model::Cgb),
+            (0xC0, Model::Cgb),
+            (0x42, Model::Dmg),
+        ] {
+            let mut image = vec![0u8; 0x150];
+            image[0x0143] = flag;
+            assert_eq!(auto_model(&image), expected, "flag {flag:#04x}");
+        }
+        assert_eq!(auto_model(&[0xFFu8; 0x100]), Model::Dmg);
+        assert_eq!(auto_model(&[0x80u8; 0x143]), Model::Dmg);
+        assert_eq!(auto_model(&[]), Model::Dmg);
+    }
+
+    #[test]
+    fn e15_04_boot_rom_len_per_model() {
+        assert_eq!(Model::Dmg.boot_rom_len(), 256);
+        assert_eq!(Model::Sgb.boot_rom_len(), 256);
+        assert_eq!(Model::Cgb.boot_rom_len(), 2304);
+    }
+
+    #[test]
+    fn e15_04_with_config_cgb_reports_model() {
+        let cfg = MachineConfig {
+            model: Model::Cgb,
+            boot_rom: None,
+        };
+        let dmg = Dmg::with_config(&e14_03_cart(), cfg).expect("valid");
+        assert_eq!(dmg.model(), Model::Cgb);
+    }
+
+    #[test]
+    fn e15_04_with_config_default_matches_new() {
+        let plain = Dmg::new(&e14_03_cart()).expect("valid");
+        let configured = Dmg::with_config(&e14_03_cart(), MachineConfig::default()).expect("valid");
+        assert_eq!(configured.model(), Model::Dmg);
+        assert_eq!(configured.cpu.regs(), plain.cpu.regs());
+    }
+
+    #[test]
+    fn e15_04_with_config_checks_boot_rom_length() {
+        let bad = MachineConfig {
+            model: Model::Dmg,
+            boot_rom: Some(vec![0u8; 255]),
+        };
+        assert_eq!(
+            Dmg::with_config(&e14_03_cart(), bad).err(),
+            Some(LoadError::BadBootRom)
+        );
+        let wrong_for_cgb = MachineConfig {
+            model: Model::Cgb,
+            boot_rom: Some(vec![0u8; 256]),
+        };
+        assert_eq!(
+            Dmg::with_config(&e14_03_cart(), wrong_for_cgb).err(),
+            Some(LoadError::BadBootRom)
+        );
+        let good = MachineConfig {
+            model: Model::Dmg,
+            boot_rom: Some(e14_03_boot()),
+        };
+        assert!(Dmg::with_config(&e14_03_cart(), good).is_ok());
+    }
 
     /// 32 KiB ROM-only cartridge image: byte 0 is $AA, the rest is $00 (E14_03).
     fn e14_03_cart() -> Vec<u8> {

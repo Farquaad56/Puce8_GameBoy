@@ -17,6 +17,10 @@ impl Dmg {
     pub const MAX_STATE_BYTES: usize = 262_144;
 
     pub(super) fn write_machine_state(&self, w: &mut StateWriter<'_>) -> Result<(), StateError> {
+        // Temporary guard: only Dmg machines can be saved. Removed by E15_19 and E16_17.
+        if self.model != Model::Dmg {
+            return Err(StateError::InvalidState);
+        }
         w.put_header(self.bus.peek(0x0147))?;
         self.cpu.write_state(w)?;
         self.bus.write_state(w)?;
@@ -139,6 +143,18 @@ mod tests {
                 dmg.tick();
             }
         }
+    }
+
+    #[test]
+    fn e15_04_only_dmg_machines_can_be_saved() {
+        let cfg = crate::machine::MachineConfig {
+            model: Model::Cgb,
+            boot_rom: None,
+        };
+        let cgb = Dmg::with_config(&e14_04_cart(), cfg).expect("valid");
+        assert_eq!(cgb.save_state_vec(), Err(StateError::InvalidState));
+        let dmg = Dmg::new(&e14_04_cart()).expect("valid");
+        assert!(dmg.save_state_vec().is_ok());
     }
 
     #[test]

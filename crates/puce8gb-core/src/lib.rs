@@ -16,7 +16,7 @@ pub mod trace;
 pub mod video;
 
 pub use input::Input;
-pub use machine::{Dmg, LoadError, Machine};
+pub use machine::{auto_model, Dmg, LoadError, Machine, MachineConfig, Model};
 pub use savestate::StateError;
 
 /// Emulator core version string.
