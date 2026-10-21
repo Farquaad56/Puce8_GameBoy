@@ -1,0 +1,5 @@
+rom: roms/test-roms/cgb-acid2/cgb-acid2.gbc
+model: cgb
+frames: 120
+hash: 8c0a422078d38470
+status: observed, NOT approved (the user approves it after looking at the image)

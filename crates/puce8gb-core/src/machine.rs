@@ -695,6 +695,19 @@ mod tests {
         assert!(diff <= 1 || diff == 255, "normal {n} double {d}");
     }
 
+    #[test]
+    fn e15_21_cgb_palette_expansion_matches_the_acid2_reference_formula() {
+        // cgb-acid2 README: each 5-bit component becomes (c << 3) | (c >> 2).
+        for c in 0u8..32 {
+            let expected = (c << 3) | (c >> 2);
+            assert_eq!(crate::video::rgb555_to_rgb888(c, 0)[0], expected);
+            assert_eq!(crate::video::rgb555_to_rgb888(c << 5, c >> 3)[1], expected);
+            assert_eq!(crate::video::rgb555_to_rgb888(0, c << 2)[2], expected);
+        }
+        assert_eq!(crate::video::rgb555_to_rgb888(0x1F, 0x00), [255, 0, 0]);
+        assert_eq!(crate::video::rgb555_to_rgb888(0xFF, 0x7F), [255, 255, 255]);
+    }
+
     fn e15_13_machine(model: Model, rom: &[u8]) -> Dmg {
         let cfg = MachineConfig {
             model,
