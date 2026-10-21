@@ -383,8 +383,11 @@ impl Machine for Dmg {
         // are filled in by later tasks.
         self.dot_phase = (self.dot_phase + 1) % 4;
         if self.dot_phase == 0 {
-            self.trace_instruction_start();
-            self.cpu.tick(&mut self.bus);
+            // A running HDMA transfer suspends the CPU (E15_14, note 11c); the other chips keep running.
+            if !self.bus.hdma_stalled() {
+                self.trace_instruction_start();
+                self.cpu.tick(&mut self.bus);
+            }
             // Timer advances one M-cycle per M-cycle, after the CPU so a DIV/TAC write is
             // visible in the same dot (decision A_01). The timer tick returns true when the
             // delayed request of an overflow by increment lands: one M-cycle after the

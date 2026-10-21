@@ -13,6 +13,8 @@ pub const IO_SIZE: usize = 0x100;
 #[cfg(test)]
 mod boot_tests;
 #[cfg(test)]
+mod cgb_hdma_tests;
+#[cfg(test)]
 mod cgb_opri_tests;
 #[cfg(test)]
 mod cgb_palette_tests;
@@ -153,6 +155,11 @@ pub struct Bus {
     /// True for a Cgb machine running a DMG-only cartridge ($0143 bit 7 clear) (E15_13): the DMG
     /// rendering path is used and OPRI reads and acts as 1.
     pub(crate) compat: bool,
+    /// HDMA1-HDMA4 ($FF51-$FF54) as written, write-only registers (E15_14, note 11c). The masks
+    /// (source & $FFF0, destination & $1FF0) are applied when a transfer starts.
+    hdma_regs: [u8; 4],
+    /// M-cycles during which the CPU is suspended by a running HDMA transfer (E15_14).
+    hdma_stall: u16,
 }
 
 impl Bus {
@@ -200,6 +207,8 @@ impl Bus {
             ocps: 0,
             opri: 0,
             compat: false,
+            hdma_regs: [0; 4], // power-up value UNKNOWN - to confirm (E15_14)
+            hdma_stall: 0,
             svbk: 0, // SVBK bits 0-2 (E15_06)
         }
     }
@@ -230,6 +239,8 @@ impl Bus {
         self.wram.fill(0x00);
         self.wram_hi.fill(0x00); // WRAM banks 2-7 (E15_06)
         self.svbk = 0; // bank 1 selected, SVBK reads $F8 (E15_06, note 11a)
+        self.hdma_regs = [0; 4]; // E15_14
+        self.hdma_stall = 0; // E15_14
         self.vbk = 0; // VRAM bank 0 selected by the CPU (E15_07)
                       // Palette RAM (E15_08, note 11b): the boot ROM leaves every BG color white; $FF is used for
                       // each byte (bit 15 is ignored, so $FFFF is white). OBJ colors are uninitialized on hardware:
@@ -402,6 +413,31 @@ impl Bus {
         }
         if *spec & 0x80 != 0 {
             *spec = 0x80 | (((*spec & 0x3F) + 1) & 0x3F);
+        }
+    }
+
+    /// General-purpose HDMA (E15_14, note 11c): copies `blocks` x 16 bytes at once from the source
+    /// of HDMA1-2 (& $FFF0) to VRAM at the destination of HDMA3-4 (& $1FF0), in the bank selected by
+    /// VBK, ignoring the PPU access blocking. The CPU is suspended 8 M-cycles per block (normal
+    /// speed; double speed: E15_17). A destination that runs past $9FFF wraps inside VRAM, the real
+    /// behavior is UNKNOWN - to confirm (not documented).
+    fn hdma_general(&mut self, blocks: u16) {
+        let src = ((u16::from(self.hdma_regs[0]) << 8) | u16::from(self.hdma_regs[1])) & 0xFFF0;
+        let dst = ((u16::from(self.hdma_regs[2]) << 8) | u16::from(self.hdma_regs[3])) & 0x1FF0;
+        for i in 0..blocks * 16 {
+            let byte = self.peek(src.wrapping_add(i));
+            self.vram_cpu_write(0x8000 | ((dst + i) & 0x1FFF), byte);
+        }
+        self.hdma_stall = self.hdma_stall.saturating_add(blocks * 8);
+    }
+
+    /// True when a running HDMA transfer suspends the CPU for this M-cycle; consumes one cycle (E15_14).
+    pub(crate) fn hdma_stalled(&mut self) -> bool {
+        if self.hdma_stall > 0 {
+            self.hdma_stall -= 1;
+            true
+        } else {
+            false
         }
     }
 
@@ -664,6 +700,13 @@ impl Bus {
                 WaveAccess::Closed => {}
                 WaveAccess::Open(i) => self.io[0x30 + usize::from(i & 15)] = val,
             },
+            0xFF51..=0xFF54 if self.cgb => self.hdma_regs[usize::from(addr - 0xFF51)] = val, // HDMA1-4, write-only (E15_14)
+            0xFF55 if self.cgb => {
+                // Bit 7 = 0: general-purpose transfer of ((val & $7F) + 1) x 16 bytes (E15_14). Bit 7 = 1 (HBlank mode): E15_15.
+                if val & 0x80 == 0 {
+                    self.hdma_general(u16::from(val & 0x7F) + 1);
+                }
+            }
             0xFF70 if self.cgb => self.svbk = val & 0x07, // SVBK: only bits 0-2 are kept (E15_06, note 11a)
             0xFF4F if self.cgb => self.vbk = val & 0x01, // VBK: only bit 0 matters (E15_07, note 11a)
             0xFF68 if self.cgb => self.bcps = val & 0xBF, // BCPS: bit 7 auto-increment, bits 5-0 index (E15_08)
