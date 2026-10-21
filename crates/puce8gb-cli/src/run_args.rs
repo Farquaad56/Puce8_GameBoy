@@ -5,6 +5,15 @@
 /// Default execution budget in T-cycles: 100_000_000.
 const DEFAULT_MAX_CYCLES: u64 = 100_000_000;
 
+/// Console model selection of `--model auto|dmg|cgb` (E15_20). `auto` picks the model from the
+/// cartridge header with `puce8gb_core::auto_model`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelChoice {
+    Auto,
+    Dmg,
+    Cgb,
+}
+
 /// Parsed arguments of the `run` command (task C01_43). No ROM is executed yet.
 pub struct RunArgs {
     /// Path of the ROM to run (first positional argument).
@@ -30,6 +39,8 @@ pub struct RunArgs {
     pub load_state: Option<String>,
     /// Boot ROM file to start from (`--boot-rom FILE`, E14_05).
     pub boot_rom: Option<String>,
+    /// Console model (`--model auto|dmg|cgb`, E15_20); default auto.
+    pub model: ModelChoice,
     /// Suppress the serial echo on stdout; set by the suite runner, not a CLI flag (E06_01).
     pub quiet: bool,
 }
@@ -49,6 +60,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
     let mut save_state: Option<String> = None;
     let mut load_state: Option<String> = None;
     let mut boot_rom: Option<String> = None;
+    let mut model = ModelChoice::Auto;
 
     let mut i = 0;
     while i < args.len() {
@@ -63,6 +75,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
             "--save-state" => save_state = Some(value(args, &mut i, "--save-state")?),
             "--load-state" => load_state = Some(value(args, &mut i, "--load-state")?),
             "--boot-rom" => boot_rom = Some(value(args, &mut i, "--boot-rom")?),
+            "--model" => model = model_choice(args, &mut i)?,
             other if other.starts_with("--") => return Err(format!("unknown flag: {other}")),
             positional => {
                 if rom.is_none() {
@@ -101,8 +114,20 @@ pub fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
         save_state,
         load_state,
         boot_rom,
+        model,
         quiet: false,
     })
+}
+
+/// Take the value of `--model` (E15_20): `auto`, `dmg` or `cgb`. `sgb` is rejected until E16.
+fn model_choice(args: &[String], i: &mut usize) -> Result<ModelChoice, String> {
+    match value(args, i, "--model")?.as_str() {
+        "auto" => Ok(ModelChoice::Auto),
+        "dmg" => Ok(ModelChoice::Dmg),
+        "cgb" => Ok(ModelChoice::Cgb),
+        "sgb" => Err("--model sgb is not supported yet".to_string()),
+        _ => Err("--model expects auto, dmg or cgb".to_string()),
+    }
 }
 
 /// Take the value of a flag that expects a hex byte (the next argument), with or without
@@ -174,6 +199,39 @@ mod tests {
             err,
             "--boot-rom cannot be combined with --save-state or --load-state"
         );
+    }
+
+    #[test]
+    fn e15_20_model_default_is_auto() {
+        let a = parse_run_args(&[arg("game.gb")]).expect("a rom path parses");
+        assert_eq!(a.model, ModelChoice::Auto);
+    }
+
+    #[test]
+    fn e15_20_model_parses_auto_dmg_and_cgb() {
+        for (text, expected) in [
+            ("auto", ModelChoice::Auto),
+            ("dmg", ModelChoice::Dmg),
+            ("cgb", ModelChoice::Cgb),
+        ] {
+            let a = parse_run_args(&[arg("game.gb"), arg("--model"), arg(text)])
+                .expect("the value parses");
+            assert_eq!(a.model, expected, "value {text}");
+        }
+    }
+
+    #[test]
+    fn e15_20_model_bad_value_is_a_usage_error() {
+        let err = err_of(&[arg("game.gb"), arg("--model"), arg("gbc")]);
+        assert_eq!(err, "--model expects auto, dmg or cgb");
+        let err = err_of(&[arg("game.gb"), arg("--model")]);
+        assert_eq!(err, "--model requires a value");
+    }
+
+    #[test]
+    fn e15_20_model_sgb_is_rejected_until_e16() {
+        let err = err_of(&[arg("game.gb"), arg("--model"), arg("sgb")]);
+        assert_eq!(err, "--model sgb is not supported yet");
     }
 
     /// The error message of a parse that must fail.

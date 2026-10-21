@@ -6,7 +6,7 @@ use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
 
-use puce8gb_core::{Dmg, Machine};
+use puce8gb_core::Machine;
 
 use crate::hash;
 use crate::run::{self, Outcome};
@@ -42,6 +42,7 @@ fn entry_args(entry: &Entry) -> RunArgs {
         save_state: None,
         load_state: None,
         boot_rom: None,
+        model: crate::run_args::ModelChoice::Auto,
         quiet: true,
     }
 }
@@ -72,7 +73,7 @@ pub fn run_entry(entry: &Entry, rom: &[u8]) -> EntryResult {
             Outcome::FramesDone => EntryResult::Fail("unexpected outcome".to_string()),
         },
         Kind::Mooneye => {
-            let mut dmg = match Dmg::new(rom) {
+            let mut dmg = match run::new_machine(rom, None, crate::run_args::ModelChoice::Auto) {
                 Ok(dmg) => dmg,
                 Err(_) => return EntryResult::Fail("cannot load ROM".to_string()),
             };
@@ -341,6 +342,7 @@ mod tests {
                 save_state: None,
                 load_state: None,
                 boot_rom: None,
+                model: crate::run_args::ModelChoice::Auto,
                 quiet: true,
             },
             2,

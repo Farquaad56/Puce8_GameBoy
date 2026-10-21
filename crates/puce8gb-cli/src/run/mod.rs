@@ -9,9 +9,9 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use puce8gb_core::savestate::HEADER_LEN;
-use puce8gb_core::{Dmg, LoadError, Machine, StateError};
+use puce8gb_core::{auto_model, Dmg, LoadError, Machine, MachineConfig, Model, StateError};
 
-use crate::run_args::RunArgs;
+use crate::run_args::{ModelChoice, RunArgs};
 // Re-exported for later tasks (C01_47+); bin-only crate, so unused names need an allow.
 #[allow(unused_imports)]
 pub use crate::serial_scan::{scan_serial, Scan, FAIL_MARKER};
@@ -81,7 +81,7 @@ pub fn trace_line(
 /// the caller reads the bytes. Builds the machine and delegates to `run_machine`. With
 /// `--ly-fixed HEX`, every $FF44 read returns that value (task C01_49).
 pub fn run_rom(rom: &[u8], args: &RunArgs) -> Outcome {
-    let mut dmg = match Dmg::new(rom) {
+    let mut dmg = match new_machine(rom, None, args.model) {
         Ok(dmg) => dmg,
         Err(_) => return Outcome::LoadError,
     };
@@ -94,7 +94,7 @@ pub fn run_rom(rom: &[u8], args: &RunArgs) -> Outcome {
 /// Run `frames` frames of a ROM image (E03_16 spec) and return the outcome with a copy of the
 /// final framebuffer (empty on a load error). No file access: the caller reads and writes files.
 pub fn run_frames(rom: &[u8], args: &RunArgs, frames: u64) -> (Outcome, Vec<u32>) {
-    let mut dmg = match Dmg::new(rom) {
+    let mut dmg = match new_machine(rom, None, args.model) {
         Ok(dmg) => dmg,
         Err(_) => return (Outcome::LoadError, Vec::new()),
     };
@@ -126,7 +126,7 @@ pub fn run_frames_state(
     load: Option<&[u8]>,
     save: bool,
 ) -> Result<FramesRun, StateError> {
-    let mut dmg = match Dmg::new(rom) {
+    let mut dmg = match new_machine(rom, None, args.model) {
         Ok(dmg) => dmg,
         Err(_) => {
             return Ok(FramesRun {
@@ -272,23 +272,49 @@ pub enum BuildError {
 
 /// Builds the machine for the `run` command (E14_05): plain `Dmg::new` without a boot ROM,
 /// `Dmg::with_boot_rom` with one. No file access: the caller reads the bytes.
+#[cfg(test)]
 pub fn build_machine(rom: &[u8], boot: Option<&[u8]>) -> Result<Dmg, BuildError> {
-    match boot {
-        None => Dmg::new(rom).map_err(|_| BuildError::BadRom),
-        Some(boot) => Dmg::with_boot_rom(rom, boot).map_err(|err| {
-            if err == LoadError::BadBootRom {
-                BuildError::BadBoot
-            } else {
-                BuildError::BadRom
-            }
-        }),
+    build_machine_model(rom, boot, ModelChoice::Auto)
+}
+
+/// Model of a machine for a `--model` choice (E15_20): `auto` follows the cartridge header.
+fn model_for(rom: &[u8], choice: ModelChoice) -> Model {
+    match choice {
+        ModelChoice::Auto => auto_model(rom),
+        ModelChoice::Dmg => Model::Dmg,
+        ModelChoice::Cgb => Model::Cgb,
     }
+}
+
+/// Builds a machine of the chosen model, with an optional boot ROM whose length the core checks
+/// against the model (E15_20). No file access.
+pub fn new_machine(rom: &[u8], boot: Option<&[u8]>, choice: ModelChoice) -> Result<Dmg, LoadError> {
+    let cfg = MachineConfig {
+        model: model_for(rom, choice),
+        boot_rom: boot.map(<[u8]>::to_vec),
+    };
+    Dmg::with_config(rom, cfg)
+}
+
+/// Like `new_machine`, with the errors mapped for the `run` command (E15_20).
+pub fn build_machine_model(
+    rom: &[u8],
+    boot: Option<&[u8]>,
+    choice: ModelChoice,
+) -> Result<Dmg, BuildError> {
+    new_machine(rom, boot, choice).map_err(|err| {
+        if err == LoadError::BadBootRom {
+            BuildError::BadBoot
+        } else {
+            BuildError::BadRom
+        }
+    })
 }
 
 /// Runs a ROM with a boot ROM (E14_05): frames mode when `--frames` is given, else the
 /// M-cycle loop of `run_machine`. Only this function and `execute` touch files.
 fn execute_with_boot(args: &RunArgs, rom: &[u8], boot: &[u8]) -> ExitCode {
-    let mut dmg = match build_machine(rom, Some(boot)) {
+    let mut dmg = match build_machine_model(rom, Some(boot), args.model) {
         Ok(dmg) => dmg,
         Err(BuildError::BadBoot) => {
             eprintln!("error: boot ROM rejected");

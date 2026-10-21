@@ -33,6 +33,7 @@ fn args(max_cycles: u64, expect_serial: Option<&str>) -> RunArgs {
         save_state: None,
         load_state: None,
         boot_rom: None,
+        model: ModelChoice::Auto,
         quiet: false,
     }
 }
@@ -83,6 +84,45 @@ fn e14_05_without_boot_rom_the_plain_machine_is_built() {
     let dmg = build_machine(&rom, None).expect("valid ROM");
     assert_eq!(dmg.cpu.pc, 0x0100);
     assert!(!dmg.bus.boot_mapped());
+}
+
+#[test]
+fn e15_20_auto_model_follows_the_cartridge_header() {
+    let mut rom = vec![0x00u8; 0x8000];
+    rom[0x0143] = 0x80;
+    let cgb = build_machine_model(&rom, None, ModelChoice::Auto).expect("valid ROM");
+    assert_eq!(cgb.model(), Model::Cgb);
+    rom[0x0143] = 0x00;
+    let dmg = build_machine_model(&rom, None, ModelChoice::Auto).expect("valid ROM");
+    assert_eq!(dmg.model(), Model::Dmg);
+}
+
+#[test]
+fn e15_20_explicit_model_overrides_the_header() {
+    let mut rom = vec![0x00u8; 0x8000];
+    rom[0x0143] = 0x80;
+    let dmg = build_machine_model(&rom, None, ModelChoice::Dmg).expect("valid ROM");
+    assert_eq!(dmg.model(), Model::Dmg);
+    rom[0x0143] = 0x00;
+    let cgb = build_machine_model(&rom, None, ModelChoice::Cgb).expect("valid ROM");
+    assert_eq!(cgb.model(), Model::Cgb);
+}
+
+#[test]
+fn e15_20_boot_rom_length_is_checked_against_the_model() {
+    let rom = vec![0x00u8; 0x8000];
+    let short = vec![0u8; 256];
+    let long = vec![0u8; 2304];
+    assert!(build_machine_model(&rom, Some(&short), ModelChoice::Dmg).is_ok());
+    assert_eq!(
+        build_machine_model(&rom, Some(&short), ModelChoice::Cgb).err(),
+        Some(BuildError::BadBoot)
+    );
+    assert!(build_machine_model(&rom, Some(&long), ModelChoice::Cgb).is_ok());
+    assert_eq!(
+        build_machine_model(&rom, Some(&long), ModelChoice::Dmg).err(),
+        Some(BuildError::BadBoot)
+    );
 }
 
 #[test]
