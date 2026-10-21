@@ -13,6 +13,8 @@ pub const IO_SIZE: usize = 0x100;
 #[cfg(test)]
 mod boot_tests;
 #[cfg(test)]
+mod cgb_vram_tests;
+#[cfg(test)]
 mod cgb_wram_tests;
 mod state;
 
@@ -129,6 +131,11 @@ pub struct Bus {
     wram_hi: Box<[u8]>,
     /// SVBK ($FF70) bits 0-2 as written; a value 0 selects bank 1 (E15_06).
     svbk: u8,
+    /// VRAM bank 1 of the Cgb model, 8 KiB (E15_07). Bank 0 stays in `vram`, which the PPU
+    /// reads directly, so the Dmg layout and the save state layout are unchanged.
+    vram1: Box<[u8]>,
+    /// VBK ($FF4F) bit 0: the VRAM bank seen by the CPU on Cgb (E15_07).
+    vbk: u8,
 }
 
 impl Bus {
@@ -168,6 +175,8 @@ impl Bus {
             boot_mapped: false,      // cartridge visible from power-up (E14_02)
             cgb: false,              // Dmg bus until Dmg::with_config says otherwise (E15_05)
             wram_hi: vec![0x00; 0x6000].into_boxed_slice(), // WRAM banks 2-7 (E15_06)
+            vram1: vec![0x00; 0x2000].into_boxed_slice(), // VRAM bank 1 (E15_07)
+            vbk: 0,                  // VBK bit 0 (E15_07)
             svbk: 0,                 // SVBK bits 0-2 (E15_06)
         }
     }
@@ -198,6 +207,7 @@ impl Bus {
         self.wram.fill(0x00);
         self.wram_hi.fill(0x00); // WRAM banks 2-7 (E15_06)
         self.svbk = 0; // bank 1 selected, SVBK reads $F8 (E15_06, note 11a)
+        self.vbk = 0; // VRAM bank 0 selected by the CPU (E15_07)
         self.hram.fill(0x00);
         // Cartridge RAM is NOT kept across reset (E05_07): rebuild the mapper from the ROM;
         // the frontend reloads battery RAM with load_battery_ram.
@@ -319,6 +329,38 @@ impl Bus {
         self.remap_boot();
     }
 
+    /// VRAM byte at `addr` ($8000-$9FFF) as the CPU sees it (E15_07): bank 1 when the Cgb model
+    /// has VBK bit 0 set, bank 0 otherwise. No PPU blocking here, callers apply it.
+    fn vram_cpu(&self, addr: u16) -> u8 {
+        let off = usize::from(addr - 0x8000);
+        if self.cgb && self.vbk & 1 == 1 {
+            self.vram1[off]
+        } else {
+            self.vram[off]
+        }
+    }
+
+    /// Writes the VRAM byte the CPU sees at `addr` ($8000-$9FFF), same bank rule as `vram_cpu`.
+    fn vram_cpu_write(&mut self, addr: u16, val: u8) {
+        let off = usize::from(addr - 0x8000);
+        if self.cgb && self.vbk & 1 == 1 {
+            self.vram1[off] = val;
+        } else {
+            self.vram[off] = val;
+        }
+    }
+
+    /// VRAM byte of a given bank for the PPU (E15_07, used by E15_10 and E15_11): `bank` 0 or 1,
+    /// `addr` in $8000-$9FFF. Any other bank reads $FF. Ignores VBK and the CPU blocking rules.
+    pub fn vram_bank(&self, bank: usize, addr: u16) -> u8 {
+        let off = usize::from(addr.wrapping_sub(0x8000)) & 0x1FFF;
+        match bank {
+            0 => self.vram[off],
+            1 => self.vram1[off],
+            _ => 0xFF,
+        }
+    }
+
     /// Reads WRAM or echo RAM at `addr` in $C000-$FDFF (E15_06). On Cgb, $D000-$DFFF and
     /// $F000-$FDFF use the bank selected by SVBK (a value 0 selects bank 1); on every other
     /// model the 8 KiB array is used as is.
@@ -373,7 +415,7 @@ impl Bus {
             0x0000..=0x7FFF => self.mapper.read(addr), // cartridge ROM region through the mapper (E05_07); past the image reads $FF
             0x8000..=0x9FFF => {
                 if self.vram_open {
-                    self.vram[(addr - 0x8000) as usize]
+                    self.vram_cpu(addr)
                 } else {
                     0xFF // blocked by the PPU mode: reads $FF (E03_10 spec)
                 }
@@ -416,6 +458,7 @@ impl Bus {
             },
             0xFF02 => self.io[0x02] | 0x7E, // SC ($FF02): bits 6-1 are unused and read 1 on DMG (mooneye unused_hwio-GS, FIX_05)
             0xFF70 if self.cgb => 0xF8 | self.svbk, // SVBK: bits 3-7 read 1, bits 0-2 as written (E15_06, note 11a); a written 0 reading back as 0 is UNKNOWN - to confirm
+            0xFF4F if self.cgb => 0xFE | self.vbk, // VBK: bits 7-1 read 1, bit 0 is the bank (E15_07, note 11a)
             0xFF03 | 0xFF08..=0xFF0E | 0xFF4C..=0xFF7F => 0xFF, // unmapped I/O reads $FF (mooneye unused_hwio-GS, FIX_05)
             0xFF01..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
@@ -454,7 +497,7 @@ impl Bus {
             0x0000..=0x7FFF => self.mapper.write(addr, val), // cartridge registers through the mapper (E05_07)
             0x8000..=0x9FFF => {
                 if self.vram_write_ok {
-                    self.vram[(addr - 0x8000) as usize] = val;
+                    self.vram_cpu_write(addr, val);
                 } // blocked by the PPU mode: writes are ignored (E03_10 spec, FIX_10)
             }
             0xA000..=0xBFFF => self.mapper.write(addr, val), // cartridge RAM through the mapper; absent or disabled RAM ignores it (E05_07)
@@ -527,6 +570,7 @@ impl Bus {
                 WaveAccess::Open(i) => self.io[0x30 + usize::from(i & 15)] = val,
             },
             0xFF70 if self.cgb => self.svbk = val & 0x07, // SVBK: only bits 0-2 are kept (E15_06, note 11a)
+            0xFF4F if self.cgb => self.vbk = val & 0x01, // VBK: only bit 0 matters (E15_07, note 11a)
             0xFF03 | 0xFF08..=0xFF0E | 0xFF4C..=0xFF7F => {} // unmapped I/O: writes are ignored (mooneye unused_hwio-GS, FIX_05)
             0xFF01..=0xFF7F => {
                 self.io[(addr - 0xFF00) as usize] = val;
@@ -670,7 +714,7 @@ impl Bus {
         }
         match addr {
             0x0000..=0x7FFF => self.mapper.read(addr), // cartridge ROM region through the mapper (E05_07); past the image reads $FF
-            0x8000..=0x9FFF => self.vram[(addr - 0x8000) as usize],
+            0x8000..=0x9FFF => self.vram_cpu(addr),
             0xA000..=0xBFFF => self.mapper.read(addr), // cartridge RAM region through the mapper (E05_07); absent or disabled RAM reads $FF
             0xC000..=0xDFFF => self.wram_read(addr),
             0xE000..=0xFDFF => {
@@ -690,6 +734,7 @@ impl Bus {
             0xFF07 => 0xF8 | self.timer.tac(),
             0xFF02 => self.io[0x02] | 0x7E, // same as read() (FIX_05)
             0xFF70 if self.cgb => 0xF8 | self.svbk, // same as read() (E15_06)
+            0xFF4F if self.cgb => 0xFE | self.vbk, // same as read() (E15_07)
             0xFF03 | 0xFF08..=0xFF0E | 0xFF4C..=0xFF7F => 0xFF, // same as read() (FIX_05)
             0xFF01..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
