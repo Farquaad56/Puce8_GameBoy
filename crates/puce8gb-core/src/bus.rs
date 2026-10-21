@@ -12,6 +12,8 @@ use crate::timer::Timer;
 pub const IO_SIZE: usize = 0x100;
 #[cfg(test)]
 mod boot_tests;
+#[cfg(test)]
+mod cgb_wram_tests;
 mod state;
 
 /// Error returned by `Bus::set_boot_rom` (E14_02).
@@ -122,6 +124,11 @@ pub struct Bus {
     boot_mapped: bool,
     /// True for the Cgb model (E15_05): selects the CGB post-boot I/O values in `reset`.
     pub(crate) cgb: bool,
+    /// WRAM banks 2-7 of the Cgb model, 6 x 4 KiB (E15_06). Banks 0 and 1 live in `wram`, so the
+    /// Dmg layout and the save state layout are unchanged.
+    wram_hi: Box<[u8]>,
+    /// SVBK ($FF70) bits 0-2 as written; a value 0 selects bank 1 (E15_06).
+    svbk: u8,
 }
 
 impl Bus {
@@ -160,6 +167,8 @@ impl Bus {
             boot_rom: None,          // no boot ROM installed by default (E14_02)
             boot_mapped: false,      // cartridge visible from power-up (E14_02)
             cgb: false,              // Dmg bus until Dmg::with_config says otherwise (E15_05)
+            wram_hi: vec![0x00; 0x6000].into_boxed_slice(), // WRAM banks 2-7 (E15_06)
+            svbk: 0,                 // SVBK bits 0-2 (E15_06)
         }
     }
 
@@ -187,6 +196,8 @@ impl Bus {
         // power-up", decision A_05); echo RAM mirrors the current WRAM bank by routing,
         // so it carries no separate state.
         self.wram.fill(0x00);
+        self.wram_hi.fill(0x00); // WRAM banks 2-7 (E15_06)
+        self.svbk = 0; // bank 1 selected, SVBK reads $F8 (E15_06, note 11a)
         self.hram.fill(0x00);
         // Cartridge RAM is NOT kept across reset (E05_07): rebuild the mapper from the ROM;
         // the frontend reloads battery RAM with load_battery_ram.
@@ -308,6 +319,28 @@ impl Bus {
         self.remap_boot();
     }
 
+    /// Reads WRAM or echo RAM at `addr` in $C000-$FDFF (E15_06). On Cgb, $D000-$DFFF and
+    /// $F000-$FDFF use the bank selected by SVBK (a value 0 selects bank 1); on every other
+    /// model the 8 KiB array is used as is.
+    fn wram_read(&self, addr: u16) -> u8 {
+        let off = usize::from(addr) & 0x1FFF;
+        if self.cgb && off >= 0x1000 && self.svbk > 1 {
+            self.wram_hi[usize::from(self.svbk - 2) * 0x1000 + (off - 0x1000)]
+        } else {
+            self.wram[off]
+        }
+    }
+
+    /// Writes WRAM or echo RAM at `addr` in $C000-$FDFF, same mapping as `wram_read` (E15_06).
+    fn wram_write(&mut self, addr: u16, val: u8) {
+        let off = usize::from(addr) & 0x1FFF;
+        if self.cgb && off >= 0x1000 && self.svbk > 1 {
+            self.wram_hi[usize::from(self.svbk - 2) * 0x1000 + (off - 0x1000)] = val;
+        } else {
+            self.wram[off] = val;
+        }
+    }
+
     /// Boot ROM byte at `addr` ($FF when out of range); never allocates (E14_02).
     fn boot_byte(&self, addr: u16) -> u8 {
         self.boot_rom
@@ -347,13 +380,13 @@ impl Bus {
             }
             0xA000..=0xBFFF => self.mapper.read(addr), // cartridge RAM region through the mapper (E05_07); absent or disabled RAM reads $FF
             0xC000..=0xDFFF => {
-                // WRAM: lower 14 bits of the address index into the 8 KiB array.
-                self.wram[((addr - 0xC000) as usize) & 0x3FFF]
+                // WRAM: bank 0 and the SVBK bank on Cgb, the 8 KiB array otherwise (E15_06).
+                self.wram_read(addr)
             }
             0xE000..=0xFDFF => {
                 // Echo RAM: only the lower 13 bits of the address are connected, so it wraps onto
                 // the current WRAM bank (C000-C7FF on DMG) exactly like a read (note 03a "Echo RAM").
-                self.wram[(addr as usize) & 0x1FFF]
+                self.wram_read(addr)
             }
             0xFE00..=0xFE9F => {
                 if self.oam_open {
@@ -382,6 +415,7 @@ impl Bus {
                 WaveAccess::Open(i) => self.io[0x30 + usize::from(i & 15)],
             },
             0xFF02 => self.io[0x02] | 0x7E, // SC ($FF02): bits 6-1 are unused and read 1 on DMG (mooneye unused_hwio-GS, FIX_05)
+            0xFF70 if self.cgb => 0xF8 | self.svbk, // SVBK: bits 3-7 read 1, bits 0-2 as written (E15_06, note 11a); a written 0 reading back as 0 is UNKNOWN - to confirm
             0xFF03 | 0xFF08..=0xFF0E | 0xFF4C..=0xFF7F => 0xFF, // unmapped I/O reads $FF (mooneye unused_hwio-GS, FIX_05)
             0xFF01..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
@@ -424,11 +458,11 @@ impl Bus {
                 } // blocked by the PPU mode: writes are ignored (E03_10 spec, FIX_10)
             }
             0xA000..=0xBFFF => self.mapper.write(addr, val), // cartridge RAM through the mapper; absent or disabled RAM ignores it (E05_07)
-            0xC000..=0xDFFF => self.wram[(addr - 0xC000) as usize] = val,
+            0xC000..=0xDFFF => self.wram_write(addr, val),
             0xE000..=0xFDFF => {
                 // Echo RAM: only the lower 13 bits of the address are connected, so it wraps onto
                 // the current WRAM bank (C000-C7FF on DMG) exactly like a read (note 03a "Echo RAM").
-                self.wram[(addr as usize) & 0x1FFF] = val;
+                self.wram_write(addr, val);
             }
             0xFE00..=0xFE9F => {
                 if self.oam_write_ok {
@@ -492,6 +526,7 @@ impl Bus {
                 WaveAccess::Closed => {}
                 WaveAccess::Open(i) => self.io[0x30 + usize::from(i & 15)] = val,
             },
+            0xFF70 if self.cgb => self.svbk = val & 0x07, // SVBK: only bits 0-2 are kept (E15_06, note 11a)
             0xFF03 | 0xFF08..=0xFF0E | 0xFF4C..=0xFF7F => {} // unmapped I/O: writes are ignored (mooneye unused_hwio-GS, FIX_05)
             0xFF01..=0xFF7F => {
                 self.io[(addr - 0xFF00) as usize] = val;
@@ -637,11 +672,11 @@ impl Bus {
             0x0000..=0x7FFF => self.mapper.read(addr), // cartridge ROM region through the mapper (E05_07); past the image reads $FF
             0x8000..=0x9FFF => self.vram[(addr - 0x8000) as usize],
             0xA000..=0xBFFF => self.mapper.read(addr), // cartridge RAM region through the mapper (E05_07); absent or disabled RAM reads $FF
-            0xC000..=0xDFFF => self.wram[(addr - 0xC000) as usize],
+            0xC000..=0xDFFF => self.wram_read(addr),
             0xE000..=0xFDFF => {
                 // Echo RAM: only the lower 13 bits of the address are connected, so it wraps onto
                 // the current WRAM bank (C000-C7FF on DMG) exactly like a read/write (note 03a "Echo RAM").
-                self.wram[(addr as usize) & 0x1FFF]
+                self.wram_read(addr)
             }
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize],
             0xFEA0..=0xFEFF => 0x00, // unusable range: $00 on DMG outside OAM block (note 03a)
@@ -654,6 +689,7 @@ impl Bus {
             0xFF06 => self.timer.tma(), // TMA ($FF06, note 01b)
             0xFF07 => 0xF8 | self.timer.tac(),
             0xFF02 => self.io[0x02] | 0x7E, // same as read() (FIX_05)
+            0xFF70 if self.cgb => 0xF8 | self.svbk, // same as read() (E15_06)
             0xFF03 | 0xFF08..=0xFF0E | 0xFF4C..=0xFF7F => 0xFF, // same as read() (FIX_05)
             0xFF01..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
