@@ -85,6 +85,8 @@ struct App {
     boot_dmg: String,
     boot_gbc: String,
     boot_sgb: String,
+    /// Boot ROM fallback text to show with the next "ROM loaded" status (E14_07).
+    boot_note: Option<String>,
 }
 
 impl App {
@@ -138,6 +140,7 @@ impl App {
             boot_dmg: loaded.boot_dmg.clone(),
             boot_gbc: loaded.boot_gbc.clone(),
             boot_sgb: loaded.boot_sgb.clone(),
+            boot_note: None,
         };
         app.apply_palette();
         app.lcd.set_mode(loaded.lcd_mode);
@@ -211,6 +214,67 @@ impl App {
         }
     }
 
+    /// Boot ROM file of the given kind (E14_07).
+    fn boot_path(&self, kind: boot_rom::BootKind) -> &str {
+        match kind {
+            boot_rom::BootKind::Dmg => &self.boot_dmg,
+            boot_rom::BootKind::Gbc => &self.boot_gbc,
+            boot_rom::BootKind::Sgb => &self.boot_sgb,
+        }
+    }
+
+    /// Stores the boot ROM path of the given kind and saves the settings (E14_07).
+    fn set_boot_path(&mut self, kind: boot_rom::BootKind, path: String) {
+        match kind {
+            boot_rom::BootKind::Dmg => self.boot_dmg = path,
+            boot_rom::BootKind::Gbc => self.boot_gbc = path,
+            boot_rom::BootKind::Sgb => self.boot_sgb = path,
+        }
+        self.save_settings();
+    }
+
+    /// Opens a file dialog for one boot ROM kind; the path is stored only when the file can be
+    /// read and has the right size (E14_07).
+    fn pick_boot_rom(&mut self, kind: boot_rom::BootKind) {
+        let Some(path) = rfd::FileDialog::new().pick_file() else {
+            return;
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => match boot_rom::validate(kind, &bytes) {
+                Ok(()) => {
+                    self.set_boot_path(kind, path.display().to_string());
+                    self.status = format!("Boot ROM set: {}", path.display());
+                }
+                Err(text) => self.status = text,
+            },
+            Err(err) => self.status = format!("Cannot read {}: {err}", path.display()),
+        }
+    }
+
+    /// What to send with a Load command (E14_07): the DMG boot ROM bytes only when Enable is on
+    /// and the file is valid; the second value is the fallback text for the status bar. Only
+    /// the DMG kind is used at this stage (GBC and SGB come with E15 and E16).
+    fn boot_for_load(&self) -> (Option<Vec<u8>>, Option<String>) {
+        let bytes = if self.boot_enabled && !self.boot_dmg.is_empty() {
+            match std::fs::read(&self.boot_dmg) {
+                Ok(bytes) => Some(bytes),
+                Err(err) => {
+                    return (
+                        None,
+                        Some(format!("Cannot read boot ROM {}: {err}", self.boot_dmg)),
+                    )
+                }
+            }
+        } else {
+            None
+        };
+        match boot_rom::choose(self.boot_enabled, boot_rom::BootKind::Dmg, bytes.as_deref()) {
+            boot_rom::BootChoice::Use => (bytes, None),
+            boot_rom::BootChoice::Skip => (None, None),
+            boot_rom::BootChoice::FallbackSkip(text) => (None, Some(text)),
+        }
+    }
+
     /// Loads a ROM from disk. On success the path is remembered in the recent list and the
     /// settings are saved (E13_05). A rejected ROM only updates the status bar; nothing is
     /// sent to the emulation thread, so the current game keeps running (E13_06). Returns
@@ -254,7 +318,8 @@ impl App {
                 self.rom_report = rom_check::inspect(&bytes).0;
                 self.emu
                     .send(Command::SavePath(Some(rom_info::save_path(path))));
-                self.emu.send(Command::Load(bytes));
+                let (boot, boot_note) = self.boot_for_load();
+                self.emu.send(Command::Load { rom: bytes, boot });
                 self.frame.clear();
                 self.frame_dirty = true;
                 self.last_input = Input::default();
@@ -264,6 +329,7 @@ impl App {
                 } else {
                     self.status = format!("Loading {display}");
                 }
+                self.boot_note = boot_note;
                 self.recent.push(&display);
                 self.save_settings();
                 true
@@ -331,6 +397,12 @@ impl eframe::App for App {
             self.fps.frame(now_ms);
         }
         while let Ok(message) = self.emu.status.try_recv() {
+            if message.starts_with("ROM loaded") {
+                if let Some(note) = self.boot_note.take() {
+                    self.status = format!("{note} - {message}");
+                    continue;
+                }
+            }
             self.status = message;
         }
         while let Ok(snap) = self.emu.snapshots.try_recv() {
@@ -578,6 +650,33 @@ impl eframe::App for App {
                         self.emu.send(Command::Viewer(
                             self.viewer_open || self.debug_open || self.trace_open,
                         ));
+                    }
+                });
+                ui.menu_button("Boot ROM", |ui| {
+                    let mut changed = false;
+                    changed |= ui
+                        .radio_value(&mut self.boot_enabled, false, "Skip boot ROM")
+                        .changed();
+                    changed |= ui
+                        .radio_value(&mut self.boot_enabled, true, "Enable boot ROM")
+                        .changed();
+                    if changed {
+                        self.save_settings();
+                    }
+                    ui.separator();
+                    for (kind, title) in [
+                        (boot_rom::BootKind::Dmg, "DMG boot ROM..."),
+                        (boot_rom::BootKind::Gbc, "GBC boot ROM..."),
+                    ] {
+                        ui.horizontal(|ui| {
+                            if ui.button(title).clicked() {
+                                self.pick_boot_rom(kind);
+                            }
+                            ui.label(boot_rom::boot_label(self.boot_path(kind)));
+                            if ui.button("Clear").clicked() {
+                                self.set_boot_path(kind, String::new());
+                            }
+                        });
                     }
                 });
                 ui.menu_button("Keys", |ui| {

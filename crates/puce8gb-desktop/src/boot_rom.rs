@@ -63,6 +63,15 @@ pub fn choose(enabled: bool, kind: BootKind, bytes: Option<&[u8]>) -> BootChoice
     }
 }
 
+/// Text shown next to a boot ROM menu entry: "(none)" for an empty path, else the file name (E14_07).
+pub fn boot_label(path: &str) -> String {
+    if path.is_empty() {
+        "(none)".to_string()
+    } else {
+        crate::recent::recent_label(path)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,6 +91,17 @@ mod tests {
             validate(BootKind::Dmg, &[0u8; 255]),
             Err("boot ROM must be 256 bytes (got 255)".to_string())
         );
+    }
+
+    #[test]
+    fn e14_07_boot_label_empty_path_is_none() {
+        assert_eq!(boot_label(""), "(none)");
+    }
+
+    #[test]
+    fn e14_07_boot_label_is_the_file_name() {
+        assert_eq!(boot_label("C:\\x\\dmg_boot.bin"), "dmg_boot.bin");
+        assert_eq!(boot_label("dmg_boot.bin"), "dmg_boot.bin");
     }
 
     #[test]

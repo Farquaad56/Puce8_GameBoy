@@ -7,7 +7,7 @@ use crate::slots::{read_slot, slot_path, state_error_message, write_slot};
 use crate::viewer::{capture, Snapshot};
 use crate::volume::gain_for_percent;
 use puce8gb_core::machine::{AUDIO_RING_SAMPLES, FRAME_DOTS};
-use puce8gb_core::{Dmg, Input, Machine};
+use puce8gb_core::{Dmg, Input, LoadError, Machine};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TryRecvError};
@@ -17,10 +17,16 @@ use std::time::{Duration, Instant};
 
 /// Frames between two viewer snapshots while the machine runs.
 const SNAPSHOT_EVERY: u32 = 4;
+/// Stack size of the emulation thread: a Dmg is about 124 KiB and debug builds copy it several times while a machine is built (E14_07).
+const EMU_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 /// Commands sent from the UI to the emulation thread.
 pub enum Command {
-    Load(Vec<u8>),
+    /// Load a ROM; with `boot` the machine starts from that boot ROM (E14_07).
+    Load {
+        rom: Vec<u8>,
+        boot: Option<Vec<u8>>,
+    },
     SavePath(Option<PathBuf>),
     Reset,
     Pause(bool),
@@ -58,9 +64,11 @@ impl EmuHandle {
         let (frame_tx, frames) = sync_channel(2);
         let (status_tx, status) = channel();
         let (snapshot_tx, snapshots) = sync_channel(1);
-        let thread = std::thread::spawn(move || {
-            run(command_rx, frame_tx, status_tx, thread_volume, snapshot_tx)
-        });
+        let thread = std::thread::Builder::new()
+            .name(String::from("emulation"))
+            .stack_size(EMU_STACK_BYTES)
+            .spawn(move || run(command_rx, frame_tx, status_tx, thread_volume, snapshot_tx))
+            .expect("emulation thread");
         EmuHandle {
             commands,
             frames,
@@ -131,6 +139,19 @@ impl Sound {
     }
 }
 
+/// Builds the machine for a Load command (E14_07): from the boot ROM when one is given. A boot
+/// ROM rejected by the core falls back to the plain machine; the bool is true in that case.
+fn build_machine(rom: &[u8], boot: Option<&[u8]>) -> Result<(Dmg, bool), LoadError> {
+    if let Some(boot) = boot {
+        return match Dmg::with_boot_rom(rom, boot) {
+            Ok(dmg) => Ok((dmg, false)),
+            Err(LoadError::BadBootRom) => Dmg::new(rom).map(|dmg| (dmg, true)),
+            Err(err) => Err(err),
+        };
+    }
+    Dmg::new(rom).map(|dmg| (dmg, false))
+}
+
 fn run(
     commands: Receiver<Command>,
     frames: SyncSender<Vec<u32>>,
@@ -159,8 +180,8 @@ fn run(
     loop {
         loop {
             match commands.try_recv() {
-                Ok(Command::Load(bytes)) => match Dmg::new(&bytes) {
-                    Ok(mut new_dmg) => {
+                Ok(Command::Load { rom, boot }) => match build_machine(&rom, boot.as_deref()) {
+                    Ok((mut new_dmg, fell_back)) => {
                         if let Some(old_dmg) = machine.as_ref() {
                             battery.flush(old_dmg);
                         }
@@ -170,7 +191,12 @@ fn run(
                         }
                         machine = Some(new_dmg);
                         owed = 0;
-                        let _ = status.send(format!("ROM loaded - {mode}"));
+                        if fell_back {
+                            let _ =
+                                status.send(String::from("Boot ROM rejected, started without it"));
+                        } else {
+                            let _ = status.send(format!("ROM loaded - {mode}"));
+                        }
                     }
                     Err(err) => {
                         let _ = status.send(format!("ROM rejected: {err:?}"));
@@ -308,5 +334,61 @@ fn run(
             battery.poll(m, Instant::now());
         }
         std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs a test body on a thread with a large stack: a Dmg is about 124 KiB (E14_07).
+    fn big_stack<F: FnOnce() + Send + 'static>(body: F) {
+        std::thread::Builder::new()
+            .stack_size(EMU_STACK_BYTES)
+            .spawn(body)
+            .expect("spawn test thread")
+            .join()
+            .expect("test body panicked");
+    }
+
+    fn cart() -> Vec<u8> {
+        vec![0u8; 0x8000]
+    }
+
+    #[test]
+    fn e14_07_build_machine_without_boot_rom() {
+        big_stack(|| {
+            let (dmg, fell_back) = build_machine(&cart(), None).expect("valid ROM");
+            assert!(!fell_back);
+            assert_eq!(dmg.cpu.pc, 0x0100);
+        });
+    }
+
+    #[test]
+    fn e14_07_build_machine_with_a_valid_boot_rom() {
+        big_stack(|| {
+            let boot = vec![0u8; 256];
+            let (dmg, fell_back) = build_machine(&cart(), Some(&boot[..])).expect("valid ROM");
+            assert!(!fell_back);
+            assert_eq!(dmg.cpu.pc, 0x0000);
+        });
+    }
+
+    #[test]
+    fn e14_07_rejected_boot_rom_falls_back_to_the_plain_machine() {
+        big_stack(|| {
+            let boot = [0u8; 10];
+            let (dmg, fell_back) = build_machine(&cart(), Some(&boot[..])).expect("valid ROM");
+            assert!(fell_back);
+            assert_eq!(dmg.cpu.pc, 0x0100);
+        });
+    }
+
+    #[test]
+    fn e14_07_bad_rom_is_still_an_error() {
+        big_stack(|| {
+            let boot = vec![0u8; 256];
+            assert!(build_machine(&[0u8; 10], Some(&boot[..])).is_err());
+        });
     }
 }
