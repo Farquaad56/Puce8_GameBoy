@@ -56,6 +56,26 @@ pub const LCDC_BG_ENABLE: u8 = 0x01;
 /// DMG output colors (E03_05 spec): u32 as 0xAARRGGBB with AA = 0xFF, neutral greys.
 pub const PALETTE: [u32; 4] = [0xFFFF_FFFF, 0xFFAA_AAAA, 0xFF55_5555, 0xFF00_0000];
 
+/// Expands a CGB palette entry (RGB555, little-endian bytes) to 8 bits per channel (E15_09,
+/// note 11b, decision A_13: plain expansion, no color correction). Bit 15 is ignored.
+/// Each 5-bit channel c5 becomes (c5 << 3) | (c5 >> 2); returns [r, g, b].
+pub fn rgb555_to_rgb888(lo: u8, hi: u8) -> [u8; 3] {
+    let value = u16::from(lo) | (u16::from(hi) << 8);
+    let expand = |c5: u16| -> u8 { ((c5 << 3) | (c5 >> 2)) as u8 };
+    [
+        expand(value & 31),
+        expand((value >> 5) & 31),
+        expand((value >> 10) & 31),
+    ]
+}
+
+/// Same conversion packed as a framebuffer pixel, 0xAARRGGBB with AA = 0xFF, like the DMG
+/// output colors (E15_09). Used by the CGB renderer (E15_11).
+pub fn rgb555_to_pixel(lo: u8, hi: u8) -> u32 {
+    let [r, g, b] = rgb555_to_rgb888(lo, hi);
+    0xFF00_0000 | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
+}
+
 /// Shade 0..3 of a color index through a palette byte (E11_01): (palette >> (index * 2)) & 3.
 pub fn shade_index(palette: u8, index: u8) -> usize {
     usize::from((palette >> ((index & 3) * 2)) & 3)
@@ -814,6 +834,42 @@ impl Ppu {
 mod tests {
     use super::*;
     use crate::machine::FRAME_DOTS;
+
+    #[test]
+    fn e15_09_white_and_black() {
+        assert_eq!(rgb555_to_rgb888(0xFF, 0x7F), [255, 255, 255]);
+        assert_eq!(rgb555_to_rgb888(0x00, 0x00), [0, 0, 0]);
+    }
+
+    #[test]
+    fn e15_09_primary_colors() {
+        assert_eq!(rgb555_to_rgb888(0x1F, 0x00), [255, 0, 0]); // red: bits 0-4
+        assert_eq!(rgb555_to_rgb888(0xE0, 0x03), [0, 255, 0]); // green: bits 5-9
+        assert_eq!(rgb555_to_rgb888(0x00, 0x7C), [0, 0, 255]); // blue: bits 10-14
+    }
+
+    #[test]
+    fn e15_09_channel_expansion_of_low_values() {
+        assert_eq!(rgb555_to_rgb888(0x10, 0x00), [132, 0, 0]); // value $0010: r5 = 16 -> 128 | 4
+        assert_eq!(rgb555_to_rgb888(0x01, 0x00), [8, 0, 0]); // value $0001: r5 = 1 -> 8
+        assert_eq!(rgb555_to_rgb888(0xEF, 0x03), [123, 255, 0]); // value $03EF: r5 = 15, g5 = 31, b5 = 0
+    }
+
+    #[test]
+    fn e15_09_bit_15_is_ignored() {
+        assert_eq!(rgb555_to_rgb888(0xFF, 0xFF), [255, 255, 255]);
+        assert_eq!(rgb555_to_rgb888(0x1F, 0x80), [255, 0, 0]);
+    }
+
+    #[test]
+    fn e15_09_pixel_is_packed_as_opaque_argb() {
+        assert_eq!(rgb555_to_pixel(0xFF, 0x7F), 0xFFFF_FFFF);
+        assert_eq!(rgb555_to_pixel(0x00, 0x00), 0xFF00_0000);
+        assert_eq!(rgb555_to_pixel(0x1F, 0x00), 0xFFFF_0000);
+        assert_eq!(rgb555_to_pixel(0xE0, 0x03), 0xFF00_FF00);
+        assert_eq!(rgb555_to_pixel(0x00, 0x7C), 0xFF00_00FF);
+        assert_eq!(rgb555_to_pixel(0x10, 0x00), 0xFF84_0000);
+    }
 
     // Existing assertions compare line_buf cells to color-index integers (E03_03/E03_12 style);
     // a cell equals the u8 of its color index (E03_04 spec).
