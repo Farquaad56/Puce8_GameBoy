@@ -96,6 +96,45 @@ pub fn auto_model(rom: &[u8]) -> Model {
     }
 }
 
+/// CGB post-boot CPU registers when no boot ROM runs (E15_05, note 10 "Registres CPU au
+/// hand-off : CGB et AGB", Power_Up_Sequence.md CPU registers). PC and SP keep the common
+/// post-boot values already set by `Cpu::reset`. The ROM is at least `Dmg::MIN_ROM_LEN` long.
+fn apply_cgb_cpu_regs(cpu: &mut Cpu, rom: &[u8]) {
+    cpu.a = 0x11; // A=$11 identifies CGB hardware
+    cpu.f = 0x80; // Z=1 N=0 H=0 C=0
+    cpu.c = 0x00;
+    if rom[0x0143] & 0x80 != 0 {
+        // CGB mode: B=$00 D=$FF E=$56 H=$00 L=$0D
+        cpu.b = 0x00;
+        cpu.d = 0xFF;
+        cpu.e = 0x56;
+        cpu.h = 0x00;
+        cpu.l = 0x0D;
+    } else {
+        // DMG compatibility mode: D=$00 E=$08; B is the title sum for a Nintendo licensee, else $00;
+        // HL is $991A when B is $43 or $58 (CGB), else $007C.
+        let old = rom[0x014B];
+        let nintendo = old == 0x01 || (old == 0x33 && rom[0x0144] == 0x30 && rom[0x0145] == 0x31);
+        let b = if nintendo {
+            rom[0x0134..=0x0143]
+                .iter()
+                .fold(0u8, |sum, &byte| sum.wrapping_add(byte))
+        } else {
+            0x00
+        };
+        cpu.b = b;
+        cpu.d = 0x00;
+        cpu.e = 0x08;
+        if b == 0x43 || b == 0x58 {
+            cpu.h = 0x99;
+            cpu.l = 0x1A;
+        } else {
+            cpu.h = 0x00;
+            cpu.l = 0x7C;
+        }
+    }
+}
+
 /// Core machine interface (decisions A_01/A_04/A_05).
 pub trait Machine {
     /// Reset to the documented post-boot state at PC=$0100 without running the boot ROM
@@ -231,6 +270,7 @@ impl Dmg {
             model: cfg.model,
             boot_image: None,
         };
+        dmg.bus.cgb = cfg.model == Model::Cgb; // CGB post-boot I/O values (E15_05)
         if let Some(boot) = cfg.boot_rom {
             dmg.bus
                 .set_boot_rom(&boot, cfg.model.boot_rom_len())
@@ -302,6 +342,9 @@ impl Machine for Dmg {
         // Header checksum byte $014D (note 07a); the invariant guarantees it is present.
         let checksum = self.bus.rom[ROM_HEADER_CHECKSUM];
         self.cpu = Cpu::reset(checksum);
+        if self.model == Model::Cgb {
+            apply_cgb_cpu_regs(&mut self.cpu, &self.bus.rom); // E15_05
+        }
         self.bus.reset();
         self.audio.apu.reset(self.bus.timer.div());
         self.audio.reset_mixer();
@@ -458,6 +501,131 @@ impl Machine for Dmg {
 mod tests {
     use super::*;
     use crate::audio::wave::WaveAccess;
+
+    /// 32 KiB cartridge image of zeros whose CGB flag byte $0143 is `flag` (E15_05).
+    fn e15_05_cart(flag: u8) -> Vec<u8> {
+        let mut image = vec![0u8; 32 * 1024];
+        image[0x0143] = flag;
+        image
+    }
+
+    fn e15_05_machine(model: Model, image: &[u8]) -> Dmg {
+        let cfg = MachineConfig {
+            model,
+            boot_rom: None,
+        };
+        Dmg::with_config(image, cfg).expect("valid")
+    }
+
+    #[test]
+    fn e15_05_cgb_mode_cpu_registers() {
+        let dmg = e15_05_machine(Model::Cgb, &e15_05_cart(0x80));
+        let r = dmg.cpu.regs();
+        assert_eq!(r.a, 0x11); // note 10 CGB hand-off: A=$11
+        assert_eq!(r.f, 0x80); // note 10: Z=1 N=0 H=0 C=0
+        assert_eq!(r.b, 0x00); // note 10: B=$00
+        assert_eq!(r.c, 0x00); // note 10: C=$00
+        assert_eq!(r.d, 0xFF); // note 10: D=$FF
+        assert_eq!(r.e, 0x56); // note 10: E=$56
+        assert_eq!(r.h, 0x00); // note 10: H=$00
+        assert_eq!(r.l, 0x0D); // note 10: L=$0D
+        assert_eq!(r.sp, 0xFFFE); // note 10: SP=$FFFE
+        assert_eq!(r.pc, 0x0100); // note 10: PC=$0100
+    }
+
+    #[test]
+    fn e15_05_cgb_dmg_compatibility_mode_registers() {
+        // Nintendo old licensee $01: B is the sum of the 16 title bytes ($43 here).
+        let mut image = e15_05_cart(0x00);
+        image[0x014B] = 0x01;
+        image[0x0134] = 0x43;
+        let r = e15_05_machine(Model::Cgb, &image).cpu.regs();
+        assert_eq!(
+            (r.a, r.f, r.b, r.c, r.d, r.e),
+            (0x11, 0x80, 0x43, 0x00, 0x00, 0x08)
+        ); // note 10 DMG mode
+        assert_eq!((r.h, r.l), (0x99, 0x1A)); // note 10: B=$43 gives HL=$991A
+                                              // Other title sum: HL=$007C.
+        image[0x0134] = 0x10;
+        let r = e15_05_machine(Model::Cgb, &image).cpu.regs();
+        assert_eq!(r.b, 0x10); // note 10: B is the title sum
+        assert_eq!((r.h, r.l), (0x00, 0x7C)); // note 10: otherwise HL=$007C
+                                              // Not a Nintendo licensee: B=$00.
+        image[0x014B] = 0x00;
+        let r = e15_05_machine(Model::Cgb, &image).cpu.regs();
+        assert_eq!(r.b, 0x00); // note 10: B=$00 otherwise
+        assert_eq!((r.h, r.l), (0x00, 0x7C));
+        // New licensee "01" with old licensee $33.
+        image[0x014B] = 0x33;
+        image[0x0144] = 0x30;
+        image[0x0145] = 0x31;
+        image[0x0134] = 0x58;
+        let r = e15_05_machine(Model::Cgb, &image).cpu.regs();
+        assert_eq!(r.b, 0x58); // note 10: new licensee "01" counts as Nintendo
+        assert_eq!((r.h, r.l), (0x99, 0x1A)); // note 10: B=$58 gives HL=$991A
+    }
+
+    #[test]
+    fn e15_05_dmg_post_boot_registers_are_unchanged() {
+        // A Dmg machine ignores the CGB flag and keeps the DMG values.
+        let r = e15_05_machine(Model::Dmg, &e15_05_cart(0x80)).cpu.regs();
+        assert_eq!(
+            (r.a, r.f, r.b, r.c, r.d, r.e, r.h, r.l),
+            (0x01, 0x80, 0x00, 0x13, 0x00, 0xD8, 0x01, 0x4D)
+        ); // note 10 DMG hand-off, header checksum $00 keeps H and C clear
+        assert_eq!((r.sp, r.pc), (0xFFFE, 0x0100));
+        let mut image = e15_05_cart(0x00);
+        image[0x014D] = 0x01;
+        let r = e15_05_machine(Model::Dmg, &image).cpu.regs();
+        assert_eq!(r.f, 0xB0); // note 10: non-zero header checksum sets H and C
+    }
+
+    #[test]
+    fn e15_05_cgb_io_registers_after_reset() {
+        let dmg = e15_05_machine(Model::Cgb, &e15_05_cart(0x80));
+        let io = &dmg.bus.io;
+        assert_eq!(io[0x02], 0x7F); // SC, note 10 CGB column
+        assert_eq!(io[0x46], 0x00); // DMA, note 10 CGB column
+        assert_eq!(io[0x4D], 0x7E); // KEY1
+        assert_eq!(io[0x4F], 0xFE); // VBK
+        assert_eq!(&io[0x51..=0x55], &[0xFF; 5]); // HDMA1-HDMA5
+        assert_eq!(io[0x56], 0x3E); // RP
+        assert_eq!(io[0x70], 0xF8); // SVBK
+        assert_eq!(io[0x40], 0x91); // LCDC unchanged
+        assert_eq!(io[0x47], 0xFC); // BGP unchanged
+        assert_eq!(io[0x26], 0xF1); // NR52 unchanged
+        assert_eq!(io[0xFF], 0x00); // IE unchanged
+    }
+
+    #[test]
+    fn e15_05_dmg_io_registers_and_cgb_reads_are_unchanged() {
+        let dmg = e15_05_machine(Model::Dmg, &e15_05_cart(0x80));
+        assert_eq!(dmg.bus.io[0x02], 0x7E); // SC, DMG value
+        assert_eq!(dmg.bus.io[0x46], 0xFF); // DMA, DMG value
+        assert_eq!(dmg.bus.io[0x4D], 0xFF);
+        assert_eq!(dmg.bus.io[0x4F], 0xFF);
+        assert_eq!(dmg.bus.io[0x70], 0xFF);
+        let cgb = e15_05_machine(Model::Cgb, &e15_05_cart(0x80));
+        for addr in [
+            0xFF4Du16, 0xFF4F, 0xFF51, 0xFF52, 0xFF53, 0xFF54, 0xFF55, 0xFF68, 0xFF69, 0xFF6A,
+            0xFF6B, 0xFF6C, 0xFF70,
+        ] {
+            assert_eq!(dmg.bus.read(addr), 0xFF, "dmg {addr:#06x}");
+            assert_eq!(cgb.bus.read(addr), 0xFF, "cgb {addr:#06x}"); // registers not implemented yet
+        }
+    }
+
+    #[test]
+    fn e15_05_cgb_with_boot_rom_starts_from_power_on() {
+        let cfg = MachineConfig {
+            model: Model::Cgb,
+            boot_rom: Some(vec![0u8; 2304]),
+        };
+        let dmg = Dmg::with_config(&e15_05_cart(0x80), cfg).expect("valid");
+        let r = dmg.cpu.regs();
+        assert_eq!((r.a, r.pc), (0x00, 0x0000)); // power-on state, not the CGB hand-off values
+        assert_eq!(dmg.bus.io[0x4D], 0x00); // all I/O are 0 at power-on
+    }
 
     #[test]
     fn e15_04_auto_model_from_cgb_flag() {

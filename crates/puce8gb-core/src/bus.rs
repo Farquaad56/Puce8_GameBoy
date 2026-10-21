@@ -120,6 +120,8 @@ pub struct Bus {
     boot_rom: Option<Box<[u8]>>,
     /// True while the boot ROM is visible; a non-zero write to $FF50 clears it (E14_02).
     boot_mapped: bool,
+    /// True for the Cgb model (E15_05): selects the CGB post-boot I/O values in `reset`.
+    pub(crate) cgb: bool,
 }
 
 impl Bus {
@@ -157,6 +159,7 @@ impl Bus {
             p1_prev: 0x0F,           // P1 low nibble before the first check (E05_01)
             boot_rom: None,          // no boot ROM installed by default (E14_02)
             boot_mapped: false,      // cartridge visible from power-up (E14_02)
+            cgb: false,              // Dmg bus until Dmg::with_config says otherwise (E15_05)
         }
     }
 
@@ -253,6 +256,18 @@ impl Bus {
         io[0x49] = 0xFF; // OBP1
         io[0x4A] = 0x00; // WY
         io[0x4B] = 0x00; // WX
+        if self.cgb {
+            // CGB values at PC=$0100 (note 10, Power_Up_Sequence.md hardware registers table).
+            // Not listed here and left as today: DIV, STAT, LY (depend on the header and the
+            // boot ROM duration) and KEY0, BGPI, BGPD, OGPI, OGPD ($FF4C, $FF68-$FF6B): UNKNOWN - to confirm.
+            io[0x02] = 0x7F; // SC
+            io[0x46] = 0x00; // DMA
+            io[0x4D] = 0x7E; // KEY1
+            io[0x4F] = 0xFE; // VBK
+            io[0x51..=0x55].fill(0xFF); // HDMA1-HDMA5
+            io[0x56] = 0x3E; // RP
+            io[0x70] = 0xF8; // SVBK
+        }
         io[0xFF] = 0x00; // IE
         self.p1_prev = p1_read(self.io[0x00], &self.input) & 0x0F; // P1 low nibble at power-up (E05_01)
     }
