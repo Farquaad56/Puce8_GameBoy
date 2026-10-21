@@ -19,6 +19,8 @@ mod cgb_hdma_hblank_tests;
 #[cfg(test)]
 mod cgb_hdma_tests;
 #[cfg(test)]
+mod cgb_misc_tests;
+#[cfg(test)]
 mod cgb_opri_tests;
 #[cfg(test)]
 mod cgb_palette_tests;
@@ -179,6 +181,13 @@ pub struct Bus {
     key1_armed: bool,
     /// KEY1 bit 7: true in double speed. Only a field for now, not saved (state saving: E15_19); the clock effect: E15_17.
     pub(crate) double_speed: bool,
+    /// RP ($FF56) writable bits 7-6 and 0 as written (E15_18, note 11c). No infrared link is emulated.
+    rp: u8,
+    /// Undocumented read/write registers $FF72, $FF73, $FF74 and $FF75 (E15_18, note 11c).
+    ff72: u8,
+    ff73: u8,
+    ff74: u8,
+    ff75: u8,
 }
 
 impl Bus {
@@ -235,7 +244,12 @@ impl Bus {
             hdma_in_hblank: false,
             key1_armed: false,
             double_speed: false, // the Cgb starts in normal speed (note 11c)
-            svbk: 0,             // SVBK bits 0-2 (E15_06)
+            rp: 0,
+            ff72: 0,
+            ff73: 0,
+            ff74: 0,
+            ff75: 0,
+            svbk: 0, // SVBK bits 0-2 (E15_06)
         }
     }
 
@@ -274,6 +288,11 @@ impl Bus {
         self.hdma_in_hblank = false;
         self.key1_armed = false; // E15_16
         self.double_speed = false;
+        self.rp = 0; // E15_18, initial values per note 11c
+        self.ff72 = 0;
+        self.ff73 = 0;
+        self.ff74 = 0;
+        self.ff75 = 0;
         self.vbk = 0; // VRAM bank 0 selected by the CPU (E15_07)
                       // Palette RAM (E15_08, note 11b): the boot ROM leaves every BG color white; $FF is used for
                       // each byte (bit 15 is ignored, so $FFFF is white). OBJ colors are uninitialized on hardware:
@@ -464,6 +483,43 @@ impl Bus {
         self.hdma_stall = self
             .hdma_stall
             .saturating_add(blocks * if self.double_speed { 16 } else { 8 }); // 16 M-cycles per block in double speed (E15_17, note 11c)
+    }
+
+    /// Read of RP and of the undocumented Cgb registers $FF72-$FF77 (E15_18, note 11c). RP: bits 5-2
+    /// and bit 1 read 1 (bit 1 = no signal received, no infrared link is emulated), bits 7-6 and 0 as
+    /// written. $FF74 is locked to $FF in DMG compatibility mode. $FF75: only bits 6-4 are stored, the
+    /// rest reads 1. PCM12 ($FF76) and PCM34 ($FF77) read 0: their bit format is UNKNOWN - to confirm.
+    fn cgb_misc_read(&self, addr: u16) -> u8 {
+        match addr {
+            0xFF56 => 0x3E | (self.rp & 0xC1),
+            0xFF72 => self.ff72,
+            0xFF73 => self.ff73,
+            0xFF74 => {
+                if self.compat {
+                    0xFF
+                } else {
+                    self.ff74
+                }
+            }
+            0xFF75 => 0x8F | (self.ff75 & 0x70),
+            _ => 0x00,
+        }
+    }
+
+    /// Write of RP and of the undocumented Cgb registers (E15_18); $FF76 and $FF77 are read-only.
+    fn cgb_misc_write(&mut self, addr: u16, val: u8) {
+        match addr {
+            0xFF56 => self.rp = val & 0xC1,
+            0xFF72 => self.ff72 = val,
+            0xFF73 => self.ff73 = val,
+            0xFF74 => {
+                if !self.compat {
+                    self.ff74 = val;
+                }
+            }
+            0xFF75 => self.ff75 = val & 0x70,
+            _ => {}
+        }
     }
 
     /// True when the Cgb model runs in double speed (E15_16).
@@ -684,7 +740,8 @@ impl Bus {
             0xFF4D if self.cgb => {
                 0x7E | (u8::from(self.double_speed) << 7) | u8::from(self.key1_armed)
             } // KEY1: unused bits read 1 (E15_16, note 11a)
-            0xFF55 if self.cgb => self.hdma_status(), // HDMA5 (E15_15)
+            0xFF56 | 0xFF72..=0xFF77 if self.cgb => self.cgb_misc_read(addr), // RP, undocumented registers, PCM (E15_18)
+            0xFF55 if self.cgb => self.hdma_status(),                         // HDMA5 (E15_15)
             0xFF70 if self.cgb => 0xF8 | self.svbk, // SVBK: bits 3-7 read 1, bits 0-2 as written (E15_06, note 11a); a written 0 reading back as 0 is UNKNOWN - to confirm
             0xFF4F if self.cgb => 0xFE | self.vbk, // VBK: bits 7-1 read 1, bit 0 is the bank (E15_07, note 11a)
             0xFF68 if self.cgb => 0x40 | self.bcps, // BCPS: unused bit 6 read value is UNKNOWN - to confirm, 1 is used (E15_08)
@@ -817,6 +874,7 @@ impl Bus {
                 WaveAccess::Open(i) => self.io[0x30 + usize::from(i & 15)] = val,
             },
             0xFF4D if self.cgb => self.key1_armed = val & 1 == 1, // KEY1: only bit 0 is writable (E15_16)
+            0xFF56 | 0xFF72..=0xFF77 if self.cgb => self.cgb_misc_write(addr, val), // RP, undocumented registers, PCM (E15_18)
             0xFF51..=0xFF54 if self.cgb => self.hdma_regs[usize::from(addr - 0xFF51)] = val, // HDMA1-4, write-only (E15_14)
             0xFF55 if self.cgb => self.hdma_write_control(val), // HDMA5 (E15_14, E15_15)
             0xFF70 if self.cgb => self.svbk = val & 0x07, // SVBK: only bits 0-2 are kept (E15_06, note 11a)
@@ -991,14 +1049,15 @@ impl Bus {
             0xFF4D if self.cgb => {
                 0x7E | (u8::from(self.double_speed) << 7) | u8::from(self.key1_armed)
             } // same as read() (E15_16)
+            0xFF56 | 0xFF72..=0xFF77 if self.cgb => self.cgb_misc_read(addr), // same as read() (E15_18)
             0xFF55 if self.cgb => self.hdma_status(), // same as read() (E15_15)
-            0xFF70 if self.cgb => 0xF8 | self.svbk, // same as read() (E15_06)
-            0xFF4F if self.cgb => 0xFE | self.vbk, // same as read() (E15_07)
-            0xFF68 if self.cgb => 0x40 | self.bcps, // same as read() (E15_08)
-            0xFF6A if self.cgb => 0x40 | self.ocps, // same as read() (E15_08)
+            0xFF70 if self.cgb => 0xF8 | self.svbk,   // same as read() (E15_06)
+            0xFF4F if self.cgb => 0xFE | self.vbk,    // same as read() (E15_07)
+            0xFF68 if self.cgb => 0x40 | self.bcps,   // same as read() (E15_08)
+            0xFF6A if self.cgb => 0x40 | self.ocps,   // same as read() (E15_08)
             0xFF69 if self.cgb => self.cram_data(false), // peek ignores the PPU blocking (E15_08)
             0xFF6B if self.cgb => self.cram_data(true), // same as BCPD (E15_08)
-            0xFF6C if self.cgb => 0xFE | self.opri, // same as read() (E15_11)
+            0xFF6C if self.cgb => 0xFE | self.opri,   // same as read() (E15_11)
             0xFF03 | 0xFF08..=0xFF0E | 0xFF4C..=0xFF7F => 0xFF, // same as read() (FIX_05)
             0xFF01..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
