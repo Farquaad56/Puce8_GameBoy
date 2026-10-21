@@ -150,6 +150,34 @@ pub fn decide(bytes: &[u8]) -> LoadDecision {
     }
 }
 
+/// Label and value pairs shown by the ROM info window (E13_08).
+pub fn report_lines(r: &RomReport) -> Vec<(String, String)> {
+    let ram = if r.ram_size == 0 {
+        "none".to_string()
+    } else {
+        format!("{} KiB", r.ram_size / 1024)
+    };
+    let checksum = if r.header_checksum_ok { "OK" } else { "BAD" };
+    vec![
+        ("Title".to_string(), r.title.clone()),
+        (
+            "Cartridge type".to_string(),
+            format!("${:02X}", r.cart_type),
+        ),
+        (
+            "ROM size".to_string(),
+            format!("{} KiB", r.rom_size_actual / 1024),
+        ),
+        ("RAM size".to_string(), ram),
+        ("Color flag".to_string(), format!("${:02X}", r.cgb_flag)),
+        (
+            "Super Game Boy flag".to_string(),
+            format!("${:02X}", r.sgb_flag),
+        ),
+        ("Header checksum".to_string(), checksum.to_string()),
+    ]
+}
+
 /// File extensions accepted by the open dialog (E13_04).
 pub const ROM_EXTENSIONS: [&str; 4] = ["gb", "gbc", "sgb", "zip"];
 
@@ -341,5 +369,51 @@ mod tests {
             LoadDecision::Reject(text) => assert!(text.starts_with("Error: ROM too small")),
             other => panic!("expected a reject, got {other:?}"),
         }
+    }
+
+    fn e13_08_sample_report() -> RomReport {
+        RomReport {
+            title: "TEST".to_string(),
+            cart_type: 0x13,
+            rom_size_declared: 65536,
+            rom_size_actual: 65536,
+            ram_size: 8192,
+            cgb_flag: 0x80,
+            sgb_flag: 0x03,
+            header_checksum_ok: true,
+        }
+    }
+
+    #[test]
+    fn e13_08_report_lines_full() {
+        let expected: Vec<(String, String)> = [
+            ("Title", "TEST"),
+            ("Cartridge type", "$13"),
+            ("ROM size", "64 KiB"),
+            ("RAM size", "8 KiB"),
+            ("Color flag", "$80"),
+            ("Super Game Boy flag", "$03"),
+            ("Header checksum", "OK"),
+        ]
+        .iter()
+        .map(|(label, value)| (label.to_string(), value.to_string()))
+        .collect();
+        assert_eq!(report_lines(&e13_08_sample_report()), expected);
+    }
+
+    #[test]
+    fn e13_08_report_lines_no_ram() {
+        let mut report = e13_08_sample_report();
+        report.ram_size = 0;
+        let lines = report_lines(&report);
+        assert_eq!(lines[3], ("RAM size".to_string(), "none".to_string()));
+    }
+
+    #[test]
+    fn e13_08_report_lines_bad_checksum() {
+        let mut report = e13_08_sample_report();
+        report.header_checksum_ok = false;
+        let lines = report_lines(&report);
+        assert_eq!(lines[6], ("Header checksum".to_string(), "BAD".to_string()));
     }
 }

@@ -78,6 +78,8 @@ struct App {
     uploaded_scale: u32,
     recent: recent::RecentList,
     last_dir: String,
+    rom_report: Option<rom_check::RomReport>,
+    rom_info_open: bool,
 }
 
 impl App {
@@ -125,6 +127,8 @@ impl App {
             uploaded_scale: 0,
             recent: recent::RecentList::from_lines(&loaded.recent),
             last_dir: loaded.last_dir.clone(),
+            rom_report: None,
+            rom_info_open: false,
         };
         app.apply_palette();
         app.lcd.set_mode(loaded.lcd_mode);
@@ -234,6 +238,7 @@ impl App {
                     &entry_name.unwrap_or_else(|| rom_info::rom_title(&bytes)),
                 );
                 self.path_input = display.clone();
+                self.rom_report = rom_check::inspect(&bytes).0;
                 self.emu
                     .send(Command::SavePath(Some(rom_info::save_path(path))));
                 self.emu.send(Command::Load(bytes));
@@ -541,6 +546,7 @@ impl eframe::App for App {
                     if ui.checkbox(&mut self.show_fps, "Show frame rate").changed() {
                         self.save_settings();
                     }
+                    ui.checkbox(&mut self.rom_info_open, "ROM info");
                     if ui.checkbox(&mut self.trace_open, "CPU trace").changed() {
                         self.emu.send(Command::Trace(self.trace_open));
                         self.emu.send(Command::Viewer(
@@ -736,6 +742,28 @@ impl eframe::App for App {
             self.emu.send(Command::Trace(false));
             self.emu
                 .send(Command::Viewer(self.viewer_open || self.debug_open));
+        }
+        if self.rom_info_open {
+            let mut open = true;
+            egui::Window::new("ROM info")
+                .open(&mut open)
+                .show(&ctx, |ui| match &self.rom_report {
+                    Some(report) => {
+                        egui::Grid::new("rom_info_grid")
+                            .num_columns(2)
+                            .show(ui, |ui| {
+                                for (label, value) in rom_check::report_lines(report) {
+                                    ui.label(label);
+                                    ui.label(value);
+                                    ui.end_row();
+                                }
+                            });
+                    }
+                    None => {
+                        ui.label("No ROM loaded");
+                    }
+                });
+            self.rom_info_open = open;
         }
         if self.custom_open {
             let mut open = true;
