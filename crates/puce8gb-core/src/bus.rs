@@ -672,6 +672,23 @@ impl Bus {
             .unwrap_or(0xFF)
     }
 
+    /// True when the boot ROM answers a CPU access at `addr` (E14_02, E15 fix): $0000-$00FF, plus
+    /// $0200-$08FF when the installed image is longer than 256 bytes (CGB boot ROM, 2304 bytes;
+    /// $0100-$01FF is the cartridge header and is never overlaid).
+    fn boot_covers(&self, addr: u16) -> bool {
+        if !self.boot_mapped {
+            return false;
+        }
+        if addr <= 0x00FF {
+            return true;
+        }
+        (0x0200..=0x08FF).contains(&addr)
+            && self
+                .boot_rom
+                .as_deref()
+                .is_some_and(|rom| rom.len() > 0x0100)
+    }
+
     /// CPU accesses that collide with the OAM DMA: OAM and the bus of the DMA source. Hardware-verified by mooneye call_timing (DMA from VRAM leaves WRAM/echo usable). The value a colliding read returns is the DMA byte on a real DMG: UNKNOWN - to confirm, $FF is used. DMA sources $E0-$FF map to $C0-$DF (FIX_06).
     fn dma_blocks(&self, addr: u16) -> bool {
         if !self.dma_active {
@@ -688,7 +705,7 @@ impl Bus {
         if self.dma_blocks(addr) {
             return 0xFF; // OAM DMA collision: reads $FF (E03_15 spec, FIX_02); HRAM/I/O/IE stay accessible
         }
-        if self.boot_mapped && addr <= 0x00FF {
+        if self.boot_covers(addr) {
             return self.boot_byte(addr); // boot ROM overlay (E14_02)
         }
         match addr {
@@ -1022,7 +1039,7 @@ impl Bus {
     /// Read the raw memory at `addr` with no side effect and no gate (decision A_02):
     /// for debuggers and viewers. PPU-mode blocking and OAM DMA gating: E03_15.
     pub fn peek(&self, addr: u16) -> u8 {
-        if self.boot_mapped && addr <= 0x00FF {
+        if self.boot_covers(addr) {
             return self.boot_byte(addr); // boot ROM overlay (E14_02)
         }
         match addr {

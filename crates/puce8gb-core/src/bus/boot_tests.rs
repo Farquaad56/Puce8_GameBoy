@@ -71,3 +71,42 @@ fn e14_02_ff50_read_is_unchanged() {
     bus.write(0xFF50, 0x01);
     assert_eq!(bus.read(0xFF50), 0xFF);
 }
+
+/// Bus with a synthetic 2304-byte CGB-sized boot ROM: bytes are $C3, except $0100-$01FF = $EE.
+fn bus_with_cgb_boot() -> Bus {
+    let mut rom = vec![0xC3u8; 2304];
+    rom[0x0100..0x0200].fill(0xEE);
+    let mut bus = Bus::new(cart_rom());
+    bus.set_boot_rom(&rom, 2304).expect("valid boot ROM");
+    bus
+}
+
+#[test]
+fn e15_23_cgb_boot_rom_covers_0200_to_08ff() {
+    let bus = bus_with_cgb_boot();
+    assert_eq!(bus.read(0x0000), 0xC3);
+    assert_eq!(bus.read(0x00FF), 0xC3);
+    assert_eq!(bus.read(0x0200), 0xC3);
+    assert_eq!(bus.read(0x08FF), 0xC3);
+    assert_eq!(bus.peek(0x0200), 0xC3);
+    assert_eq!(bus.peek(0x08FF), 0xC3);
+}
+
+#[test]
+fn e15_23_cgb_boot_rom_leaves_header_gap_and_high_rom_to_the_cartridge() {
+    let bus = bus_with_cgb_boot();
+    assert_eq!(bus.read(0x0100), 0xA5);
+    assert_eq!(bus.read(0x01FF), 0xA5);
+    assert_eq!(bus.read(0x0900), 0xA5);
+    assert_eq!(bus.peek(0x0100), 0xA5);
+}
+
+#[test]
+fn e15_23_cgb_boot_rom_unmaps_with_ff50_and_dmg_size_never_covers_0200() {
+    let mut bus = bus_with_cgb_boot();
+    bus.write(0xFF50, 0x01);
+    assert_eq!(bus.read(0x0000), 0xAA);
+    assert_eq!(bus.read(0x0200), 0xA5);
+    let short = bus_with_boot();
+    assert_eq!(short.read(0x0200), 0xA5);
+}
