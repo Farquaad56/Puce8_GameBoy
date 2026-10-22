@@ -77,6 +77,7 @@ pub fn run_entry(entry: &Entry, rom: &[u8]) -> EntryResult {
                 Ok(dmg) => dmg,
                 Err(_) => return EntryResult::Fail("cannot load ROM".to_string()),
             };
+            let mut last_ldbb: Option<[u8; 6]> = None;
             for _ in 0..(entry.max_cycles / 4) {
                 // The mooneye programs park on a $40 byte (LD B,B) once the registers hold
                 // their final values; check the signature at that boundary.
@@ -88,7 +89,11 @@ pub fn run_entry(entry: &Entry, rom: &[u8]) -> EntryResult {
                         Some(false) => {
                             return EntryResult::Fail("registers are all 0x42".to_string())
                         }
-                        None => {}
+                        None => {
+                            last_ldbb = Some([
+                                dmg.cpu.b, dmg.cpu.c, dmg.cpu.d, dmg.cpu.e, dmg.cpu.h, dmg.cpu.l,
+                            ]);
+                        }
                     }
                 }
                 for _ in 0..4 {
@@ -98,7 +103,13 @@ pub fn run_entry(entry: &Entry, rom: &[u8]) -> EntryResult {
                     return EntryResult::Fail(run::unimplemented_message(opcode, pc));
                 }
             }
-            EntryResult::Timeout
+            match last_ldbb {
+                Some(r) => EntryResult::Fail(format!(
+                    "no signature, last LD B,B regs {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
+                    r[0], r[1], r[2], r[3], r[4], r[5]
+                )),
+                None => EntryResult::Timeout,
+            }
         }
         Kind::Hash => match parse_hash_param(&entry.param) {
             None => EntryResult::Fail("bad hash param".to_string()),
@@ -313,6 +324,17 @@ mod tests {
         assert!(matches!(r, EntryResult::Fail(_)));
         assert_eq!(
             run_entry(&entry(Kind::Mooneye, 100_000, "-"), &prog(&WRONG_PROG)),
+            EntryResult::Fail("no signature, last LD B,B regs 03 05 08 0D 15 23".to_string())
+        );
+    }
+
+    /// Program that parks on an infinite loop without ever executing LD B,B ($40).
+    const NO_LDBB_PROG: [u8; 2] = [0x18, 0xFE];
+
+    #[test]
+    fn battery_ldbb_regs_reported() {
+        assert_eq!(
+            run_entry(&entry(Kind::Mooneye, 100_000, "-"), &prog(&NO_LDBB_PROG)),
             EntryResult::Timeout
         );
     }
