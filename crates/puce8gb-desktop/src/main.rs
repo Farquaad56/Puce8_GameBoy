@@ -24,6 +24,7 @@ mod rom_zip;
 mod scale;
 mod settings;
 mod slots;
+mod system;
 mod viewer;
 mod volume;
 
@@ -87,6 +88,10 @@ struct App {
     boot_sgb: String,
     /// Boot ROM fallback text to show with the next "ROM loaded" status (E14_07).
     boot_note: Option<String>,
+    /// System choice of the System menu (E15_23); applies at the next ROM load.
+    system: system::SystemChoice,
+    /// Model label shown with the next "ROM loaded" status (E15_23).
+    model_note: Option<&'static str>,
 }
 
 impl App {
@@ -141,6 +146,13 @@ impl App {
             boot_gbc: loaded.boot_gbc.clone(),
             boot_sgb: loaded.boot_sgb.clone(),
             boot_note: None,
+            // Super Game Boy is not available yet: a stored "sgb" falls back to Auto.
+            system: if loaded.system == system::SystemChoice::Sgb {
+                system::SystemChoice::Auto
+            } else {
+                loaded.system
+            },
+            model_note: None,
         };
         app.apply_palette();
         app.lcd.set_mode(loaded.lcd_mode);
@@ -166,6 +178,7 @@ impl App {
             boot_dmg: self.boot_dmg.clone(),
             boot_gbc: self.boot_gbc.clone(),
             boot_sgb: self.boot_sgb.clone(),
+            system: self.system,
         };
         let _ = std::fs::write(&self.settings_file, settings.to_text());
     }
@@ -252,23 +265,20 @@ impl App {
     }
 
     /// What to send with a Load command (E14_07): the DMG boot ROM bytes only when Enable is on
-    /// and the file is valid; the second value is the fallback text for the status bar. Only
-    /// the DMG kind is used at this stage (GBC and SGB come with E15 and E16).
-    fn boot_for_load(&self) -> (Option<Vec<u8>>, Option<String>) {
-        let bytes = if self.boot_enabled && !self.boot_dmg.is_empty() {
-            match std::fs::read(&self.boot_dmg) {
+    /// and the file is valid; the second value is the fallback text for the status bar. The kind
+    /// follows the console model (E15_23).
+    fn boot_for_load(&self, model: puce8gb_core::Model) -> (Option<Vec<u8>>, Option<String>) {
+        let kind = boot_rom::kind_for(model);
+        let path = self.boot_path(kind);
+        let bytes = if self.boot_enabled && !path.is_empty() {
+            match std::fs::read(path) {
                 Ok(bytes) => Some(bytes),
-                Err(err) => {
-                    return (
-                        None,
-                        Some(format!("Cannot read boot ROM {}: {err}", self.boot_dmg)),
-                    )
-                }
+                Err(err) => return (None, Some(format!("Cannot read boot ROM {path}: {err}"))),
             }
         } else {
             None
         };
-        match boot_rom::choose(self.boot_enabled, boot_rom::BootKind::Dmg, bytes.as_deref()) {
+        match boot_rom::choose(self.boot_enabled, kind, bytes.as_deref()) {
             boot_rom::BootChoice::Use => (bytes, None),
             boot_rom::BootChoice::Skip => (None, None),
             boot_rom::BootChoice::FallbackSkip(text) => (None, Some(text)),
@@ -318,8 +328,14 @@ impl App {
                 self.rom_report = rom_check::inspect(&bytes).0;
                 self.emu
                     .send(Command::SavePath(Some(rom_info::save_path(path))));
-                let (boot, boot_note) = self.boot_for_load();
-                self.emu.send(Command::Load { rom: bytes, boot });
+                let model = system::resolve(self.system, &bytes);
+                let (boot, boot_note) = self.boot_for_load(model);
+                self.model_note = Some(system::label(system::from_model(model)));
+                self.emu.send(Command::Load {
+                    rom: bytes,
+                    boot,
+                    model,
+                });
                 self.frame.clear();
                 self.frame_dirty = true;
                 self.last_input = Input::default();
@@ -398,10 +414,15 @@ impl eframe::App for App {
         }
         while let Ok(message) = self.emu.status.try_recv() {
             if message.starts_with("ROM loaded") {
-                if let Some(note) = self.boot_note.take() {
-                    self.status = format!("{note} - {message}");
-                    continue;
+                let mut text = message;
+                if let Some(label) = self.model_note.take() {
+                    text = format!("{text} - {label}");
                 }
+                if let Some(note) = self.boot_note.take() {
+                    text = format!("{note} - {text}");
+                }
+                self.status = text;
+                continue;
             }
             self.status = message;
         }
@@ -541,6 +562,27 @@ impl eframe::App for App {
                     if ui.button("Frame step (N)").clicked() {
                         self.emu.send(Command::FrameStep);
                         ui.close();
+                    }
+                });
+                ui.menu_button("System", |ui| {
+                    const HINT: &str = "Applies when the next ROM is loaded";
+                    let mut changed = false;
+                    for (choice, title) in [
+                        (system::SystemChoice::Auto, "Auto"),
+                        (system::SystemChoice::Dmg, "Game Boy"),
+                        (system::SystemChoice::Cgb, "Game Boy Color"),
+                    ] {
+                        changed |= ui
+                            .radio_value(&mut self.system, choice, title)
+                            .on_hover_text(HINT)
+                            .changed();
+                    }
+                    ui.add_enabled(
+                        false,
+                        egui::RadioButton::new(false, "Super Game Boy (not available yet)"),
+                    );
+                    if changed {
+                        self.save_settings();
                     }
                 });
                 ui.menu_button("Audio", |ui| {

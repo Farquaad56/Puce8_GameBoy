@@ -5,6 +5,7 @@ use crate::input_map::{Button, KeyMap, BUTTONS};
 use crate::lcd_filter::LcdMode;
 use crate::palettes::PaletteChoice;
 use crate::recent::RecentList;
+use crate::system::SystemChoice;
 use crate::volume::{DEFAULT_VOLUME, MAX_VOLUME};
 use eframe::egui::Key;
 use std::path::{Path, PathBuf};
@@ -31,6 +32,8 @@ pub struct Settings {
     pub boot_dmg: String,
     pub boot_gbc: String,
     pub boot_sgb: String,
+    /// System choice (E15_23); stored as `system=auto|dmg|cgb|sgb`.
+    pub system: SystemChoice,
 }
 
 impl Default for Settings {
@@ -48,6 +51,7 @@ impl Default for Settings {
             boot_dmg: String::new(),
             boot_gbc: String::new(),
             boot_sgb: String::new(),
+            system: SystemChoice::Auto,
         }
     }
 }
@@ -87,6 +91,7 @@ impl Settings {
             text.push_str(&format!("last_dir={}\n", self.last_dir));
         }
         text.push_str(&format!("boot_enabled={}\n", self.boot_enabled));
+        text.push_str(&format!("system={}\n", self.system.as_str()));
         for (name, path) in [
             ("boot_dmg", &self.boot_dmg),
             ("boot_gbc", &self.boot_gbc),
@@ -135,6 +140,8 @@ impl Settings {
                 recent_lines.push(value.to_string());
             } else if name == "last_dir" {
                 settings.last_dir = value.to_string();
+            } else if name == "system" {
+                settings.system = SystemChoice::from_str(value);
             } else if name == "boot_enabled" {
                 if let Ok(enabled) = value.parse::<bool>() {
                     settings.boot_enabled = enabled;
@@ -352,6 +359,35 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(Settings::from_text(&custom.to_text()), custom);
+    }
+
+    #[test]
+    fn e15_23_system_round_trip_in_settings() {
+        for system in [
+            SystemChoice::Auto,
+            SystemChoice::Dmg,
+            SystemChoice::Cgb,
+            SystemChoice::Sgb,
+        ] {
+            let custom = Settings {
+                system,
+                ..Settings::default()
+            };
+            assert_eq!(Settings::from_text(&custom.to_text()), custom);
+        }
+    }
+
+    #[test]
+    fn e15_23_system_defaults_to_auto() {
+        assert_eq!(Settings::default().system, SystemChoice::Auto);
+        assert_eq!(
+            Settings::from_text("volume=40\n").system,
+            SystemChoice::Auto
+        );
+        assert_eq!(
+            Settings::from_text("system=zzz\n").system,
+            SystemChoice::Auto
+        );
     }
 
     #[test]

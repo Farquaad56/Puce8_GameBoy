@@ -22,6 +22,15 @@ pub fn expected_size(kind: BootKind) -> usize {
     }
 }
 
+/// Boot ROM kind that goes with a console model (E15_23).
+pub fn kind_for(model: puce8gb_core::Model) -> BootKind {
+    match model {
+        puce8gb_core::Model::Dmg => BootKind::Dmg,
+        puce8gb_core::Model::Cgb => BootKind::Gbc,
+        puce8gb_core::Model::Sgb => BootKind::Sgb,
+    }
+}
+
 /// Checks the size of a boot ROM image.
 #[allow(dead_code)] // used by E14_07
 pub fn validate(kind: BootKind, bytes: &[u8]) -> Result<(), String> {

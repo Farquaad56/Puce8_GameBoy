@@ -7,7 +7,7 @@ use crate::slots::{read_slot, slot_path, state_error_message, write_slot};
 use crate::viewer::{capture, Snapshot};
 use crate::volume::gain_for_percent;
 use puce8gb_core::machine::{AUDIO_RING_SAMPLES, FRAME_DOTS};
-use puce8gb_core::{Dmg, Input, LoadError, Machine};
+use puce8gb_core::{Dmg, Input, LoadError, Machine, MachineConfig, Model};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TryRecvError};
@@ -26,6 +26,7 @@ pub enum Command {
     Load {
         rom: Vec<u8>,
         boot: Option<Vec<u8>>,
+        model: Model,
     },
     SavePath(Option<PathBuf>),
     Reset,
@@ -139,17 +140,30 @@ impl Sound {
     }
 }
 
-/// Builds the machine for a Load command (E14_07): from the boot ROM when one is given. A boot
-/// ROM rejected by the core falls back to the plain machine; the bool is true in that case.
-fn build_machine(rom: &[u8], boot: Option<&[u8]>) -> Result<(Dmg, bool), LoadError> {
+/// Builds the machine for a Load command (E14_07, E15_23): from the boot ROM when one is given.
+/// A boot ROM rejected by the core falls back to the plain machine; the bool is true then.
+fn build_machine(rom: &[u8], boot: Option<&[u8]>, model: Model) -> Result<(Dmg, bool), LoadError> {
+    let plain = || {
+        Dmg::with_config(
+            rom,
+            MachineConfig {
+                model,
+                boot_rom: None,
+            },
+        )
+    };
     if let Some(boot) = boot {
-        return match Dmg::with_boot_rom(rom, boot) {
+        let cfg = MachineConfig {
+            model,
+            boot_rom: Some(boot.to_vec()),
+        };
+        return match Dmg::with_config(rom, cfg) {
             Ok(dmg) => Ok((dmg, false)),
-            Err(LoadError::BadBootRom) => Dmg::new(rom).map(|dmg| (dmg, true)),
+            Err(LoadError::BadBootRom) => plain().map(|dmg| (dmg, true)),
             Err(err) => Err(err),
         };
     }
-    Dmg::new(rom).map(|dmg| (dmg, false))
+    plain().map(|dmg| (dmg, false))
 }
 
 fn run(
@@ -180,28 +194,30 @@ fn run(
     loop {
         loop {
             match commands.try_recv() {
-                Ok(Command::Load { rom, boot }) => match build_machine(&rom, boot.as_deref()) {
-                    Ok((mut new_dmg, fell_back)) => {
-                        if let Some(old_dmg) = machine.as_ref() {
-                            battery.flush(old_dmg);
+                Ok(Command::Load { rom, boot, model }) => {
+                    match build_machine(&rom, boot.as_deref(), model) {
+                        Ok((mut new_dmg, fell_back)) => {
+                            if let Some(old_dmg) = machine.as_ref() {
+                                battery.flush(old_dmg);
+                            }
+                            battery.attach(&mut new_dmg, save_path.clone());
+                            if let Some(colors) = palette {
+                                new_dmg.set_dmg_palette(colors);
+                            }
+                            machine = Some(new_dmg);
+                            owed = 0;
+                            if fell_back {
+                                let _ = status
+                                    .send(String::from("Boot ROM rejected, started without it"));
+                            } else {
+                                let _ = status.send(format!("ROM loaded - {mode}"));
+                            }
                         }
-                        battery.attach(&mut new_dmg, save_path.clone());
-                        if let Some(colors) = palette {
-                            new_dmg.set_dmg_palette(colors);
-                        }
-                        machine = Some(new_dmg);
-                        owed = 0;
-                        if fell_back {
-                            let _ =
-                                status.send(String::from("Boot ROM rejected, started without it"));
-                        } else {
-                            let _ = status.send(format!("ROM loaded - {mode}"));
+                        Err(err) => {
+                            let _ = status.send(format!("ROM rejected: {err:?}"));
                         }
                     }
-                    Err(err) => {
-                        let _ = status.send(format!("ROM rejected: {err:?}"));
-                    }
-                },
+                }
                 Ok(Command::Reset) => {
                     if let Some(m) = machine.as_mut() {
                         m.reset();
@@ -358,7 +374,7 @@ mod tests {
     #[test]
     fn e14_07_build_machine_without_boot_rom() {
         big_stack(|| {
-            let (dmg, fell_back) = build_machine(&cart(), None).expect("valid ROM");
+            let (dmg, fell_back) = build_machine(&cart(), None, Model::Dmg).expect("valid ROM");
             assert!(!fell_back);
             assert_eq!(dmg.cpu.pc, 0x0100);
         });
@@ -368,7 +384,8 @@ mod tests {
     fn e14_07_build_machine_with_a_valid_boot_rom() {
         big_stack(|| {
             let boot = vec![0u8; 256];
-            let (dmg, fell_back) = build_machine(&cart(), Some(&boot[..])).expect("valid ROM");
+            let (dmg, fell_back) =
+                build_machine(&cart(), Some(&boot[..]), Model::Dmg).expect("valid ROM");
             assert!(!fell_back);
             assert_eq!(dmg.cpu.pc, 0x0000);
         });
@@ -378,7 +395,8 @@ mod tests {
     fn e14_07_rejected_boot_rom_falls_back_to_the_plain_machine() {
         big_stack(|| {
             let boot = [0u8; 10];
-            let (dmg, fell_back) = build_machine(&cart(), Some(&boot[..])).expect("valid ROM");
+            let (dmg, fell_back) =
+                build_machine(&cart(), Some(&boot[..]), Model::Dmg).expect("valid ROM");
             assert!(fell_back);
             assert_eq!(dmg.cpu.pc, 0x0100);
         });
@@ -388,7 +406,18 @@ mod tests {
     fn e14_07_bad_rom_is_still_an_error() {
         big_stack(|| {
             let boot = vec![0u8; 256];
-            assert!(build_machine(&[0u8; 10], Some(&boot[..])).is_err());
+            assert!(build_machine(&[0u8; 10], Some(&boot[..]), Model::Dmg).is_err());
+        });
+    }
+
+    #[test]
+    fn e15_23_build_machine_uses_the_requested_model() {
+        big_stack(|| {
+            let (dmg, fell_back) = build_machine(&cart(), None, Model::Cgb).expect("valid ROM");
+            assert!(!fell_back);
+            assert_eq!(dmg.model(), Model::Cgb);
+            let (dmg, _) = build_machine(&cart(), None, Model::Dmg).expect("valid ROM");
+            assert_eq!(dmg.model(), Model::Dmg);
         });
     }
 }
