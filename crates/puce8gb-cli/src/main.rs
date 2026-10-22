@@ -38,7 +38,7 @@ fn main() -> ExitCode {
                  [--expect-serial TEXT] [--trace N] [--ly-fixed HEX] \
                  [--frames N] [--dump-ppm FILE] [--hash] [--save-state FILE] \
                  [--load-state FILE] [--boot-rom FILE] [--model auto|dmg|cgb] | \
-                 suite [--only NAME] [--baseline FILE] [--manifest FILE]]"
+                 suite [--only NAME] [--baseline FILE] [--manifest FILE] [--cgb]]"
             );
             ExitCode::from(2)
         }

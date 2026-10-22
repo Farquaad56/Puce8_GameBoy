@@ -145,3 +145,4 @@ E04_07: Pan Docs Audio Details does not state the APU power-on/power-off effects
 - E15_03 UNKNOWN - to confirm : source HDMA en Echo RAM, OAM, $FExx, I/O ou HRAM. Source : CGBR L35-L40.
 - E15_03 UNKNOWN - to confirm : format des bits de PCM12 $FF76 et PCM34 $FF77. Source : HWRL L64-L65.
 - E15_08 UNKNOWN - to confirm : valeur de lecture du bit 6 de BCPS/OCPS (1 utilise), contenu initial de la palette BG sans boot ROM ($FF utilise) et de la palette OBJ ($FF sauf octet 0 = $00 utilise). Source : Palettes.md L38 ; L92.
+- E15_22 CGB suite: the max-cycles of every CGB entry is 100000000, the real need is UNKNOWN - to confirm

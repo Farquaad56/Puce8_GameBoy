@@ -42,7 +42,7 @@ fn entry_args(entry: &Entry) -> RunArgs {
         save_state: None,
         load_state: None,
         boot_rom: None,
-        model: crate::run_args::ModelChoice::Dmg, // the manifest baseline is a DMG baseline (E15_20 regression fix)
+        model: entry.model, // from the manifest model column, default dmg (E15_22)
         quiet: true,
     }
 }
@@ -73,7 +73,7 @@ pub fn run_entry(entry: &Entry, rom: &[u8]) -> EntryResult {
             Outcome::FramesDone => EntryResult::Fail("unexpected outcome".to_string()),
         },
         Kind::Mooneye => {
-            let mut dmg = match run::new_machine(rom, None, crate::run_args::ModelChoice::Dmg) {
+            let mut dmg = match run::new_machine(rom, None, entry.model) {
                 Ok(dmg) => dmg,
                 Err(_) => return EntryResult::Fail("cannot load ROM".to_string()),
             };
@@ -229,6 +229,8 @@ pub fn execute(args: &[String]) -> std::process::ExitCode {
             return ExitCode::from(64);
         }
     };
+    // Model filter (E15_22): the default run keeps the Dmg entries, `--cgb` runs the Cgb ones.
+    let entries = crate::suite::entries_for_model(entries, parsed.cgb);
     let baseline = match &parsed.baseline {
         Some(path) => match fs::read_to_string(path) {
             Ok(text) => match parse_baseline(&text) {
@@ -274,6 +276,7 @@ mod tests {
     fn entry(kind: Kind, cycles: u64, param: &str) -> Entry {
         Entry {
             name: "t".to_string(),
+            model: crate::run_args::ModelChoice::Dmg,
             dir_pattern: "d/".to_string(),
             prefix: "p-".to_string(),
             kind,
@@ -395,6 +398,7 @@ mod tests {
 
         let found = Entry {
             name: "found".to_string(),
+            model: crate::run_args::ModelChoice::Dmg,
             dir_pattern: "d/".to_string(),
             prefix: "p-".to_string(),
             kind: Kind::Mooneye,
@@ -403,6 +407,7 @@ mod tests {
         };
         let missing = Entry {
             name: "missing".to_string(),
+            model: crate::run_args::ModelChoice::Dmg,
             dir_pattern: "zz/".to_string(),
             prefix: "q-".to_string(),
             kind: Kind::Mooneye,

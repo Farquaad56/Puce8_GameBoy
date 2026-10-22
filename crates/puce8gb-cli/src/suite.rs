@@ -2,6 +2,8 @@
 //! comparison, mooneye signature detection and ROM matching. No file or machine access
 //! here; suite_cmd wires these into the CLI.
 
+use crate::run_args::ModelChoice;
+
 /// How an entry's result is judged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kind {
@@ -19,6 +21,8 @@ pub struct Entry {
     pub kind: Kind,
     pub max_cycles: u64,
     pub param: String,
+    /// Console model of the entry: the optional 7th manifest column `dmg` or `cgb`; default dmg (E15_22).
+    pub model: ModelChoice,
 }
 
 /// Parse a manifest: one entry per line as `name|dir-pattern|file-prefix|kind|max-cycles|param`.
@@ -32,9 +36,9 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Entry>, String> {
             continue;
         }
         let parts: Vec<&str> = trimmed.split('|').map(str::trim).collect();
-        if parts.len() != 6 {
+        if parts.len() != 6 && parts.len() != 7 {
             return Err(format!(
-                "line {}: expected 6 fields, found {}",
+                "line {}: expected 6 or 7 fields, found {}",
                 n,
                 parts.len()
             ));
@@ -51,6 +55,12 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Entry>, String> {
         let max_cycles = parts[4]
             .parse::<u64>()
             .map_err(|_| format!("line {}: max-cycles is not a u64: '{}'", n, parts[4]))?;
+        let model = match parts.get(6).map(|m| m.to_ascii_lowercase()) {
+            None => ModelChoice::Dmg,
+            Some(m) if m.is_empty() || m == "dmg" => ModelChoice::Dmg,
+            Some(m) if m == "cgb" => ModelChoice::Cgb,
+            Some(m) => return Err(format!("line {}: unknown model '{}'", n, m)),
+        };
         entries.push(Entry {
             name: parts[0].to_string(),
             dir_pattern: parts[1].to_string(),
@@ -58,9 +68,18 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Entry>, String> {
             kind,
             max_cycles,
             param: parts[5].to_string(),
+            model,
         });
     }
     Ok(entries)
+}
+
+/// Keeps the entries of one model (E15_22): the Cgb ones when `cgb` is true, the Dmg ones otherwise.
+pub fn entries_for_model(entries: Vec<Entry>, cgb: bool) -> Vec<Entry> {
+    entries
+        .into_iter()
+        .filter(|e| (e.model == ModelChoice::Cgb) == cgb)
+        .collect()
 }
 
 /// Parse a baseline file: the first non-blank line that does not start with '#', as usize.
@@ -109,6 +128,8 @@ pub struct SuiteArgs {
     pub only: Option<String>,
     pub baseline: Option<String>,
     pub manifest: String,
+    /// `--cgb`: run the manifest entries of the Cgb model instead of the Dmg ones (E15_22).
+    pub cgb: bool,
 }
 
 /// Parse `suite` arguments: `--only NAME`, `--baseline FILE`, `--manifest FILE`. The
@@ -118,6 +139,7 @@ pub fn parse_suite_args(args: &[String]) -> Result<SuiteArgs, String> {
     let mut only = None;
     let mut baseline = None;
     let mut manifest = "docs/annexes/test_manifest.txt".to_string();
+    let mut cgb = false;
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -128,6 +150,10 @@ pub fn parse_suite_args(args: &[String]) -> Result<SuiteArgs, String> {
             "--only" => only = Some(value_after(args, &mut i, "--only")?),
             "--baseline" => baseline = Some(value_after(args, &mut i, "--baseline")?),
             "--manifest" => manifest = value_after(args, &mut i, "--manifest")?,
+            "--cgb" => {
+                cgb = true;
+                i += 1;
+            }
             other => return Err(format!("unknown flag: {other}")),
         }
     }
@@ -135,6 +161,7 @@ pub fn parse_suite_args(args: &[String]) -> Result<SuiteArgs, String> {
         only,
         baseline,
         manifest,
+        cgb,
     })
 }
 
@@ -169,6 +196,7 @@ mod tests {
                 kind: Kind::Serial,
                 max_cycles: 100_000_000,
                 param: "Passed".to_string(),
+                model: ModelChoice::Dmg,
             }
         );
     }
@@ -196,6 +224,53 @@ mod tests {
         let err =
             parse_manifest("A|d/|p-|serial|abc|x").expect_err("a non-u64 max-cycles is rejected");
         assert!(err.contains("max-cycles"));
+    }
+
+    #[test]
+    fn e15_22_manifest_line_without_model_column_is_dmg() {
+        let entries = parse_manifest("A|d/|p-|serial|5|x").expect("a 6-field line parses");
+        assert_eq!(entries[0].model, ModelChoice::Dmg);
+    }
+
+    #[test]
+    fn e15_22_manifest_model_column_selects_the_model() {
+        let text = "A|d/|p-|serial|5|x|cgb\nB|d/|q-|serial|5|x|dmg\nC|d/|r-|serial|5|x|CGB\n";
+        let entries = parse_manifest(text).expect("7-field lines parse");
+        assert_eq!(entries[0].model, ModelChoice::Cgb);
+        assert_eq!(entries[1].model, ModelChoice::Dmg);
+        assert_eq!(entries[2].model, ModelChoice::Cgb);
+    }
+
+    #[test]
+    fn e15_22_unknown_model_name_is_an_error() {
+        let err =
+            parse_manifest("A|d/|p-|serial|5|x|gbc").expect_err("an unknown model is rejected");
+        assert!(err.contains("line 1"));
+        assert!(err.contains("model"));
+        let err =
+            parse_manifest("A|d/|p-|serial|5|x|cgb|extra").expect_err("8 fields are rejected");
+        assert!(err.contains("fields"));
+    }
+
+    #[test]
+    fn e15_22_suite_args_cgb_flag() {
+        assert!(!parse_suite_args(&[]).expect("defaults").cgb);
+        let args = vec!["--cgb".to_string(), "--only".to_string(), "x".to_string()];
+        let parsed = parse_suite_args(&args).expect("flags parse");
+        assert!(parsed.cgb);
+        assert_eq!(parsed.only.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn e15_22_model_filter_keeps_only_the_requested_model() {
+        let text = "A|d/|p-|serial|5|x\nB|d/|q-|serial|5|x|cgb\n";
+        let entries = parse_manifest(text).expect("parses");
+        let dmg = entries_for_model(entries.clone(), false);
+        let cgb = entries_for_model(entries, true);
+        assert_eq!(dmg.len(), 1);
+        assert_eq!(dmg[0].name, "A");
+        assert_eq!(cgb.len(), 1);
+        assert_eq!(cgb[0].name, "B");
     }
 
     #[test]
@@ -254,6 +329,7 @@ mod tests {
                 only: None,
                 baseline: None,
                 manifest: "docs/annexes/test_manifest.txt".into(),
+                cgb: false,
             })
         );
     }
@@ -274,6 +350,7 @@ mod tests {
                 only: Some("dmg_sound 07".into()),
                 baseline: Some("b.txt".into()),
                 manifest: "m.txt".into(),
+                cgb: false,
             })
         );
     }
