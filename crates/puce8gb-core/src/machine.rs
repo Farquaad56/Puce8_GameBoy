@@ -435,6 +435,10 @@ impl Machine for Dmg {
                 div
             });
             self.bus.set_apu_status(self.audio.apu.status());
+            if self.bus.cgb {
+                let (pcm12, pcm34) = self.audio.pcm(); // CGB $FF76/$FF77: latest channel outputs (Pan Docs layout)
+                self.bus.set_pcm(pcm12, pcm34);
+            }
             self.bus.wave_access = self.audio.apu.wave.access(); // wave RAM access rule (E04_07)
             let (nr50, nr51) = self.bus.audio_pan();
             self.audio.mix_tick(nr50, nr51);
@@ -2602,5 +2606,41 @@ mod tests {
         if !bad.is_empty() {
             panic!("{}", bad);
         }
+    }
+
+    #[test]
+    fn battery_pcm_cgb_channel_1_duty_50_reads_zero_and_fifteen() {
+        let rom = vec![0u8; 32 * 1024];
+        let mut cgb = Dmg::with_config(
+            &rom,
+            MachineConfig {
+                model: Model::Cgb,
+                boot_rom: None,
+            },
+        )
+        .expect("valid");
+        for (addr, val) in [
+            (0xFF26u16, 0x80),
+            (0xFF11, 0x80),
+            (0xFF12, 0xF0),
+            (0xFF13, 0x00),
+            (0xFF14, 0x87),
+        ] {
+            cgb.bus.write(addr, val); // NR52 on; duty 50% + volume 15; frequency $0700; trigger
+            for _ in 0..8 {
+                cgb.tick(); // drain the deferred APU write before the next one
+            }
+        }
+        let mut seen = [false; 16];
+        for _ in 0..(200_000 / 16) {
+            for _ in 0..16 {
+                cgb.tick();
+            }
+            let v = cgb.bus.read(0xFF76) & 0x0F;
+            seen[v as usize] = true;
+            assert_eq!(cgb.bus.read(0xFF77), 0x00, "PCM34 must stay 0");
+        }
+        assert!(seen[0], "expected a low sample (duty off) in PCM12");
+        assert!(seen[15], "expected volume 15 (duty on) in PCM12");
     }
 }

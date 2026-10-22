@@ -95,6 +95,19 @@ impl Audio {
         self.push_frame(left, right);
     }
 
+    /// PCM12 and PCM34 values (CGB registers $FF76/$FF77): low nibble = lower channel number.
+    /// A channel that is disabled or whose DAC is off reads 0.
+    pub fn pcm(&self) -> (u8, u8) {
+        let apu = &self.apu;
+        let level =
+            |out: u8, dac_on: bool, enabled: bool| if dac_on && enabled { out & 0x0F } else { 0 };
+        let c1 = level(apu.pulse1.output(), apu.pulse1.dac_on, apu.pulse1.enabled);
+        let c2 = level(apu.pulse2.output(), apu.pulse2.dac_on, apu.pulse2.enabled);
+        let c3 = level(apu.wave.output(), apu.wave.dac_on, apu.wave.enabled);
+        let c4 = level(apu.noise.output(), apu.noise.dac_on, apu.noise.enabled);
+        (c1 | (c2 << 4), c3 | (c4 << 4))
+    }
+
     /// Drain up to `into.len()` interleaved samples from the ring (decision A_04).
     /// Only whole L/R frames are returned (the count is always even).
     pub fn drain(&mut self, into: &mut [i16]) -> usize {
@@ -195,5 +208,11 @@ mod tests {
         assert_eq!(out[3], -1);
         assert_eq!(out[398], 199);
         assert_eq!(out[399], -199);
+    }
+
+    #[test]
+    fn battery_pcm_default_audio_reads_zero() {
+        let a = Audio::default();
+        assert_eq!(a.pcm(), (0, 0));
     }
 }

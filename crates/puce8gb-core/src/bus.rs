@@ -188,6 +188,8 @@ pub struct Bus {
     ff73: u8,
     ff74: u8,
     ff75: u8,
+    /// Latest PCM12/PCM34 values pushed by the machine (CGB, $FF76/$FF77); recomputed every M-cycle.
+    pcm: (u8, u8),
 }
 
 impl Bus {
@@ -249,7 +251,8 @@ impl Bus {
             ff73: 0,
             ff74: 0,
             ff75: 0,
-            svbk: 0, // SVBK bits 0-2 (E15_06)
+            svbk: 0,     // SVBK bits 0-2 (E15_06)
+            pcm: (0, 0), // no channel output pushed yet; the machine recomputes it every M-cycle
         }
     }
 
@@ -488,7 +491,7 @@ impl Bus {
     /// Read of RP and of the undocumented Cgb registers $FF72-$FF77 (E15_18, note 11c). RP: bits 5-2
     /// and bit 1 read 1 (bit 1 = no signal received, no infrared link is emulated), bits 7-6 and 0 as
     /// written. $FF74 is locked to $FF in DMG compatibility mode. $FF75: only bits 6-4 are stored, the
-    /// rest reads 1. PCM12 ($FF76) and PCM34 ($FF77) read 0: their bit format is UNKNOWN - to confirm.
+    /// rest reads 1. PCM12/PCM34 read the latest channel outputs pushed by the machine (set_pcm; Pan Docs layout, low nibble = lower channel). Value with a disabled channel: 0, UNKNOWN - to confirm beyond same-suite.
     fn cgb_misc_read(&self, addr: u16) -> u8 {
         match addr {
             0xFF56 => 0x3E | (self.rp & 0xC1),
@@ -502,6 +505,8 @@ impl Bus {
                 }
             }
             0xFF75 => 0x8F | (self.ff75 & 0x70),
+            0xFF76 => self.pcm.0,
+            0xFF77 => self.pcm.1,
             _ => 0x00,
         }
     }
@@ -1013,6 +1018,11 @@ impl Bus {
     /// Raw NR50 (master volume) and NR51 (panning) for the mixer. Both read 0 while the APU is off.
     pub fn audio_pan(&self) -> (u8, u8) {
         (self.io[0x24], self.io[0x25])
+    }
+
+    /// Latest PCM12/PCM34 values pushed by the machine (CGB, $FF76/$FF77).
+    pub fn set_pcm(&mut self, pcm12: u8, pcm34: u8) {
+        self.pcm = (pcm12, pcm34);
     }
 
     /// One M-cycle of the OAM DMA (E03_06 spec): copy source byte `dma_index` into OAM, not blocked by
@@ -2308,5 +2318,18 @@ mod tests {
         bus.dma_step(); // M-cycle 2: the transfer is now running (FIX_02)
         assert_eq!(bus.read(0xC000), 0xFF); // WRAM is blocked: same external bus as the DMA source (E03_15 spec)
         assert!(bus.dma_active());
+    }
+
+    #[test]
+    fn battery_pcm_cgb_bus_reads_and_peeks_the_pushed_values() {
+        let mut bus = Bus::new(vec![0u8; 32 * 1024]);
+        bus.cgb = true;
+        assert_eq!(bus.read(0xFF76), 0x00); // power-up value before the machine pushes anything
+        assert_eq!(bus.read(0xFF77), 0x00);
+        bus.set_pcm(0x5A, 0xC3);
+        assert_eq!(bus.read(0xFF76), 0x5A);
+        assert_eq!(bus.read(0xFF77), 0xC3);
+        assert_eq!(bus.peek(0xFF76), 0x5A);
+        assert_eq!(bus.peek(0xFF77), 0xC3);
     }
 }
