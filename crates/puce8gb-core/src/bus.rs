@@ -475,7 +475,7 @@ impl Bus {
     /// of HDMA1-2 (& $FFF0) to VRAM at the destination of HDMA3-4 (& $1FF0), in the bank selected by
     /// VBK, ignoring the PPU access blocking. The CPU is suspended 8 M-cycles per block (normal
     /// speed; double speed: E15_17). A destination that runs past $9FFF wraps inside VRAM, the real
-    /// behavior is UNKNOWN - to confirm (not documented).
+    /// behavior is UNKNOWN - to confirm (not documented). HDMA1-4 are advanced to the end of the copied range (battery C, same-suite gbc_dma_cont).
     fn hdma_general(&mut self, blocks: u16) {
         let src = ((u16::from(self.hdma_regs[0]) << 8) | u16::from(self.hdma_regs[1])) & 0xFFF0;
         let dst = ((u16::from(self.hdma_regs[2]) << 8) | u16::from(self.hdma_regs[3])) & 0x1FF0;
@@ -483,6 +483,11 @@ impl Bus {
             let byte = self.peek(src.wrapping_add(i));
             self.vram_cpu_write(0x8000 | ((dst + i) & 0x1FFF), byte);
         }
+        let next_src = src.wrapping_add(blocks * 16);
+        let next_dst = (dst + blocks * 16) & 0x1FF0;
+        let [src_hi, src_lo] = next_src.to_be_bytes();
+        let [dst_hi, dst_lo] = next_dst.to_be_bytes();
+        self.hdma_regs = [src_hi, src_lo, dst_hi, dst_lo]; // the pointers advance: a later transfer continues from here (battery C)
         self.hdma_stall = self
             .hdma_stall
             .saturating_add(blocks * if self.double_speed { 16 } else { 8 }); // 16 M-cycles per block in double speed (E15_17, note 11c)
@@ -582,7 +587,7 @@ impl Bus {
     /// Called once per dot with "the LCD is on and the PPU is in mode 0" (E15_15): on the rising edge
     /// of HBlank, one block of an armed HBlank transfer is copied and the CPU is suspended 8 M-cycles
     /// (normal speed; double speed: E15_17). VBlank (mode 1) and an LCD that is off never copy.
-    /// A destination that runs past $9FFF wraps inside VRAM, UNKNOWN - to confirm (not documented).
+    /// A destination that runs past $9FFF wraps inside VRAM, UNKNOWN - to confirm (not documented). HDMA1-4 are advanced to the end of the copied range (battery C, same-suite gbc_dma_cont).
     pub(crate) fn hdma_hblank_tick(&mut self, in_hblank: bool) {
         let edge = in_hblank && !self.hdma_in_hblank;
         self.hdma_in_hblank = in_hblank;
@@ -595,6 +600,9 @@ impl Bus {
         }
         self.hdma_src = self.hdma_src.wrapping_add(16);
         self.hdma_dst = (self.hdma_dst + 16) & 0x1FF0;
+        let [src_hi, src_lo] = self.hdma_src.to_be_bytes();
+        let [dst_hi, dst_lo] = self.hdma_dst.to_be_bytes();
+        self.hdma_regs = [src_hi, src_lo, dst_hi, dst_lo]; // same continuation rule (battery C)
         self.hdma_stall = self
             .hdma_stall
             .saturating_add(if self.double_speed { 16 } else { 8 }); // E15_17

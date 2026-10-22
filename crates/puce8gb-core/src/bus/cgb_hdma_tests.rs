@@ -85,3 +85,65 @@ fn e15_14_dmg_model_ignores_the_registers() {
     assert_eq!(bus.read(0xFF55), 0xFF);
     assert!(!bus.hdma_stalled());
 }
+
+#[test]
+fn battery_hdma_general_transfers_chain_without_rewriting_registers() {
+    let mut bus = cgb_bus();
+    for i in 0..64u16 {
+        bus.write(0xC000 + i, (i as u8) + 1); // $C000-$C03F: byte i is i + 1
+    }
+    bus.write(0xFF51, 0xC0);
+    bus.write(0xFF52, 0x00);
+    bus.write(0xFF53, 0x00);
+    bus.write(0xFF54, 0x00);
+    bus.write(0xFF55, 0x01); // general transfer of 2 blocks: $C000-$C01F -> $8000-$801F
+    bus.write(0xFF55, 0x00); // 1 block from the advanced pointers: $C020-$C02F -> $8020-$802F
+    for i in 0..32u16 {
+        assert_eq!(bus.vram_bank(0, 0x8000 + i), (i as u8) + 1); // the first 32 bytes
+    }
+    for i in 0..16u16 {
+        assert_eq!(bus.vram_bank(0, 0x8020 + i), (i as u8) + 0x21); // bytes $C020-$C02F
+    }
+}
+
+#[test]
+fn battery_hdma_hblank_blocks_advance_the_pointers() {
+    let mut bus = cgb_bus();
+    for i in 0..64u16 {
+        bus.write(0xC000 + i, (i as u8) + 1); // $C000-$C03F: byte i is i + 1
+    }
+    bus.write(0xFF51, 0xC0);
+    bus.write(0xFF52, 0x00);
+    bus.write(0xFF53, 0x00);
+    bus.write(0xFF54, 0x00);
+    bus.write(0xFF55, 0x82); // arm an HBlank transfer of 3 blocks: $C000 -> $8000
+    bus.hdma_hblank_tick(false);
+    bus.hdma_hblank_tick(true); // one block copied: $C000-$C00F -> $8000-$800F, pointers advance to $C010/$8010
+    assert_eq!(bus.read(0xFF55), 0x01); // still active, 2 blocks left (bit 7 = 0 while active)
+    bus.write(0xFF55, 0x00); // cancel the armed transfer
+    bus.write(0xFF55, 0x00); // 1 block from the advanced pointers: $C010-$C01F -> $8010-$801F
+    for i in 0..16u16 {
+        assert_eq!(bus.vram_bank(0, 0x8010 + i), (i as u8) + 0x11); // bytes $C010-$C01F
+    }
+}
+
+#[test]
+fn battery_hdma_destination_wraps_inside_vram() {
+    let mut bus = cgb_bus();
+    for i in 0..32u16 {
+        bus.write(0xC000 + i, (i as u8) + 1); // $C000-$C01F: byte i is i + 1
+    }
+    bus.write(0xFF51, 0xC0);
+    bus.write(0xFF52, 0x00);
+    bus.write(0xFF53, 0x1F); // destination $9FF0 (masked with $1FF0)
+    bus.write(0xFF54, 0xF0);
+    bus.write(0xFF55, 0x00); // general transfer of 1 block: $C000-$C00F -> $9FF0-$9FFF
+    for i in 0..16u16 {
+        assert_eq!(bus.vram_bank(0, 0x9FF0 + i), (i as u8) + 1);
+    }
+    bus.write(0xFF55, 0x00); // second block from the advanced pointers: $C010-$C01F -> wraps to $8000-$800F
+    for i in 0..16u16 {
+        // UNKNOWN - to confirm (hardware behaviour past $9FFF is not documented)
+        assert_eq!(bus.vram_bank(0, 0x8000 + i), (i as u8) + 0x11); // bytes $C010-$C01F
+    }
+}
